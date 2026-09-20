@@ -1,0 +1,6 @@
+FROM node:22.22-alpine
+RUN npm install -g firecrawl-mcp@3.24.0 && npm cache clean --force
+USER node
+WORKDIR /home/node
+ENV HTTP_STREAMABLE_SERVER=true HOST=0.0.0.0 PORT=3000
+CMD ["firecrawl-mcp"]
