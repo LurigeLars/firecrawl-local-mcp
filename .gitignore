@@ -1,0 +1,18 @@
+# Upstream Firecrawl checkout (pinned tag, see README) - re-clone instead of committing
+/firecrawl/
+
+# Secrets and machine-local settings - never commit
+.env
+.env.*
+!.env.example
+secrets.env
+public/gateway.env
+.cloudflared/
+
+# Runtime / scratch
+node_modules/
+*.log
+.firecrawl/
+
+# Local ChatGPT developer-app binding
+marketplace/chatgpt-overlay/.app.json
