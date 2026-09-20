@@ -22,4 +22,4 @@ Some files under `marketplace/plugins/firecrawl-mcp/skills/` are adapted from Fi
 
 ## Local wrapper code
 
-The remaining deployment, gateway, proxy, test, and configuration code is local wrapper code. Publication of this repository does not by itself grant an additional license to that original code unless a file explicitly says otherwise.
+The remaining deployment, gateway, proxy, test, and configuration code is local wrapper code licensed under the repository's root MIT `LICENSE`, unless a file explicitly states otherwise. Third-party components and adapted material remain subject to their upstream licenses described above.
