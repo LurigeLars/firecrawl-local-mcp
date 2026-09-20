@@ -1,0 +1,31 @@
+{
+  "name": "firecrawl-mcp",
+  "version": "0.4.3",
+  "description": "Web search, scraping, crawling, and structured extraction through a self-hosted Firecrawl instance, with research, SEO, market, company, competitor, shopping, knowledge-base, and design-extraction workflows.",
+  "author": {
+    "name": "firecrawl-local contributors"
+  },
+  "license": "ISC",
+  "keywords": [
+    "firecrawl",
+    "web-scraping",
+    "search",
+    "crawl",
+    "research",
+    "self-hosted"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Firecrawl MCP",
+    "shortDescription": "Self-hosted Firecrawl: search, scrape, crawl, extract",
+    "longDescription": "Uses a self-hosted Firecrawl instance directly on this PC (no credits or usage cap) for web search, page scraping, site mapping, crawling, and JSON extraction, plus workflow skills for deep research, SEO audits, market and company research, competitor snapshots, product comparisons, knowledge bases, and design-system extraction.",
+    "developerName": "firecrawl-local contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "brandColor": "#FF6A1A",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.svg"
+  }
+}

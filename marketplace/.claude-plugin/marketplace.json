@@ -1,0 +1,13 @@
+{
+  "name": "firecrawl-local",
+  "owner": {
+    "name": "firecrawl-local contributors"
+  },
+  "plugins": [
+    {
+      "name": "firecrawl-mcp",
+      "source": "./plugins/firecrawl-mcp",
+      "description": "Skills for a self-hosted Firecrawl instance."
+    }
+  ]
+}

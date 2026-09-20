@@ -1,0 +1,20 @@
+{
+  "name": "firecrawl-local",
+  "interface": {
+    "displayName": "Firecrawl Local"
+  },
+  "plugins": [
+    {
+      "name": "firecrawl-mcp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/firecrawl-mcp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
