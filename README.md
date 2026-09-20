@@ -7,7 +7,7 @@ Upstream projects:
 - Firecrawl MCP server: https://github.com/firecrawl/firecrawl-mcp-server — MIT
 - Firecrawl workflow skills: adapted portions are ISC-licensed; see `marketplace/plugins/firecrawl-mcp/THIRD_PARTY_NOTICES.md`.
 
-See `NOTICE.md` and `LICENSES/` for attribution and third-party license texts. No additional license is granted here for original wrapper code unless a file states otherwise.
+Original wrapper code in this repository is licensed under the MIT License; see `LICENSE`. Third-party components and adapted material retain their upstream licenses; see `NOTICE.md` and `LICENSES/`.
 
 > **Public-snapshot note:** hostnames, identities, app IDs, tunnel IDs, local paths, and LAN details are examples/placeholders. Real deployment secrets and machine-specific configuration are intentionally excluded.
 
