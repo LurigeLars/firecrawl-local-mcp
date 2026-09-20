@@ -1,0 +1,42 @@
+# SearXNG for the self-hosted Firecrawl (search backend). Only reachable on the internal Docker network.
+# The secret key comes from SEARXNG_SECRET (secrets.env), never from this file.
+use_default_settings: true
+
+general:
+  instance_name: "firecrawl-search"
+
+server:
+  secret_key: "set-by-SEARXNG_SECRET"
+  limiter: false          # internal service, single user; the limiter needs Valkey and would throttle Firecrawl
+  public_instance: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+  formats:
+    - html
+    - json                # Firecrawl calls /search?format=json
+
+outgoing:
+  request_timeout: 4.0
+  max_request_timeout: 8.0
+
+# Spread web searches over several engines so one rate-limited engine does not empty the results.
+# Tested 2026-09-16 from this home IP: Google (CAPTCHA, SearXNG suspends it for an hour), Mojeek (JavaScript
+# challenge page, 0 results), DuckDuckGo and Qwant (CAPTCHA) and Brave (rate limit) are unreliable. Bing and
+# Startpage (Google results via a proxy) answered 10/10. Firecrawl still falls back to DuckDuckGo on zero results.
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: mojeek         # JavaScript challenge for this IP
+    disabled: true
+  - name: yahoo          # parsing errors with this SearXNG version
+    disabled: true
+  - name: duckduckgo
+    disabled: true
