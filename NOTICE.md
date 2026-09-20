@@ -7,7 +7,7 @@ This repository is a deployment/integration wrapper around upstream Firecrawl. I
 The runtime source checkout is obtained separately from:
 https://github.com/firecrawl/firecrawl
 
-Firecrawl declares the AGPL-3.0 license. A copy of the upstream license is included at `LICENSES/FIRECRAWL-AGPL-3.0.txt`. The upstream Firecrawl source tree is not vendored in this repository.
+Firecrawl declares the AGPL-3.0 license. A license reference for the upstream AGPL-3.0 terms is included at `LICENSES/FIRECRAWL-AGPL-3.0.txt`. The upstream Firecrawl source tree is not vendored in this repository.
 
 ## Firecrawl MCP server
 

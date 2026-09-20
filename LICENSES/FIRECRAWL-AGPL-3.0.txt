@@ -1,0 +1,7 @@
+Firecrawl core license: GNU Affero General Public License v3.0 (AGPL-3.0)
+
+Upstream project: https://github.com/firecrawl/firecrawl
+Upstream license file: https://github.com/firecrawl/firecrawl/blob/main/LICENSE
+Official AGPL-3.0 text: https://www.gnu.org/licenses/agpl-3.0.txt
+
+The Firecrawl source tree is not vendored in this repository. This file records the upstream license and canonical locations for the complete license text.
