@@ -11,7 +11,7 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 
 > **Public-snapshot note:** hostnames, identities, app IDs, tunnel IDs, local paths, and LAN details are examples/placeholders. Real deployment secrets and machine-specific configuration are intentionally excluded.
 
-- `firecrawl/` — untouched upstream checkout, pinned to tag `v2.11.343` (upgraded from v2.11.0 on 2026-09-16), images built locally.
+- `firecrawl/` — untouched upstream checkout, pinned to tag `v2.11.376` (verified locally on 2026-09-21; upstream commit `95c8ab18f524d1aa813cca2a6dc8bd39191504ec`), images built locally.
 - `compose.local.yaml` — local overrides (FoundationDB off, auto-restart).
 - `.env` — settings. API bound to `127.0.0.1:3002` only; it has **no authentication**, never expose it.
 - `fc.ps1` — `up` / `down` / `status` / `logs` / `test`.
@@ -20,7 +20,7 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 
 This repo holds only the local additions. Secrets and machine-specific files are gitignored.
 
-1. `git clone --depth 1 --branch v2.11.343 https://github.com/firecrawl/firecrawl.git firecrawl`
+1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
 2. Copy `.env.example` → `.env`, `secrets.env.example` → `secrets.env`, `public/gateway.env.example` → `public/gateway.env`,
    and fill in the placeholders (random values for the secrets; Cloudflare Access values from the dashboard).
 3. Cloudflare Tunnel: `cloudflared tunnel login`, `cloudflared tunnel create firecrawl`, then copy
@@ -111,7 +111,7 @@ Engine health: `docker exec firecrawl-api-1 node -e "fetch('http://searxng:8080/
 provider, `OPENAI_BASE_URL=http://llm-proxy:11435/v1` with a dummy `OPENAI_API_KEY`.
 
 Why the proxy: Firecrawl's scrape JSON extraction sends the whole page (it assumes a 128k-token model). Ollama then
-keeps only the last `num_ctx/2` tokens, silently dropping the instructions and the top of the page (infoboxes, intros),
+keeps only `num_ctx/2` tokens, silently dropping the instructions and the top of the page (infoboxes, intros),
 which produced confident but wrong answers. The proxy cuts the page from the end to `LLM_MAX_INPUT_TOKENS` (default
 7000, ~3 chars/token) so the head always survives. Facts deep inside very long pages can therefore be missed.
 
