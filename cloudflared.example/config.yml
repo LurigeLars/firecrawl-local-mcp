@@ -1,0 +1,8 @@
+tunnel: <TUNNEL-ID>
+credentials-file: /etc/cloudflared/<TUNNEL-ID>.json
+no-autoupdate: true
+
+ingress:
+  - hostname: firecrawl.example.com
+    service: http://gateway:8080
+  - service: http_status:404

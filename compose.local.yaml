@@ -1,0 +1,74 @@
+# Local overrides layered on top of firecrawl/docker-compose.yaml (upstream stays untouched).
+services:
+  # FoundationDB is only needed with NUQ_BACKEND=fdb; keep it off by default.
+  foundationdb:
+    profiles: ["fdb"]
+  foundationdb-init:
+    profiles: ["fdb"]
+  api:
+    restart: unless-stopped
+  playwright-service:
+    restart: unless-stopped
+    # Taller browser viewport so virtualized pages/lists render all rows.
+    # Upstream hard-codes 1280x800; patch the compiled file at start-up (warns if upstream changed the line).
+    environment:
+      VIEWPORT_HEIGHT: ${PLAYWRIGHT_VIEWPORT_HEIGHT:-4000}
+    command:
+      - sh
+      - -c
+      - >-
+        sed -i 's/const viewport = { width: 1280, height: 800 };/const viewport = { width: 1280, height: Number(process.env.VIEWPORT_HEIGHT || 800) };/' dist/api.js;
+        grep -q 'process.env.VIEWPORT_HEIGHT' dist/api.js || echo 'WARNING: viewport patch not applied (upstream changed dist/api.js)' >&2;
+        exec node dist/api.js
+  redis:
+    restart: unless-stopped
+  rabbitmq:
+    restart: unless-stopped
+  nuq-postgres:
+    restart: unless-stopped
+
+  # Search backend for Firecrawl (SEARXNG_ENDPOINT in .env). Internal network only, no host port.
+  searxng:
+    image: searxng/searxng:2026.9.10-931fd9787
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in secrets.env}
+      SEARXNG_BASE_URL: http://searxng:8080/
+    volumes:
+      - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks: [backend]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # Routes Firecrawl searches: Google+Startpage (language all) first, Bing (en-GB) as fallback; handles site: filters.
+  searxng-proxy:
+    image: node:22.22-alpine
+    command: ["node", "/app/lang-proxy.mjs"]
+    user: node
+    environment:
+      UPSTREAM: http://searxng:8080
+    volumes:
+      - ../searxng/lang-proxy.mjs:/app/lang-proxy.mjs:ro
+    networks: [backend]
+    depends_on: [searxng]
+    read_only: true
+    restart: unless-stopped
+
+  # Sends LLM calls to Gemini when a key is set, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
+  llm-proxy:
+    image: node:22.22-alpine
+    command: ["node", "/app/trim-proxy.mjs"]
+    user: node
+    environment:
+      UPSTREAM: http://host.docker.internal:11434
+      MAX_INPUT_TOKENS: ${LLM_MAX_INPUT_TOKENS:-7000}
+      # Optional: Gemini first, local model as fallback (key in secrets.env; empty = local only).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+    volumes:
+      - ../llm:/app:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [backend]
+    read_only: true
+    restart: unless-stopped
