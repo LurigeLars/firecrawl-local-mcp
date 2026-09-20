@@ -1,0 +1,27 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "firecrawl-mcp",
+  "version": "0.4.3",
+  "description": "Web search, scraping, crawling, and structured extraction through a self-hosted Firecrawl instance, with research and analysis workflows.",
+  "author": {
+    "name": "firecrawl-local contributors"
+  },
+  "license": "ISC",
+  "keywords": [
+    "firecrawl",
+    "web-scraping",
+    "search",
+    "crawl",
+    "research",
+    "self-hosted"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Firecrawl MCP",
+        "shortDescription": "Self-hosted Firecrawl: search, scrape, crawl, extract",
+        "category": "Productivity"
+      }
+    }
+  }
+}
