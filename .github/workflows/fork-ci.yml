@@ -1,0 +1,49 @@
+name: Fork CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fork-ci:
+    name: fork-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check searxng/lang-proxy.mjs
+          node --check llm/trim-proxy.mjs
+          node --check local-mcp/stdio-proxy.mjs
+          node --check local-mcp/test-proxy.mjs
+          node --check public/gateway/gateway.mjs
+          node --check public/access-test.mjs
+          node --check public/selftest.mjs
+
+      - name: Run offline gateway security regression
+        shell: bash
+        run: node public/access-test.mjs "file://$GITHUB_WORKSPACE/public/gateway/gateway.mjs"
+
+      - name: Build public MCP image
+        run: docker build --pull -f public/Dockerfile.mcp public
