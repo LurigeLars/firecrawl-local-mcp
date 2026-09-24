@@ -39,6 +39,10 @@ if (ACCESS_ENABLED && !ACCESS_TEAM_DOMAIN) {
   console.error('ACCESS_AUD is set but ACCESS_TEAM_DOMAIN is missing; refusing to start');
   process.exit(1);
 }
+if (ACCESS_ENABLED && !/^[a-z0-9-]+\.cloudflareaccess\.com$/i.test(ACCESS_TEAM_DOMAIN)) {
+  console.error('ACCESS_TEAM_DOMAIN must be a Cloudflare Access team domain (*.cloudflareaccess.com); refusing to start');
+  process.exit(1);
+}
 // Without Access the public endpoint would be protected by the secret path alone. Only allow that on purpose
 // (ALLOW_SECRET_PATH=1, the emergency fallback), never because ACCESS_AUD was left empty by mistake.
 if (!ACCESS_ENABLED && process.env.ALLOW_SECRET_PATH !== '1') {
