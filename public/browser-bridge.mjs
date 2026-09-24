@@ -271,6 +271,45 @@ function directProductUrl(sessionName, productId) {
   throw new Error('unknown session');
 }
 
+function directCategoryUrl(sessionName, pageNumber) {
+  if (sessionName !== 'season-spendrups') throw new Error('category navigation is available only for season-spendrups');
+  const page = Number(pageNumber);
+  if (!Number.isInteger(page) || page < 1 || page > 100) throw new Error('invalid category page number');
+  return `https://ehandel.spendrups.se/c/drycker/sprit/all-sprit?page=${page}`;
+}
+
+async function openCategory(sessionName, pageNumber) {
+  const cfg = sessionConfig(sessionName);
+  const { client } = await attach(sessionName);
+  const url = directCategoryUrl(sessionName, pageNumber);
+  const parsed = new URL(url);
+  if (!allowedUrl(url, cfg) || parsed.hash) throw new Error('category URL rejected');
+  if (parsed.pathname !== '/c/drycker/sprit/all-sprit') throw new Error('Spendrups category path rejected');
+  const keys = [...new Set(parsed.searchParams.keys())];
+  if (keys.length !== 1 || keys[0] !== 'page' || parsed.searchParams.get('page') !== String(Number(pageNumber))) {
+    throw new Error('Spendrups category query rejected');
+  }
+
+  await client.send('Page.navigate', { url });
+  const deadline = Date.now() + 15_000;
+  let value = null;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 250));
+    try {
+      value = await client.evaluate(`({ url: location.href, title: document.title, readyState: document.readyState })`);
+      if (value?.readyState === 'complete') break;
+    } catch {}
+  }
+  if (!value || !allowedUrl(String(value.url || ''), cfg)) throw new Error('category navigation left the allowed supplier host');
+  const finalUrl = new URL(String(value.url || ''));
+  if (finalUrl.pathname !== '/c/drycker/sprit/all-sprit' || finalUrl.hash) throw new Error('Spendrups navigation left the approved category path');
+  const finalKeys = [...new Set(finalUrl.searchParams.keys())];
+  if (finalKeys.length !== 1 || finalKeys[0] !== 'page' || finalUrl.searchParams.get('page') !== String(Number(pageNumber))) {
+    throw new Error('Spendrups navigation changed the approved category query');
+  }
+  return { session: sessionName, pageNumber: Number(pageNumber), url: redactUrl(finalUrl.href), title: String(value.title || ''), readyState: String(value.readyState || '') };
+}
+
 async function openProduct(sessionName, productId) {
   const cfg = sessionConfig(sessionName);
   const { client } = await attach(sessionName);
@@ -396,6 +435,9 @@ http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/session/status') return json(res, 200, await status(u.searchParams.get('session')));
     if (req.method === 'POST' && u.pathname === '/session/product-open') {
       const body = await parseBody(req); return json(res, 200, await openProduct(body.session, body.productId));
+    }
+    if (req.method === 'POST' && u.pathname === '/session/category-open') {
+      const body = await parseBody(req); return json(res, 200, await openCategory(body.session, body.pageNumber));
     }
     if (req.method === 'GET' && u.pathname === '/session/snapshot') return json(res, 200, await snapshot(u.searchParams.get('session')));
     if (req.method === 'GET' && u.pathname === '/session/network') return json(res, 200, await networkLog(u.searchParams.get('session'), u.searchParams.get('limit')));
