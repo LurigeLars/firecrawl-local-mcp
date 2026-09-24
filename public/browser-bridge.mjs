@@ -238,8 +238,9 @@ async function snapshot(sessionName) {
     return { title:document.title, url:location.href, text:clean(document.body?.innerText).slice(0,20000), forms, inputs, tables };
   })()`);
   if (!value || !allowedUrl(String(value.url || ''), sessionConfig(sessionName))) throw new Error('active page left the allowed supplier host');
+  const cfg = sessionConfig(sessionName);
   value.url = redactUrl(value.url);
-  value.forms = Array.isArray(value.forms) ? value.forms.map(form => ({ ...form, action: form.action ? redactUrl(form.action) : null })) : [];
+  value.forms = Array.isArray(value.forms) ? value.forms.map(form => ({ ...form, action: form.action && allowedUrl(form.action, cfg) ? redactUrl(form.action) : null })) : [];
   return value;
 }
 

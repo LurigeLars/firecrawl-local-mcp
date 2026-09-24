@@ -16,7 +16,8 @@ function Ensure-BrowserEnv {
     $path = "$root\public\browser.env"
     if (Test-Path $path) { return }
     $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     Set-Content -LiteralPath $path -Value "BROWSER_BRIDGE_TOKEN=$token" -Encoding ascii
 }
