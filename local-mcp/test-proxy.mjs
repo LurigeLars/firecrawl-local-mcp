@@ -5,15 +5,16 @@ import readline from 'node:readline';
 
 const proxy = spawn(process.execPath, [new URL('./stdio-proxy.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')],
   { env: { ...process.env, FIRECRAWL_API_URL: 'http://127.0.0.1:3002' }, stdio: ['pipe', 'pipe', 'inherit'] });
-const pending = new Map();
+const pending = [];
 let nextId = 1;
 readline.createInterface({ input: proxy.stdout }).on('line', line => {
   const m = JSON.parse(line);
-  pending.get(m.id)?.(m);
+  const resolve = pending.shift();
+  if (resolve) resolve(m);
 });
 const rpc = (method, params) => new Promise(resolve => {
   const id = nextId++;
-  pending.set(id, resolve);
+  pending.push(resolve);
   proxy.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
 });
 const results = [];
