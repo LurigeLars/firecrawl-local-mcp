@@ -246,6 +246,41 @@ async function status(sessionName) {
   return { session: sessionName, running: health.healthy, cdp: health, tabs: targets, attached: Boolean(states.get(sessionName)?.client?.ws?.readyState === WebSocket.OPEN) };
 }
 
+function directProductUrl(sessionName, productId) {
+  const id = String(productId || '');
+  if (!/^[0-9]{1,12}$/.test(id)) throw new Error('invalid product ID');
+  if (sessionName === 'season-spendrups') return `https://ehandel.spendrups.se/Product/${id}`;
+  if (sessionName === 'season-ms') return `https://www.martinservera.se/produkter/${id}`;
+  throw new Error('unknown session');
+}
+
+async function openProduct(sessionName, productId) {
+  const cfg = sessionConfig(sessionName);
+  const { client } = await attach(sessionName);
+  const url = directProductUrl(sessionName, productId);
+  const parsed = new URL(url);
+  if (!allowedUrl(url, cfg) || parsed.search || parsed.hash) throw new Error('product URL rejected');
+  if (sessionName === 'season-spendrups' && !/^\/Product\/[0-9]{1,12}$/.test(parsed.pathname)) throw new Error('Spendrups product path rejected');
+  if (sessionName === 'season-ms' && !/^\/produkter\/[0-9]{1,12}$/.test(parsed.pathname)) throw new Error('M&S product path rejected');
+
+  await client.send('Page.navigate', { url });
+  const deadline = Date.now() + 15_000;
+  let value = null;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 250));
+    try {
+      value = await client.evaluate(`({ url: location.href, title: document.title, readyState: document.readyState })`);
+      if (value?.readyState === 'complete') break;
+    } catch {}
+  }
+  if (!value || !allowedUrl(String(value.url || ''), cfg)) throw new Error('product navigation left the allowed supplier host');
+  const finalUrl = new URL(String(value.url || ''));
+  if (finalUrl.search || finalUrl.hash) throw new Error('product navigation added a query string or fragment');
+  if (sessionName === 'season-spendrups' && !/^\/Product\/[0-9]{1,12}$/i.test(finalUrl.pathname)) throw new Error('Spendrups navigation left the approved product path');
+  if (sessionName === 'season-ms' && !/^\/produkter\/[0-9]{1,12}(?:\/[^/?#]+)?$/.test(finalUrl.pathname)) throw new Error('M&S navigation left the approved product path');
+  return { session: sessionName, productId: String(productId), url: redactUrl(finalUrl.href), title: String(value.title || ''), readyState: String(value.readyState || '') };
+}
+
 async function snapshot(sessionName) {
   const { client } = await attach(sessionName);
   const value = await client.evaluate(`(() => {
@@ -312,6 +347,9 @@ http.createServer(async (req, res) => {
       const body = await parseBody(req); return json(res, 200, await ensureSession(body.session));
     }
     if (req.method === 'GET' && u.pathname === '/session/status') return json(res, 200, await status(u.searchParams.get('session')));
+    if (req.method === 'POST' && u.pathname === '/session/product-open') {
+      const body = await parseBody(req); return json(res, 200, await openProduct(body.session, body.productId));
+    }
     if (req.method === 'GET' && u.pathname === '/session/snapshot') return json(res, 200, await snapshot(u.searchParams.get('session')));
     if (req.method === 'GET' && u.pathname === '/session/network') return json(res, 200, await networkLog(u.searchParams.get('session'), u.searchParams.get('limit')));
     if (req.method === 'GET' && u.pathname === '/session/product-probe') return json(res, 200, await productProbe(u.searchParams.get('session')));
