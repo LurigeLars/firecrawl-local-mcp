@@ -1,4 +1,4 @@
-FROM node:24.21.0-alpine
+FROM node:26.9.0-alpine
 RUN npm install -g firecrawl-mcp@3.24.0 && npm cache clean --force
 USER node
 WORKDIR /home/node
