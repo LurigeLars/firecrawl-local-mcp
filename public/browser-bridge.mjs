@@ -66,6 +66,7 @@ function allowedUrl(value, cfg) {
 const SENSITIVE_QUERY_KEY = /^(?:.*token.*|auth|authorization|session(?:id)?|sid|code|api[_-]?key|key|secret|sig|signature|jwt|sso|state|nonce)$/i;
 const SENSITIVE_RESPONSE_KEY = /(?:token|auth|authorization|session|cookie|secret|password|credential|customer|account|user|profile|email|phone|address)/i;
 const SPENDRUPS_PRODUCT_DETAILS_PATH = '/jss/api/productjss/LoadProductDetailsMapped';
+const SPENDRUPS_CATEGORY_PRODUCTS_PATH = '/jss/api/categoryjss/getcategoryproducts';
 function redactUrl(value) {
   try {
     const u = new URL(String(value || ''));
@@ -91,6 +92,22 @@ function sanitizeProductPayload(value, depth = 0) {
     out[key] = sanitizeProductPayload(item, depth + 1);
   }
   return out;
+}
+
+function spendrupsCategoryRequestMeta(value) {
+  try {
+    const u = new URL(String(value || ''));
+    if (u.hostname !== 'prod-cd-front-ehandel.spendrups.se' || u.pathname !== SPENDRUPS_CATEGORY_PRODUCTS_PATH) return null;
+    const keys = [...new Set(u.searchParams.keys())].sort();
+    if (keys.join(',') !== 'categoryId,itemsPerPage,pageNumber') return null;
+    const itemsPerPage = Number(u.searchParams.get('itemsPerPage'));
+    const pageNumber = Number(u.searchParams.get('pageNumber'));
+    const categoryId = String(u.searchParams.get('categoryId') || '');
+    if (!Number.isInteger(itemsPerPage) || itemsPerPage < 1 || itemsPerPage > 100) return null;
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > 100) return null;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId)) return null;
+    return { itemsPerPage, pageNumber, categoryId: categoryId.toLowerCase() };
+  } catch { return null; }
 }
 
 async function getJson(url, timeoutMs = 1200) {
@@ -325,6 +342,36 @@ async function productProbe(sessionName) {
   };
 }
 
+async function categoryProbe(sessionName, pageNumber) {
+  if (sessionName !== 'season-spendrups') throw new Error('category probe is available only for season-spendrups');
+  const requestedPage = pageNumber === null || pageNumber === undefined || pageNumber === '' ? null : Number(pageNumber);
+  if (requestedPage !== null && (!Number.isInteger(requestedPage) || requestedPage < 1 || requestedPage > 100)) throw new Error('invalid category page number');
+  const { client } = await attach(sessionName);
+  const match = [...client.network].reverse().find(item => {
+    if (item?.kind !== 'response' || Number(item.status) !== 200 || !String(item.mimeType || '').includes('application/json')) return false;
+    const meta = spendrupsCategoryRequestMeta(item.url);
+    return Boolean(meta && (requestedPage === null || meta.pageNumber === requestedPage));
+  });
+  if (!match) throw new Error(requestedPage === null
+    ? 'no observed Spendrups category response; open a category page first'
+    : `no observed Spendrups category response for page ${requestedPage}; open that category page first`);
+  const request = spendrupsCategoryRequestMeta(match.url);
+  if (!request) throw new Error('observed category response failed request validation');
+  const result = await client.send('Network.getResponseBody', { requestId: String(match.requestId || '') });
+  let raw = String(result?.body || '');
+  if (result?.base64Encoded) raw = Buffer.from(raw, 'base64').toString('utf8');
+  if (Buffer.byteLength(raw, 'utf8') > 768 * 1024) throw new Error('category response exceeded 768 KiB safety limit');
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('category response was not valid JSON'); }
+  return {
+    session: sessionName,
+    endpoint: SPENDRUPS_CATEGORY_PRODUCTS_PATH,
+    observedAt: match.ts,
+    request,
+    payload: sanitizeProductPayload(parsed),
+  };
+}
+
 async function networkLog(sessionName, limit) {
   const { client } = await attach(sessionName);
   const n = Math.max(1, Math.min(200, Number(limit || 100)));
@@ -353,6 +400,7 @@ http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/session/snapshot') return json(res, 200, await snapshot(u.searchParams.get('session')));
     if (req.method === 'GET' && u.pathname === '/session/network') return json(res, 200, await networkLog(u.searchParams.get('session'), u.searchParams.get('limit')));
     if (req.method === 'GET' && u.pathname === '/session/product-probe') return json(res, 200, await productProbe(u.searchParams.get('session')));
+    if (req.method === 'GET' && u.pathname === '/session/category-probe') return json(res, 200, await categoryProbe(u.searchParams.get('session'), u.searchParams.get('pageNumber')));
     return json(res, 404, { error: 'not found' });
   } catch (error) { return json(res, 400, { error: String(error?.message || error) }); }
 }).listen(PORT, '127.0.0.1', () => {
