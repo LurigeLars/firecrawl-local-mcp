@@ -1,7 +1,7 @@
 // Scores local extraction models through the real Firecrawl pipeline.
 // Usage: node benchmark.mjs <model-label>   (the API must already run with MODEL_NAME set to that model)
 // Ground truth was read from each page's own content on 2026-09-16.
-const API = process.env.FIRECRAWL_API_URL ?? 'http://127.0.0.1:3002';
+const API = 'http://127.0.0.1:3002';
 const company = {
   type: 'object',
   properties: {

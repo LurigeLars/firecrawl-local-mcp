@@ -11,7 +11,7 @@
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 
-const UPSTREAM = new URL(process.env.UPSTREAM ?? 'http://host.docker.internal:11434');
+const UPSTREAM = new URL('http://host.docker.internal:11434');
 const PORT = Number(process.env.PORT ?? 11435);
 const MAX_INPUT_TOKENS = Number(process.env.MAX_INPUT_TOKENS ?? 7000);
 // Conservative: real text averages ~3.5-4 chars/token; markdown with URLs is denser.
@@ -20,7 +20,7 @@ const MAX_CHARS = MAX_INPUT_TOKENS * CHARS_PER_TOKEN;
 const MARKER = '\n\n[... content truncated to fit the local model context ...]';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
-const GEMINI_BASE_URL = process.env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta/openai';
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3.5-flash-lite';
 // Free tier (AI Studio, 2026-09-16): 15 requests and 250k input tokens per minute, 500 requests per day; ~60k chars (~15k tokens) lets 15 pages fit.
 const GEMINI_MAX_CHARS = Number(process.env.GEMINI_MAX_CHARS ?? 60_000);
@@ -124,11 +124,11 @@ async function tryGemini(path, raw) {
   const started = Date.now();
   try {
     const answer = await askGemini(chat);
-    console.log(`${new Date().toISOString()} ${path} gemini ok in ${Date.now() - started} ms, ${answer.usage?.total_tokens ?? "?"} tokens`);
+    console.log(`${new Date().toISOString()} gemini ok in ${Date.now() - started} ms`);
     return chatToResponses(answer, request);
   } catch (err) {
     if (err.status === 429) geminiPausedUntil = Date.now() + GEMINI_PAUSE_MS;
-    console.warn(`${new Date().toISOString()} ${path} gemini failed (${err.name === 'TimeoutError' ? 'timeout' : err.message}), using local model`);
+    console.warn(`${new Date().toISOString()} gemini failed, using local model`);
     return null;
   }
 }
@@ -141,7 +141,7 @@ function forwardLocal(req, res, body) {
       const r = trim(json);
       if (r) {
         body = Buffer.from(JSON.stringify(json));
-        console.log(`${new Date().toISOString()} ${req.url} trimmed text ${r.before} -> ${r.after} chars`);
+        console.log(`${new Date().toISOString()} trimmed request text ${r.before} -> ${r.after} chars`);
       }
     } catch { /* not JSON we understand: forward as-is */ }
   }
@@ -151,7 +151,7 @@ function forwardLocal(req, res, body) {
     upRes => { res.writeHead(upRes.statusCode ?? 502, upRes.headers); upRes.pipe(res); },
   );
   up.on('error', err => {
-    console.warn(`upstream error: ${err.code ?? err.message}`);
+    console.warn('upstream error');
     if (!res.headersSent) { res.writeHead(502); res.end('ollama unavailable'); } else res.destroy();
   });
   res.on('close', () => { if (!res.writableFinished) up.destroy(); });

@@ -60,7 +60,6 @@ services:
     command: ["node", "/app/trim-proxy.mjs"]
     user: node
     environment:
-      UPSTREAM: http://host.docker.internal:11434
       MAX_INPUT_TOKENS: ${LLM_MAX_INPUT_TOKENS:-7000}
       # Optional: Gemini first, local model as fallback (key in secrets.env; empty = local only).
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
