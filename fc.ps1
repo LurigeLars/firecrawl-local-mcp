@@ -198,6 +198,7 @@ function Get-PublicUrl {
 switch ($Action) {
     'up' {
         if ($public) {
+            Stop-BrowserBridge
             $port = Start-BrowserBridge
             $env:BROWSER_BRIDGE_PORT = [string]$port
             "browser bridge port: $port"
