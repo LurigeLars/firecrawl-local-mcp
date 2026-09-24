@@ -76,6 +76,20 @@ claude mcp add-json firecrawl-mcp -s user '{"type":"stdio","command":"node","arg
   Cloudflare dashboard (Zero Trust → Networks → Tunnels) and the `firecrawl` DNS record.
 - Docker Desktop must be running for any of this; enable "Start Docker Desktop when you sign in".
 
+### Local interactive supplier browser bridge
+
+For the Season Hotel pilot, the public ChatGPT connector also exposes four narrowly scoped browser-session tools: `browser_session_open`, `browser_session_status`, `browser_snapshot`, and `browser_network_log`. They only accept `season-spendrups` and `season-ms`.
+
+`fc.ps1 up` starts `public/browser-bridge.mjs` on the Windows host and creates `public/browser.env` with a random internal token if needed. The bridge opens a visible dedicated Chrome profile per supplier and keeps Chrome DevTools Protocol on loopback-only ports (`127.0.0.1:9440` / `9441`). The Docker gateway reaches the bridge through `host.docker.internal:8765` using the internal token; the bridge does not expose arbitrary URLs, credential entry, cookie export, storage export, request headers, or request bodies.
+
+Manual-auth workflow:
+1. Call `browser_session_open` for the supplier. A visible Chrome window opens on the Windows desktop.
+2. The user logs in manually in that Chrome window. Never send credentials through chat or browser automation.
+3. Call `browser_snapshot` and `browser_network_log` read-only to inspect the same authenticated session. Network capture begins when the bridge attaches, so open the session before logging in/navigating.
+4. Browser profiles stay under `%LOCALAPPDATA%\FirecrawlLocal\browser-profiles` and remain outside Git/Drive. `fc.ps1 down` stops the bridge process but does not delete the profiles.
+
+The bridge is intentionally not a generic browser automation service. Adding suppliers, navigation/click/type capabilities, credential handling, or broader network output requires a separate security review.
+
 ## Search backend (SearXNG)
 
 `searxng` (image `searxng/searxng:2026.9.10-931fd9787`, service in `compose.local.yaml`, settings in
