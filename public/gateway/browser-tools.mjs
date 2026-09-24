@@ -38,6 +38,8 @@ export const BROWSER_TOOL_DEFINITIONS = Object.freeze([
 
 export const BROWSER_TOOL_NAMES = new Set(BROWSER_TOOL_DEFINITIONS.map(t => t.name));
 
+export const BROWSER_INSTRUCTIONS = 'Season Hotel browser tools are available only on this ChatGPT gateway: browser_session_open, browser_session_status, browser_snapshot and browser_network_log. They only accept season-spendrups and season-ms. browser_session_open opens a visible dedicated Chrome profile on the user\'s Windows machine; the user enters credentials there manually. Never ask for credentials in chat and never type credentials through browser automation. After manual login, use browser_snapshot and browser_network_log read-only. Network output omits headers, cookies, request bodies and non-supplier hosts.';
+
 export function browserToolsFor(allowedTools) {
   return BROWSER_TOOL_DEFINITIONS.filter(t => allowedTools.has(t.name));
 }

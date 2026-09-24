@@ -143,7 +143,8 @@ class CdpClient {
     }
   }
   pushNetwork(item) {
-    // Intentionally omit headers, cookies and request bodies. URLs may contain query strings required to identify API endpoints.
+    // Intentionally omit headers, cookies and request bodies, and keep only the approved supplier host family.
+    if (!allowedUrl(item?.url, this.cfg)) return;
     this.network.push(item);
     if (this.network.length > this.maxNetwork) this.network.splice(0, this.network.length - this.maxNetwork);
   }
@@ -211,7 +212,7 @@ async function ensureSession(sessionName) {
     try { state = await attach(sessionName); break; } catch { await new Promise(r => setTimeout(r, 250)); }
   }
   if (!state) throw new Error('browser opened but matching page could not be attached');
-  return { session: sessionName, started, startUrl: cfg.startUrl, profileDir: path.join(SESSION_ROOT, sessionName), cdp: health, targetId: state.targetId, attachedAt: state.attachedAt };
+  return { session: sessionName, started, startUrl: cfg.startUrl, cdp: health, targetId: state.targetId, attachedAt: state.attachedAt };
 }
 
 async function status(sessionName) {
@@ -219,7 +220,7 @@ async function status(sessionName) {
   const health = await cdpHealth(cfg);
   let targets = [];
   if (health.healthy) {
-    try { targets = (await listTargets(cfg)).map(t => ({ id: String(t.id || ''), title: String(t.title || ''), url: String(t.url || '') })); } catch {}
+    try { targets = (await listTargets(cfg)).map(t => ({ id: String(t.id || ''), title: String(t.title || ''), url: redactUrl(t.url) })); } catch {}
   }
   return { session: sessionName, running: health.healthy, cdp: health, tabs: targets, attached: Boolean(states.get(sessionName)?.client?.ws?.readyState === WebSocket.OPEN) };
 }

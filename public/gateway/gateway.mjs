@@ -15,7 +15,7 @@ import crypto from 'node:crypto';
 import {
   parseAllowedTools, checkRequest, wantsCompactResult, rewriteResponse, rpcError as rpcErrorMsg, rpcToolError,
 } from './policy.mjs';
-import { BROWSER_TOOL_NAMES, browserToolsFor, browserBridgeRequest } from './browser-tools.mjs';
+import { BROWSER_INSTRUCTIONS, BROWSER_TOOL_NAMES, browserToolsFor, browserBridgeRequest } from './browser-tools.mjs';
 
 const SECRET = process.env.GATEWAY_SECRET ?? '';
 if (SECRET.length < 32) {
@@ -137,6 +137,9 @@ const rewriteGatewayResponse = (msg, ctx) => {
   if (out?.result?.tools && ctx?.allowedTools) {
     const existing = new Set(out.result.tools.map(t => t.name));
     for (const tool of browserToolsFor(ctx.allowedTools)) if (!existing.has(tool.name)) out.result.tools.push(tool);
+  }
+  if (BROWSER_TOOLS_ENABLED && out?.result?.serverInfo) {
+    out.result.instructions = [out.result.instructions, BROWSER_INSTRUCTIONS].filter(Boolean).join('\n\n');
   }
   return out;
 };

@@ -75,6 +75,8 @@ function Stop-BrowserBridge {
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
 }
 
+if ($public) { Ensure-BrowserEnv }
+
 function Get-PublicUrl {
     $secret = ((Get-Content "$root\public\gateway.env") -match '^GATEWAY_SECRET=')[0] -replace '^GATEWAY_SECRET=', ''
     $hostname = ((Get-Content "$root\.cloudflared\config.yml") -match 'hostname:')[0] -replace '.*hostname:\s*', ''
