@@ -18,6 +18,8 @@
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 
+const logSafe = value => String(value ?? '').replace(/[\r\n\u2028\u2029]/g, ' ');
+
 const UPSTREAM = new URL(process.env.UPSTREAM ?? 'http://searxng:8080');
 const PORT = Number(process.env.PORT ?? 8081);
 const PRIMARY_ENGINES = process.env.PRIMARY_ENGINES ?? 'google,startpage';
@@ -95,7 +97,7 @@ async function routedSearch(url) {
       results = mergeResults(results, keep(fallback.results ?? []));
       unresponsive.push(...(fallback.unresponsive_engines ?? []));
     } catch (err) {
-      console.warn(`fallback search failed: ${err.message}`);
+      console.warn(`fallback search failed: ${logSafe(err.message)}`);
     }
   }
   return { ...primary, query: params.get('q'), results, unresponsive_engines: unresponsive };
@@ -108,7 +110,7 @@ function passThrough(req, res) {
     upRes => { res.writeHead(upRes.statusCode ?? 502, upRes.headers); upRes.pipe(res); },
   );
   up.on('error', err => {
-    console.warn(`searxng unavailable: ${err.code ?? err.message}`);
+    console.warn(`searxng unavailable: ${logSafe(err.code ?? err.message)}`);
     if (!res.headersSent) { res.writeHead(502); res.end('searxng unavailable'); } else res.destroy();
   });
   res.on('close', () => { if (!res.writableFinished) up.destroy(); });
@@ -127,7 +129,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
       res.end(body);
     } catch (err) {
-      console.warn(`search failed: ${err.message}`);
+      console.warn(`search failed: ${logSafe(err.message)}`);
       res.writeHead(502, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'searxng unavailable' }));
     }

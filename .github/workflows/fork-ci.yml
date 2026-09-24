@@ -16,9 +16,13 @@ concurrency:
 
 jobs:
   fork-ci:
-    name: fork-ci
+    name: fork-ci (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["24.21.0", "26.9.0"]
 
     steps:
       - name: Check out code
@@ -27,7 +31,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "24.21.0"
+          node-version: ${{ matrix.node-version }}
 
       - name: Check JavaScript syntax
         shell: bash
@@ -46,4 +50,5 @@ jobs:
         run: node public/access-test.mjs "file://$GITHUB_WORKSPACE/public/gateway/gateway.mjs"
 
       - name: Build public MCP image
+        if: matrix.node-version == '26.9.0'
         run: docker build --pull -f public/Dockerfile.mcp public

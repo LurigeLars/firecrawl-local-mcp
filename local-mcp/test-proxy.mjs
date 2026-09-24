@@ -9,7 +9,8 @@ const pending = new Map();
 let nextId = 1;
 readline.createInterface({ input: proxy.stdout }).on('line', line => {
   const m = JSON.parse(line);
-  pending.get(m.id)?.(m);
+  const resolve = pending.get(m.id);
+  if (resolve) resolve(m);
 });
 const rpc = (method, params) => new Promise(resolve => {
   const id = nextId++;
