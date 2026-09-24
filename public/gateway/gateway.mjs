@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import {
   parseAllowedTools, checkRequest, wantsCompactResult, rewriteResponse, rpcError as rpcErrorMsg, rpcToolError,
 } from './policy.mjs';
+import { BROWSER_INSTRUCTIONS, BROWSER_TOOL_NAMES, browserToolsFor, browserBridgeRequest } from './browser-tools.mjs';
 
 const SECRET = process.env.GATEWAY_SECRET ?? '';
 if (SECRET.length < 32) {
@@ -28,6 +29,13 @@ const PORT = Number(process.env.PORT ?? 8080);
 const RATE_PER_MIN = Number(process.env.RATE_PER_MIN ?? 120);
 const MAX_BODY = 256 * 1024;
 const ALLOWED_TOOLS = parseAllowedTools(process.env.ALLOWED_TOOLS);
+const BROWSER_BRIDGE_URL = String(process.env.BROWSER_BRIDGE_URL ?? '').replace(/\/$/, '');
+const BROWSER_BRIDGE_TOKEN = String(process.env.BROWSER_BRIDGE_TOKEN ?? '');
+const BROWSER_TOOLS_ENABLED = [...BROWSER_TOOL_NAMES].some(name => ALLOWED_TOOLS.has(name));
+if (BROWSER_TOOLS_ENABLED && (!/^http:\/\/host\.docker\.internal:\d+$/.test(BROWSER_BRIDGE_URL) || BROWSER_BRIDGE_TOKEN.length < 32)) {
+  console.error('browser tools enabled but BROWSER_BRIDGE_URL/TOKEN are invalid; refusing to start');
+  process.exit(1);
+}
 
 // Cloudflare Access (optional). When ACCESS_AUD is set, every request must carry a valid Access JWT
 // (Cf-Access-Jwt-Assertion) for that application, and the plain /mcp path is accepted as well.
@@ -124,12 +132,46 @@ function sendJson(res, obj) {
   res.end(JSON.stringify(obj));
 }
 
+const rewriteGatewayResponse = (msg, ctx) => {
+  const out = rewriteResponse(msg, ctx);
+  if (out?.result?.tools && ctx?.allowedTools) {
+    const existing = new Set(out.result.tools.map(t => t.name));
+    for (const tool of browserToolsFor(ctx.allowedTools)) if (!existing.has(tool.name)) out.result.tools.push(tool);
+  }
+  if (BROWSER_TOOLS_ENABLED && out?.result?.serverInfo) {
+    out.result.instructions = [out.result.instructions, BROWSER_INSTRUCTIONS].filter(Boolean).join('\n\n');
+  }
+  return out;
+};
 const rewriteJsonText = (text, ctx) => {
   try {
     const parsed = JSON.parse(text);
-    return JSON.stringify(Array.isArray(parsed) ? parsed.map(m => rewriteResponse(m, ctx)) : rewriteResponse(parsed, ctx));
+    return JSON.stringify(Array.isArray(parsed) ? parsed.map(m => rewriteGatewayResponse(m, ctx)) : rewriteGatewayResponse(parsed, ctx));
   } catch { return text; }
 };
+
+async function callBrowserBridge(msg) {
+  const name = msg?.params?.name;
+  try {
+    const spec = browserBridgeRequest(name, msg?.params?.arguments ?? {});
+    const url = `${BROWSER_BRIDGE_URL}${spec.path}`;
+    const body = spec.body ? JSON.stringify(spec.body) : undefined;
+    const response = await fetch(url, {
+      method: spec.method,
+      headers: { Authorization: `Bearer ${BROWSER_BRIDGE_TOKEN}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+      body,
+      redirect: 'error',
+      signal: AbortSignal.timeout(20000),
+    });
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { error: text || `HTTP ${response.status}` }; }
+    if (!response.ok) return rpcToolError(msg.id, `Local browser bridge error: ${data?.error ?? `HTTP ${response.status}`}`);
+    return { jsonrpc: '2.0', id: msg.id ?? null, result: { content: [{ type: 'text', text: JSON.stringify(data) }] } };
+  } catch (error) {
+    return rpcToolError(msg.id, `Local browser bridge unavailable: ${error?.message ?? error}`);
+  }
+}
 const rewriteSseLine = (line, ctx) => {
   if (!line.startsWith('data:')) return line;
   const rewritten = rewriteJsonText(line.slice(5), ctx);
@@ -239,6 +281,11 @@ http.createServer(async (req, res) => {
       if (m?.method === 'tools/call' && wantsCompactResult(m.params)) { compactIds.add(m.id); needsRewrite = true; }
     }
     console.log(`${new Date().toISOString()} request accepted`);
+    const browserCalls = msgs.filter(m => m?.method === 'tools/call' && BROWSER_TOOL_NAMES.has(m?.params?.name));
+    if (browserCalls.length) {
+      if (msgs.length !== 1) return sendJson(res, rpcErrorMsg(null, 'Browser tools do not support JSON-RPC batches'));
+      return callBrowserBridge(browserCalls[0]).then(reply => sendJson(res, reply));
+    }
     forward(req, res, body, needsRewrite ? { allowedTools: ALLOWED_TOOLS, compactIds } : null);
   });
 }).listen(PORT, '0.0.0.0', () => console.log(`gateway listening on ${PORT}, cloudflare access: ${ACCESS_ENABLED ? 'required' : 'off'}`));
