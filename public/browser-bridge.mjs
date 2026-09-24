@@ -64,6 +64,8 @@ function allowedUrl(value, cfg) {
   } catch { return false; }
 }
 const SENSITIVE_QUERY_KEY = /^(?:.*token.*|auth|authorization|session(?:id)?|sid|code|api[_-]?key|key|secret|sig|signature|jwt|sso|state|nonce)$/i;
+const SENSITIVE_RESPONSE_KEY = /(?:token|auth|authorization|session|cookie|secret|password|credential|customer|account|user|profile|email|phone|address)/i;
+const SPENDRUPS_PRODUCT_DETAILS_PATH = '/jss/api/productjss/LoadProductDetailsMapped';
 function redactUrl(value) {
   try {
     const u = new URL(String(value || ''));
@@ -72,6 +74,25 @@ function redactUrl(value) {
     return u.href;
   } catch { return String(value || '').slice(0, 2048); }
 }
+function sanitizeProductPayload(value, depth = 0) {
+  if (depth > 8) return '[MAX_DEPTH]';
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (typeof value === 'string') return value.slice(0, 4000);
+  if (Array.isArray(value)) return value.slice(0, 200).map(v => sanitizeProductPayload(v, depth + 1));
+  if (!value || typeof value !== 'object') return String(value).slice(0, 4000);
+  const out = {};
+  let count = 0;
+  for (const [key, item] of Object.entries(value)) {
+    if (++count > 300) break;
+    if (SENSITIVE_RESPONSE_KEY.test(key)) {
+      out[key] = '[REDACTED]';
+      continue;
+    }
+    out[key] = sanitizeProductPayload(item, depth + 1);
+  }
+  return out;
+}
+
 async function getJson(url, timeoutMs = 1200) {
   const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'error', cache: 'no-store' });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -244,6 +265,31 @@ async function snapshot(sessionName) {
   return value;
 }
 
+async function productProbe(sessionName) {
+  if (sessionName !== 'season-spendrups') throw new Error('product probe is available only for season-spendrups');
+  const { client } = await attach(sessionName);
+  const match = [...client.network].reverse().find(item => {
+    if (item?.kind !== 'response' || Number(item.status) !== 200 || !String(item.mimeType || '').includes('application/json')) return false;
+    try {
+      const u = new URL(String(item.url || ''));
+      return u.hostname === 'prod-cd-front-ehandel.spendrups.se' && u.pathname === SPENDRUPS_PRODUCT_DETAILS_PATH;
+    } catch { return false; }
+  });
+  if (!match) throw new Error('no observed Spendrups product detail response; open a product page first');
+  const result = await client.send('Network.getResponseBody', { requestId: String(match.requestId || '') });
+  let raw = String(result?.body || '');
+  if (result?.base64Encoded) raw = Buffer.from(raw, 'base64').toString('utf8');
+  if (Buffer.byteLength(raw, 'utf8') > 256 * 1024) throw new Error('product response exceeded 256 KiB safety limit');
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('product response was not valid JSON'); }
+  return {
+    session: sessionName,
+    endpoint: SPENDRUPS_PRODUCT_DETAILS_PATH,
+    observedAt: match.ts,
+    payload: sanitizeProductPayload(parsed),
+  };
+}
+
 async function networkLog(sessionName, limit) {
   const { client } = await attach(sessionName);
   const n = Math.max(1, Math.min(200, Number(limit || 100)));
@@ -268,6 +314,7 @@ http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/session/status') return json(res, 200, await status(u.searchParams.get('session')));
     if (req.method === 'GET' && u.pathname === '/session/snapshot') return json(res, 200, await snapshot(u.searchParams.get('session')));
     if (req.method === 'GET' && u.pathname === '/session/network') return json(res, 200, await networkLog(u.searchParams.get('session'), u.searchParams.get('limit')));
+    if (req.method === 'GET' && u.pathname === '/session/product-probe') return json(res, 200, await productProbe(u.searchParams.get('session')));
     return json(res, 404, { error: 'not found' });
   } catch (error) { return json(res, 400, { error: String(error?.message || error) }); }
 }).listen(PORT, '127.0.0.1', () => {
