@@ -63,7 +63,7 @@ function allowedUrl(value, cfg) {
     return cfg.hosts.some(base => h === base || h.endsWith(`.${base}`));
   } catch { return false; }
 }
-const SENSITIVE_QUERY_KEY = /(token|access[_-]?token|refresh[_-]?token|auth|authorization|session|sid|code|key|secret|sig|signature|jwt|sso)/i;
+const SENSITIVE_QUERY_KEY = /^(?:.*token.*|auth|authorization|session(?:id)?|sid|code|api[_-]?key|key|secret|sig|signature|jwt|sso|state|nonce)$/i;
 function redactUrl(value) {
   try {
     const u = new URL(String(value || ''));
@@ -170,7 +170,7 @@ async function attach(sessionName) {
   const cfg = sessionConfig(sessionName);
   const targets = await listTargets(cfg);
   if (targets.length < 1) throw new Error('no matching page target');
-  // Prefer the most recently listed matching page and never attach to unrelated tabs.
+  // Use the first matching page in this dedicated supplier profile and never attach to unrelated tabs.
   const target = targets[0];
   const prior = states.get(sessionName);
   if (prior?.targetId === target.id && prior.client?.ws?.readyState === WebSocket.OPEN) return prior;
