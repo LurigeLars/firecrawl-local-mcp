@@ -42,7 +42,7 @@ services:
 
   # Routes Firecrawl searches: Google+Startpage (language all) first, Bing (en-GB) as fallback; handles site: filters.
   searxng-proxy:
-    image: node:24.21.0-alpine
+    image: node:26.9.0-alpine
     command: ["node", "/app/lang-proxy.mjs"]
     user: node
     environment:
@@ -56,7 +56,7 @@ services:
 
   # Sends LLM calls to Gemini when a key is set, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
   llm-proxy:
-    image: node:24.21.0-alpine
+    image: node:26.9.0-alpine
     command: ["node", "/app/trim-proxy.mjs"]
     user: node
     environment:
