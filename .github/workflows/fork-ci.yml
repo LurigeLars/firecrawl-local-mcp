@@ -38,8 +38,14 @@ jobs:
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
+          node --check public/gateway/browser-tools.mjs
+          node --check public/browser-bridge.mjs
           node --check public/access-test.mjs
           node --check public/selftest.mjs
+
+      - name: Run browser bridge/tool contract tests
+        shell: bash
+        run: node public/gateway/browser-tools.test.mjs
 
       - name: Run offline gateway security regression
         shell: bash
