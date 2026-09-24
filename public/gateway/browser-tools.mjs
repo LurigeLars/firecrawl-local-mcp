@@ -18,6 +18,18 @@ export const BROWSER_TOOL_DEFINITIONS = Object.freeze([
     },
   },
   {
+    name: 'browser_product_open',
+    description: 'Navigate one approved supplier browser session directly to a product detail page by numeric product ID. This tool does not accept arbitrary URLs, query strings or search terms and does not automate supplier search.',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        session: SESSION_SCHEMA,
+        productId: { type: 'string', pattern: '^[0-9]+$', minLength: 1, maxLength: 12 },
+      },
+      required: ['session', 'productId'],
+    },
+  },
+  {
     name: 'browser_snapshot',
     description: 'Read a bounded redacted DOM summary from one approved authenticated supplier browser session. Input values, cookies and storage are not returned.',
     inputSchema: {
@@ -46,7 +58,7 @@ export const BROWSER_TOOL_DEFINITIONS = Object.freeze([
 
 export const BROWSER_TOOL_NAMES = new Set(BROWSER_TOOL_DEFINITIONS.map(t => t.name));
 
-export const BROWSER_INSTRUCTIONS = 'Season Hotel browser tools are available only on this ChatGPT gateway: browser_session_open, browser_session_status, browser_snapshot, browser_network_log and browser_product_probe. They only accept season-spendrups and season-ms. browser_session_open opens a visible dedicated Chrome profile on the user\'s Windows machine; the user enters credentials there manually. Never ask for credentials in chat and never type credentials through browser automation. After manual login, use browser_snapshot and browser_network_log read-only. Network output omits headers, cookies, request bodies and non-supplier hosts.';
+export const BROWSER_INSTRUCTIONS = 'Season Hotel browser tools are available only on this ChatGPT gateway: browser_session_open, browser_session_status, browser_product_open, browser_snapshot, browser_network_log and browser_product_probe. They only accept season-spendrups and season-ms. browser_session_open opens a visible dedicated Chrome profile on the user\'s Windows machine; the user enters credentials there manually. Never ask for credentials in chat and never type credentials through browser automation. After manual login, browser_product_open may navigate only to direct numeric product-detail paths without query strings; it must not be used to automate search. Use browser_snapshot and browser_network_log read-only. Network output omits headers, cookies, request bodies and non-supplier hosts.';
 
 export function browserToolsFor(allowedTools) {
   return BROWSER_TOOL_DEFINITIONS.filter(t => allowedTools.has(t.name));
@@ -57,6 +69,11 @@ export function browserBridgeRequest(name, args = {}) {
   if (!['season-spendrups', 'season-ms'].includes(session)) throw new Error('invalid browser session');
   if (name === 'browser_session_open') return { method: 'POST', path: '/session/open', body: { session } };
   if (name === 'browser_session_status') return { method: 'GET', path: `/session/status?session=${encodeURIComponent(session)}` };
+  if (name === 'browser_product_open') {
+    const productId = String(args.productId || '');
+    if (!/^[0-9]{1,12}$/.test(productId)) throw new Error('invalid product ID');
+    return { method: 'POST', path: '/session/product-open', body: { session, productId } };
+  }
   if (name === 'browser_snapshot') return { method: 'GET', path: `/session/snapshot?session=${encodeURIComponent(session)}` };
   if (name === 'browser_product_probe') {
     if (session !== 'season-spendrups') throw new Error('browser_product_probe is available only for season-spendrups');
