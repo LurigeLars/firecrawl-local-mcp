@@ -11,7 +11,6 @@ if ($public) { $compose += @('-f', "$root\compose.public.yaml") }
 $compose += @('--env-file', "$root\.env")
 if (Test-Path "$root\secrets.env") { $compose += @('--env-file', "$root\secrets.env") }
 
-
 function Ensure-BrowserEnv {
     $path = "$root\public\browser.env"
     if (Test-Path $path) { return }
@@ -31,9 +30,9 @@ function Get-BrowserToken {
     return $token
 }
 
-function Get-BrowserPort {
+function Get-ConfiguredBrowserPort {
     $line = @(Get-Content "$root\.env" -ErrorAction SilentlyContinue | Where-Object { $_ -match '^BROWSER_BRIDGE_PORT=' })[0]
-    if (-not $line) { return 8766 }
+    if (-not $line) { return $null }
     $value = ($line -replace '^BROWSER_BRIDGE_PORT=', '').Trim()
     $port = 0
     if (-not [int]::TryParse($value, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
@@ -42,25 +41,115 @@ function Get-BrowserPort {
     return $port
 }
 
-function Test-BrowserBridge {
+function Get-RuntimeBrowserPort {
+    $path = "$root\.runtime\browser-bridge.port"
+    if (-not (Test-Path $path)) { return $null }
+    $value = (Get-Content $path -Raw).Trim()
+    $port = 0
+    if (-not [int]::TryParse($value, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+        return $null
+    }
+    return $port
+}
+
+function Save-RuntimeBrowserPort([int]$Port) {
+    $runtime = "$root\.runtime"
+    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+    Set-Content -LiteralPath "$runtime\browser-bridge.port" -Value $Port -Encoding ascii
+}
+
+function Test-TcpPortFree([int]$Port) {
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($listener) {
+            try { $listener.Stop() } catch {}
+        }
+    }
+}
+
+function Test-BrowserBridgeAtPort([int]$Port) {
     try {
         $token = Get-BrowserToken
         $h = @{ Authorization = "Bearer $token" }
-        $port = Get-BrowserPort
-        $r = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$port/health" -Headers $h -TimeoutSec 1
+        $r = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$Port/health" -Headers $h -TimeoutSec 1
         return [bool]$r.ok
-    } catch { return $false }
+    } catch {
+        return $false
+    }
+}
+
+function Get-BrowserPort {
+    $configured = Get-ConfiguredBrowserPort
+    if ($null -ne $configured) { return [int]$configured }
+    $runtimePort = Get-RuntimeBrowserPort
+    if ($null -ne $runtimePort) { return [int]$runtimePort }
+    return $null
+}
+
+function Select-BrowserPort {
+    $configured = Get-ConfiguredBrowserPort
+    if ($null -ne $configured) {
+        if (Test-BrowserBridgeAtPort $configured) {
+            Save-RuntimeBrowserPort $configured
+            return [int]$configured
+        }
+        if (-not (Test-TcpPortFree $configured)) {
+            throw "Configured BROWSER_BRIDGE_PORT $configured is already in use by another process."
+        }
+        Save-RuntimeBrowserPort $configured
+        return [int]$configured
+    }
+
+    $runtimePort = Get-RuntimeBrowserPort
+    if ($null -ne $runtimePort) {
+        if ((Test-BrowserBridgeAtPort $runtimePort) -or (Test-TcpPortFree $runtimePort)) {
+            return [int]$runtimePort
+        }
+    }
+
+    foreach ($candidate in 8765..8799) {
+        if (Test-TcpPortFree $candidate) {
+            Save-RuntimeBrowserPort $candidate
+            return [int]$candidate
+        }
+    }
+    throw 'No free browser bridge port found in 8765-8799. Set BROWSER_BRIDGE_PORT in .env to an available localhost port.'
+}
+
+function Test-BrowserBridge {
+    $port = Get-BrowserPort
+    if ($null -eq $port) { return $false }
+    return Test-BrowserBridgeAtPort $port
+}
+
+function Set-BrowserComposePort {
+    $port = Get-BrowserPort
+    if ($null -ne $port) {
+        $env:BROWSER_BRIDGE_PORT = [string]$port
+    }
 }
 
 function Start-BrowserBridge {
-    if (-not $public) { return }
+    if (-not $public) { return $null }
     Ensure-BrowserEnv
-    if (Test-BrowserBridge) { return }
+
+    $existingPort = Get-BrowserPort
+    if ($null -ne $existingPort -and (Test-BrowserBridgeAtPort $existingPort)) {
+        $env:BROWSER_BRIDGE_PORT = [string]$existingPort
+        return [int]$existingPort
+    }
+
     $runtime = "$root\.runtime"
     New-Item -ItemType Directory -Path $runtime -Force | Out-Null
     $node = (Get-Command node -ErrorAction Stop).Source
     $token = Get-BrowserToken
-    $port = Get-BrowserPort
+    $port = Select-BrowserPort
     $oldToken = $env:BROWSER_BRIDGE_TOKEN
     $oldPort = $env:BROWSER_BRIDGE_PORT
     try {
@@ -75,21 +164,26 @@ function Start-BrowserBridge {
     Set-Content -LiteralPath "$runtime\browser-bridge.pid" -Value $proc.Id -Encoding ascii
     for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 250
-        if (Test-BrowserBridge) { return }
+        if (Test-BrowserBridgeAtPort $port) {
+            $env:BROWSER_BRIDGE_PORT = [string]$port
+            return [int]$port
+        }
         if ($proc.HasExited) { break }
     }
-    throw "Browser bridge failed to start. See $runtime\browser-bridge.err.log"
+    throw "Browser bridge failed to start on port $port. See $runtime\browser-bridge.err.log"
 }
 
 function Stop-BrowserBridge {
     $pidFile = "$root\.runtime\browser-bridge.pid"
-    if (-not (Test-Path $pidFile)) { return }
-    $pidValue = [int](Get-Content $pidFile -Raw)
-    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
-    if ($p -and [string]$p.CommandLine -like '*browser-bridge.mjs*') {
-        Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
+    if (Test-Path $pidFile) {
+        $pidValue = [int](Get-Content $pidFile -Raw)
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
+        if ($p -and [string]$p.CommandLine -like '*browser-bridge.mjs*') {
+            Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item "$root\.runtime\browser-bridge.port" -Force -ErrorAction SilentlyContinue
 }
 
 if ($public) { Ensure-BrowserEnv }
@@ -102,17 +196,42 @@ function Get-PublicUrl {
 }
 
 switch ($Action) {
-    'up'     { if ($public) { Start-BrowserBridge }; docker @compose up -d --build }
-    'down'   { docker @compose down; Stop-BrowserBridge }
-    'status' { docker @compose ps; if ($public) { if (Test-BrowserBridge) { 'browser bridge: healthy' } else { 'browser bridge: down' } } }
-    'logs'   { if ($public) { docker @compose logs -f --tail 50 api gateway cloudflared } else { docker @compose logs -f --tail 100 api } }
-    'url'    { if ($public) { Get-PublicUrl } else { 'Public access is not configured.' } }
-    'test'   {
+    'up' {
+        if ($public) {
+            $port = Start-BrowserBridge
+            $env:BROWSER_BRIDGE_PORT = [string]$port
+            "browser bridge port: $port"
+        }
+        docker @compose up -d --build
+    }
+    'down' {
+        if ($public) { Set-BrowserComposePort }
+        docker @compose down
+        Stop-BrowserBridge
+    }
+    'status' {
+        if ($public) { Set-BrowserComposePort }
+        docker @compose ps
+        if ($public) {
+            $port = Get-BrowserPort
+            if (Test-BrowserBridge) { "browser bridge: healthy (port $port)" } else { "browser bridge: down" }
+        }
+    }
+    'logs' {
+        if ($public) { Set-BrowserComposePort; docker @compose logs -f --tail 50 api gateway cloudflared }
+        else { docker @compose logs -f --tail 100 api }
+    }
+    'url' {
+        if ($public) { Get-PublicUrl } else { 'Public access is not configured.' }
+    }
+    'test' {
         $body = @{ url = 'https://www.iana.org/help/example-domains'; formats = @('markdown') } | ConvertTo-Json
         $r = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3002/v2/scrape' -ContentType 'application/json' -Body $body -TimeoutSec 120
         "local engine: success=$($r.success)"
         if ($public) {
-            "browser bridge: healthy=$(Test-BrowserBridge)"
+            Set-BrowserComposePort
+            $port = Get-BrowserPort
+            "browser bridge: healthy=$(Test-BrowserBridge) port=$port"
             $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fc-test","version":"1"}}}'
             $h = @{ Accept = 'application/json, text/event-stream' }
             $resp = Invoke-WebRequest -Method Post -Uri (Get-PublicUrl) -ContentType 'application/json' -Headers $h -Body $init -TimeoutSec 60
