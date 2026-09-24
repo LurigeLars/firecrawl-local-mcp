@@ -30,7 +30,7 @@ services:
       # Emergency fallback only: without ACCESS_AUD the gateway refuses to start unless this is 1.
       ALLOW_SECRET_PATH: ${ALLOW_SECRET_PATH:-}
       ALLOWED_TOOLS: firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,browser_session_open,browser_session_status,browser_snapshot,browser_network_log
-      BROWSER_BRIDGE_URL: http://host.docker.internal:8765
+      BROWSER_BRIDGE_URL: http://host.docker.internal:${BROWSER_BRIDGE_PORT:-8766}
     volumes:
       - ../public/gateway:/app:ro
     extra_hosts:

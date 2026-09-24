@@ -31,11 +31,23 @@ function Get-BrowserToken {
     return $token
 }
 
+function Get-BrowserPort {
+    $line = @(Get-Content "$root\.env" -ErrorAction SilentlyContinue | Where-Object { $_ -match '^BROWSER_BRIDGE_PORT=' })[0]
+    if (-not $line) { return 8766 }
+    $value = ($line -replace '^BROWSER_BRIDGE_PORT=', '').Trim()
+    $port = 0
+    if (-not [int]::TryParse($value, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
+        throw 'BROWSER_BRIDGE_PORT in .env must be an integer between 1024 and 65535'
+    }
+    return $port
+}
+
 function Test-BrowserBridge {
     try {
         $token = Get-BrowserToken
         $h = @{ Authorization = "Bearer $token" }
-        $r = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:8765/health' -Headers $h -TimeoutSec 1
+        $port = Get-BrowserPort
+        $r = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$port/health" -Headers $h -TimeoutSec 1
         return [bool]$r.ok
     } catch { return $false }
 }
@@ -48,13 +60,17 @@ function Start-BrowserBridge {
     New-Item -ItemType Directory -Path $runtime -Force | Out-Null
     $node = (Get-Command node -ErrorAction Stop).Source
     $token = Get-BrowserToken
+    $port = Get-BrowserPort
     $oldToken = $env:BROWSER_BRIDGE_TOKEN
+    $oldPort = $env:BROWSER_BRIDGE_PORT
     try {
         $env:BROWSER_BRIDGE_TOKEN = $token
+        $env:BROWSER_BRIDGE_PORT = [string]$port
         $proc = Start-Process -FilePath $node -ArgumentList @("`"$root\public\browser-bridge.mjs`"") -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput "$runtime\browser-bridge.out.log" -RedirectStandardError "$runtime\browser-bridge.err.log"
     } finally {
         $env:BROWSER_BRIDGE_TOKEN = $oldToken
+        $env:BROWSER_BRIDGE_PORT = $oldPort
     }
     Set-Content -LiteralPath "$runtime\browser-bridge.pid" -Value $proc.Id -Encoding ascii
     for ($i = 0; $i -lt 40; $i++) {
