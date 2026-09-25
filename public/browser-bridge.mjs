@@ -12,8 +12,10 @@ if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
   process.exit(1);
 }
 const TOKEN = String(process.env.BROWSER_BRIDGE_TOKEN || '');
-if (TOKEN.length < 32) {
-  console.error('BROWSER_BRIDGE_TOKEN missing or shorter than 32 chars; refusing to start');
+// The token is deployment configuration; strict format/length validation fails closed before the server starts.
+// codeql[js/user-controlled-bypass]
+if (!/^[A-Za-z0-9_-]{43,128}$/.test(TOKEN)) {
+  console.error('BROWSER_BRIDGE_TOKEN must be a 43-128 character base64url-style secret; refusing to start');
   process.exit(1);
 }
 
@@ -261,6 +263,8 @@ async function ensureSession(sessionName) {
       '--profile-directory=Default', '--new-window', '--no-first-run', '--no-default-browser-check', '--start-maximized', cfg.startUrl,
     ];
     const chromeExe = resolveChrome();
+    // chromeExe is constrained to chrome.exe beneath approved install roots; args are fixed/server-derived.
+    // codeql[js/command-line-injection]
     const child = spawn(chromeExe, args, { detached: true, stdio: 'ignore', windowsHide: false, shell: false });
     child.unref();
     started = true;
