@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { URL } from 'node:url';
+import crypto from 'node:crypto';
 
 const PORT = Number(process.env.BROWSER_BRIDGE_PORT || 8765);
 if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
@@ -30,17 +31,10 @@ function json(res, status, body) {
   res.end(data);
 }
 function unauthorized(res) { json(res, 401, { error: 'unauthorized' }); }
+const EXPECTED_AUTH = Buffer.from(`Bearer ${TOKEN}`);
 function validAuth(req) {
-  const expected = `Bearer ${TOKEN}`;
-  const got = String(req.headers.authorization || '');
-  if (got.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(got), Buffer.from(expected));
-}
-function timingSafeEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
+  const got = Buffer.from(String(req.headers.authorization || ''));
+  return got.length === EXPECTED_AUTH.length && crypto.timingSafeEqual(got, EXPECTED_AUTH);
 }
 function sessionConfig(name) {
   const cfg = SESSIONS[String(name || '')];
@@ -54,9 +48,19 @@ function chromeCandidates() {
   }
   return out;
 }
+function isWithin(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+function allowedChromeRoots() {
+  return [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]
+    .filter(Boolean)
+    .map(root => path.resolve(root));
+}
 function validChromeExecutable(candidate) {
   const resolved = path.resolve(String(candidate || ''));
   if (path.basename(resolved).toLowerCase() !== 'chrome.exe') return null;
+  if (!allowedChromeRoots().some(root => isWithin(root, resolved))) return null;
   try {
     if (!fs.statSync(resolved).isFile()) return null;
   } catch {
@@ -255,7 +259,8 @@ async function ensureSession(sessionName) {
       `--user-data-dir=${profileDir}`,
       '--profile-directory=Default', '--new-window', '--no-first-run', '--no-default-browser-check', '--start-maximized', cfg.startUrl,
     ];
-    const child = spawn(resolveChrome(), args, { detached: true, stdio: 'ignore', windowsHide: false });
+    const chromeExe = resolveChrome();
+    const child = spawn(chromeExe, args, { detached: true, stdio: 'ignore', windowsHide: false, shell: false });
     child.unref();
     started = true;
     const deadline = Date.now() + 15_000;
@@ -441,7 +446,10 @@ http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/session/product-probe') return json(res, 200, await productProbe(u.searchParams.get('session')));
     if (req.method === 'GET' && u.pathname === '/session/category-probe') return json(res, 200, await categoryProbe(u.searchParams.get('session'), u.searchParams.get('pageNumber')));
     return json(res, 404, { error: 'not found' });
-  } catch (error) { return json(res, 400, { error: String(error?.message || error) }); }
+  } catch (error) {
+    console.warn('browser bridge request failed', error instanceof Error ? error.message : 'unknown error');
+    return json(res, 400, { error: 'request failed' });
+  }
 }).listen(PORT, '127.0.0.1', () => {
   console.log(`browser bridge listening on ${PORT}; sessions: ${Object.keys(SESSIONS).join(', ')}`);
 });
