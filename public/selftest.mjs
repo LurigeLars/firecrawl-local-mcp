@@ -1,11 +1,13 @@
 // Exercises the gateway end to end. Usage: node selftest.mjs <base-url-with-secret-path>
 // e.g. http://gateway:8080/<secret>/mcp  or  https://firecrawl.example.com/<secret>/mcp
 const url = process.argv[2];
+// This operator-run diagnostic intentionally probes the explicitly supplied gateway URL.
+// It is not part of the gateway request path and must be able to test local deployments.
 const origin = new URL(url).origin;
 const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
 
 async function rpc(method, params, id = 1) {
-  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
+  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) }); // lgtm[js/request-forgery]
   const text = await r.text();
   const data = text.split('\n').find(l => l.startsWith('data:'))?.slice(5) ?? text;
   let json; try { json = JSON.parse(data); } catch { json = text.slice(0, 200); }
@@ -16,18 +18,18 @@ const results = [];
 const check = (name, ok, detail = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' - ' + detail : ''}`);
 
 // With Cloudflare Access enforced, unauthenticated calls stop at the edge; that is the expected result.
-const probe = await fetch(url, { method: 'POST', headers, body: '{}' });
+const probe = await fetch(url, { method: 'POST', headers, body: '{}' }); // lgtm[js/request-forgery]
 if (probe.status === 401 && /resource_metadata/.test(probe.headers.get('www-authenticate') ?? '')) {
   console.log('PASS Cloudflare Access enforced - unauthenticated request got 401 with OAuth metadata');
-  const meta = await (await fetch(`${origin}/.well-known/oauth-protected-resource`)).json().catch(() => ({}));
+  const meta = await (await fetch(`${origin}/.well-known/oauth-protected-resource`)).json().catch(() => ({})); // lgtm[js/request-forgery]
   console.log(`${meta.authorization_servers?.length ? 'PASS' : 'FAIL'} OAuth protected-resource metadata - ${JSON.stringify(meta)}`);
   console.log('INFO tool checks need a logged-in client (ChatGPT); run node public/access-test.mjs for the gateway JWT checks');
   process.exit(meta.authorization_servers?.length ? 0 : 1);
 }
 
-const bad = await fetch(`${origin}/wrong-secret/mcp`, { method: 'POST', headers, body: '{}' });
+const bad = await fetch(`${origin}/wrong-secret/mcp`, { method: 'POST', headers, body: '{}' }); // lgtm[js/request-forgery]
 check('wrong secret -> 404', bad.status === 404, `got ${bad.status}`);
-const root = await fetch(`${origin}/`);
+const root = await fetch(`${origin}/`); // lgtm[js/request-forgery]
 check('root -> 404', root.status === 404, `got ${root.status}`);
 
 const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'selftest', version: '1' } });
