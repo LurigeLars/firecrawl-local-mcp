@@ -23,8 +23,8 @@ const TRUSTED_LOCAL_APPDATA = path.resolve(os.homedir(), 'AppData', 'Local');
 const LOCAL_ROOT = path.resolve(TRUSTED_LOCAL_APPDATA, 'FirecrawlLocal');
 const SESSION_ROOT = path.resolve(LOCAL_ROOT, 'browser-profiles');
 const SESSIONS = Object.freeze({
-  'season-spendrups': { port: 9440, startUrl: 'https://ehandel.spendrups.se/', hosts: ['ehandel.spendrups.se', 'spendrups.se'] },
-  'season-ms': { port: 9441, startUrl: 'https://www.martinservera.se/', hosts: ['martinservera.se'] },
+  'season-spendrups': { profileName: 'season-spendrups', port: 9440, startUrl: 'https://ehandel.spendrups.se/', hosts: ['ehandel.spendrups.se', 'spendrups.se'] },
+  'season-ms': { profileName: 'season-ms', port: 9441, startUrl: 'https://www.martinservera.se/', hosts: ['martinservera.se'] },
 });
 const states = new Map();
 
@@ -81,8 +81,8 @@ function resolveChrome() {
   }
   throw new Error('Google Chrome executable not found');
 }
-function profilePath(sessionName) {
-  const candidate = path.resolve(SESSION_ROOT, String(sessionName || ''));
+function profilePath(profileName) {
+  const candidate = path.resolve(SESSION_ROOT, String(profileName || ''));
   const relative = path.relative(SESSION_ROOT, candidate);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('invalid browser profile path');
   return candidate;
@@ -255,7 +255,7 @@ async function ensureSession(sessionName) {
   let health = await cdpHealth(cfg);
   let started = false;
   if (!health.healthy) {
-    const profileDir = profilePath(sessionName);
+    const profileDir = profilePath(cfg.profileName);
     fs.mkdirSync(profileDir, { recursive: true });
     const args = [
       '--remote-debugging-address=127.0.0.1',
