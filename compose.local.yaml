@@ -21,6 +21,7 @@ services:
         grep -q 'process.env.VIEWPORT_HEIGHT' dist/api.js || echo 'WARNING: viewport patch not applied (upstream changed dist/api.js)' >&2;
         exec node dist/api.js
   redis:
+    image: redis:8.10.2-alpine
     restart: unless-stopped
   rabbitmq:
     restart: unless-stopped
