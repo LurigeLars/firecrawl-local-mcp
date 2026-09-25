@@ -31,6 +31,7 @@ function json(res, status, body) {
   res.end(data);
 }
 function unauthorized(res) { json(res, 401, { error: 'unauthorized' }); }
+// Compare the complete bearer credential in constant time; never authorize on user-derived metadata.
 const EXPECTED_AUTH = Buffer.from(`Bearer ${TOKEN}`);
 function validAuth(req) {
   const got = Buffer.from(String(req.headers.authorization || ''));
