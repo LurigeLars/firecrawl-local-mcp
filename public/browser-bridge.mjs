@@ -6,13 +6,18 @@ import os from 'node:os';
 import { URL } from 'node:url';
 
 const PORT = Number(process.env.BROWSER_BRIDGE_PORT || 8765);
+if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
+  console.error('BROWSER_BRIDGE_PORT must be an integer from 1024 to 65535; refusing to start');
+  process.exit(1);
+}
 const TOKEN = String(process.env.BROWSER_BRIDGE_TOKEN || '');
 if (TOKEN.length < 32) {
   console.error('BROWSER_BRIDGE_TOKEN missing or shorter than 32 chars; refusing to start');
   process.exit(1);
 }
 
-const SESSION_ROOT = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'FirecrawlLocal', 'browser-profiles');
+const LOCAL_ROOT = path.resolve(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'FirecrawlLocal');
+const SESSION_ROOT = path.resolve(LOCAL_ROOT, 'browser-profiles');
 const SESSIONS = Object.freeze({
   'season-spendrups': { port: 9440, startUrl: 'https://ehandel.spendrups.se/', hosts: ['ehandel.spendrups.se', 'spendrups.se'] },
   'season-ms': { port: 9441, startUrl: 'https://www.martinservera.se/', hosts: ['martinservera.se'] },
@@ -49,11 +54,30 @@ function chromeCandidates() {
   }
   return out;
 }
+function validChromeExecutable(candidate) {
+  const resolved = path.resolve(String(candidate || ''));
+  if (path.basename(resolved).toLowerCase() !== 'chrome.exe') return null;
+  try {
+    if (!fs.statSync(resolved).isFile()) return null;
+  } catch {
+    return null;
+  }
+  return resolved;
+}
 function resolveChrome() {
   const configured = String(process.env.BROWSER_CHROME_EXE || '').trim();
   const candidates = configured ? [configured] : chromeCandidates();
-  for (const candidate of candidates) if (fs.existsSync(candidate)) return path.resolve(candidate);
+  for (const candidate of candidates) {
+    const resolved = validChromeExecutable(candidate);
+    if (resolved) return resolved;
+  }
   throw new Error('Google Chrome executable not found');
+}
+function profilePath(sessionName) {
+  const candidate = path.resolve(SESSION_ROOT, String(sessionName || ''));
+  const relative = path.relative(SESSION_ROOT, candidate);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('invalid browser profile path');
+  return candidate;
 }
 function allowedUrl(value, cfg) {
   try {
@@ -181,7 +205,6 @@ class CdpClient {
     }
   }
   pushNetwork(item) {
-    // Intentionally omit headers, cookies and request bodies, and keep only the approved supplier host family.
     if (!allowedUrl(item?.url, this.cfg)) return;
     this.network.push(item);
     if (this.network.length > this.maxNetwork) this.network.splice(0, this.network.length - this.maxNetwork);
@@ -208,7 +231,6 @@ async function attach(sessionName) {
   const cfg = sessionConfig(sessionName);
   const targets = await listTargets(cfg);
   if (targets.length < 1) throw new Error('no matching page target');
-  // Use the first matching page in this dedicated supplier profile and never attach to unrelated tabs.
   const target = targets[0];
   const prior = states.get(sessionName);
   if (prior?.targetId === target.id && prior.client?.ws?.readyState === WebSocket.OPEN) return prior;
@@ -225,10 +247,10 @@ async function ensureSession(sessionName) {
   let health = await cdpHealth(cfg);
   let started = false;
   if (!health.healthy) {
-    const profileDir = path.join(SESSION_ROOT, sessionName);
+    const profileDir = profilePath(sessionName);
     fs.mkdirSync(profileDir, { recursive: true });
     const args = [
-      `--remote-debugging-address=127.0.0.1`,
+      '--remote-debugging-address=127.0.0.1',
       `--remote-debugging-port=${cfg.port}`,
       `--user-data-dir=${profileDir}`,
       '--profile-directory=Default', '--new-window', '--no-first-run', '--no-default-browser-check', '--start-maximized', cfg.startUrl,
@@ -286,10 +308,7 @@ async function openCategory(sessionName, pageNumber) {
   if (!allowedUrl(url, cfg) || parsed.hash) throw new Error('category URL rejected');
   if (parsed.pathname !== '/c/drycker/sprit/all-sprit') throw new Error('Spendrups category path rejected');
   const keys = [...new Set(parsed.searchParams.keys())];
-  if (keys.length !== 1 || keys[0] !== 'page' || parsed.searchParams.get('page') !== String(Number(pageNumber))) {
-    throw new Error('Spendrups category query rejected');
-  }
-
+  if (keys.length !== 1 || keys[0] !== 'page' || parsed.searchParams.get('page') !== String(Number(pageNumber))) throw new Error('Spendrups category query rejected');
   await client.send('Page.navigate', { url });
   const deadline = Date.now() + 15_000;
   let value = null;
@@ -304,9 +323,7 @@ async function openCategory(sessionName, pageNumber) {
   const finalUrl = new URL(String(value.url || ''));
   if (finalUrl.pathname !== '/c/drycker/sprit/all-sprit' || finalUrl.hash) throw new Error('Spendrups navigation left the approved category path');
   const finalKeys = [...new Set(finalUrl.searchParams.keys())];
-  if (finalKeys.length !== 1 || finalKeys[0] !== 'page' || finalUrl.searchParams.get('page') !== String(Number(pageNumber))) {
-    throw new Error('Spendrups navigation changed the approved category query');
-  }
+  if (finalKeys.length !== 1 || finalKeys[0] !== 'page' || finalUrl.searchParams.get('page') !== String(Number(pageNumber))) throw new Error('Spendrups navigation changed the approved category query');
   return { session: sessionName, pageNumber: Number(pageNumber), url: redactUrl(finalUrl.href), title: String(value.title || ''), readyState: String(value.readyState || '') };
 }
 
@@ -318,7 +335,6 @@ async function openProduct(sessionName, productId) {
   if (!allowedUrl(url, cfg) || parsed.search || parsed.hash) throw new Error('product URL rejected');
   if (sessionName === 'season-spendrups' && !/^\/Product\/[0-9]{1,12}$/.test(parsed.pathname)) throw new Error('Spendrups product path rejected');
   if (sessionName === 'season-ms' && !/^\/produkter\/[0-9]{1,12}$/.test(parsed.pathname)) throw new Error('M&S product path rejected');
-
   await client.send('Page.navigate', { url });
   const deadline = Date.now() + 15_000;
   let value = null;
@@ -373,12 +389,7 @@ async function productProbe(sessionName) {
   if (Buffer.byteLength(raw, 'utf8') > 256 * 1024) throw new Error('product response exceeded 256 KiB safety limit');
   let parsed;
   try { parsed = JSON.parse(raw); } catch { throw new Error('product response was not valid JSON'); }
-  return {
-    session: sessionName,
-    endpoint: SPENDRUPS_PRODUCT_DETAILS_PATH,
-    observedAt: match.ts,
-    payload: sanitizeProductPayload(parsed),
-  };
+  return { session: sessionName, endpoint: SPENDRUPS_PRODUCT_DETAILS_PATH, observedAt: match.ts, payload: sanitizeProductPayload(parsed) };
 }
 
 async function categoryProbe(sessionName, pageNumber) {
@@ -391,9 +402,7 @@ async function categoryProbe(sessionName, pageNumber) {
     const meta = spendrupsCategoryRequestMeta(item.url);
     return Boolean(meta && (requestedPage === null || meta.pageNumber === requestedPage));
   });
-  if (!match) throw new Error(requestedPage === null
-    ? 'no observed Spendrups category response; open a category page first'
-    : `no observed Spendrups category response for page ${requestedPage}; open that category page first`);
+  if (!match) throw new Error(requestedPage === null ? 'no observed Spendrups category response; open a category page first' : `no observed Spendrups category response for page ${requestedPage}; open that category page first`);
   const request = spendrupsCategoryRequestMeta(match.url);
   if (!request) throw new Error('observed category response failed request validation');
   const result = await client.send('Network.getResponseBody', { requestId: String(match.requestId || '') });
@@ -402,13 +411,7 @@ async function categoryProbe(sessionName, pageNumber) {
   if (Buffer.byteLength(raw, 'utf8') > 768 * 1024) throw new Error('category response exceeded 768 KiB safety limit');
   let parsed;
   try { parsed = JSON.parse(raw); } catch { throw new Error('category response was not valid JSON'); }
-  return {
-    session: sessionName,
-    endpoint: SPENDRUPS_CATEGORY_PRODUCTS_PATH,
-    observedAt: match.ts,
-    request,
-    payload: sanitizeProductPayload(parsed),
-  };
+  return { session: sessionName, endpoint: SPENDRUPS_CATEGORY_PRODUCTS_PATH, observedAt: match.ts, request, payload: sanitizeProductPayload(parsed) };
 }
 
 async function networkLog(sessionName, limit) {
@@ -429,16 +432,10 @@ http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (req.method === 'GET' && u.pathname === '/health') return json(res, 200, { ok: true, sessions: Object.keys(SESSIONS) });
-    if (req.method === 'POST' && u.pathname === '/session/open') {
-      const body = await parseBody(req); return json(res, 200, await ensureSession(body.session));
-    }
+    if (req.method === 'POST' && u.pathname === '/session/open') { const body = await parseBody(req); return json(res, 200, await ensureSession(body.session)); }
     if (req.method === 'GET' && u.pathname === '/session/status') return json(res, 200, await status(u.searchParams.get('session')));
-    if (req.method === 'POST' && u.pathname === '/session/product-open') {
-      const body = await parseBody(req); return json(res, 200, await openProduct(body.session, body.productId));
-    }
-    if (req.method === 'POST' && u.pathname === '/session/category-open') {
-      const body = await parseBody(req); return json(res, 200, await openCategory(body.session, body.pageNumber));
-    }
+    if (req.method === 'POST' && u.pathname === '/session/product-open') { const body = await parseBody(req); return json(res, 200, await openProduct(body.session, body.productId)); }
+    if (req.method === 'POST' && u.pathname === '/session/category-open') { const body = await parseBody(req); return json(res, 200, await openCategory(body.session, body.pageNumber)); }
     if (req.method === 'GET' && u.pathname === '/session/snapshot') return json(res, 200, await snapshot(u.searchParams.get('session')));
     if (req.method === 'GET' && u.pathname === '/session/network') return json(res, 200, await networkLog(u.searchParams.get('session'), u.searchParams.get('limit')));
     if (req.method === 'GET' && u.pathname === '/session/product-probe') return json(res, 200, await productProbe(u.searchParams.get('session')));
