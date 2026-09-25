@@ -15,7 +15,7 @@ const ctx = { allowedTools, compactIds };
 
 const isWindows = process.platform === 'win32';
 const child = spawn(isWindows ? 'cmd.exe' : 'npx',
-  isWindows ? ['/d', '/s', '/c', 'npx', '-y', 'firecrawl-mcp@3.24.0'] : ['-y', 'firecrawl-mcp@3.24.0'],
+  isWindows ? ['/d', '/s', '/c', 'npx', '-y', 'firecrawl-mcp@3.25.4'] : ['-y', 'firecrawl-mcp@3.25.4'],
   { env: { ...process.env, FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL ?? 'http://127.0.0.1:3002' }, stdio: ['pipe', 'pipe', 'inherit'] });
 
 const toClient = obj => process.stdout.write(JSON.stringify(obj) + '\n');
