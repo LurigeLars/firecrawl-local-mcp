@@ -227,16 +227,34 @@ switch ($Action) {
     }
     'test' {
         $body = @{ url = 'https://www.iana.org/help/example-domains'; formats = @('markdown') } | ConvertTo-Json
-        $r = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3002/v2/scrape' -ContentType 'application/json' -Body $body -TimeoutSec 120
-        "local engine: success=$($r.success)"
+        $localOk = $false
+        $lastLocalError = $null
+        for ($attempt = 1; $attempt -le 15; $attempt++) {
+            try {
+                $r = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3002/v2/scrape' -ContentType 'application/json' -Body $body -TimeoutSec 30
+                if ($r.success) {
+                    $localOk = $true
+                    break
+                }
+                $lastLocalError = 'Firecrawl returned success=false'
+            } catch {
+                $lastLocalError = $_.Exception.Message
+            }
+            if ($attempt -lt 15) { Start-Sleep -Seconds 2 }
+        }
+        if (-not $localOk) { throw "local engine test failed after 15 attempts: $lastLocalError" }
+        "local engine: success=True"
+
         if ($public) {
             Set-BrowserComposePort
             $port = Get-BrowserPort
             "browser bridge: healthy=$(Test-BrowserBridge) port=$port"
-            $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fc-test","version":"1"}}}'
-            $h = @{ Accept = 'application/json, text/event-stream' }
-            $resp = Invoke-WebRequest -Method Post -Uri (Get-PublicUrl) -ContentType 'application/json' -Headers $h -Body $init -TimeoutSec 60
-            "public MCP endpoint: HTTP $($resp.StatusCode)"
+
+            # selftest.mjs understands both supported public modes:
+            # - Cloudflare Access: unauthenticated 401 + OAuth metadata is a PASS
+            # - secret-path fallback: run the full unauthenticated gateway checks
+            & node "$root\public\selftest.mjs" (Get-PublicUrl)
+            if ($LASTEXITCODE -ne 0) { throw "public MCP self-test failed with exit code $LASTEXITCODE" }
         }
     }
 }
