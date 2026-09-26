@@ -12,24 +12,40 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
+  packages: read
+  security-events: write
 
 jobs:
   analyze:
-    name: Analyze JavaScript/TypeScript
+    name: Analyze (${{ matrix.language }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - actions
+          - javascript-typescript
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
-          languages: javascript-typescript
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config: |
+            queries:
+              - uses: security-and-quality
 
-      - name: Analyze
+      - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
