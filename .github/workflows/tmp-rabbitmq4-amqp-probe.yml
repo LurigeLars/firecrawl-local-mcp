@@ -1,0 +1,90 @@
+name: Temporary RabbitMQ 4 AMQP compatibility probe
+
+on:
+  push:
+    branches:
+      - test/rabbitmq-4-3-6-alpine-20260926
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  amqp-probe:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:4.3.6-management-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_running"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install AMQP client used by Firecrawl
+        run: |
+          mkdir -p /tmp/amqp-probe
+          cd /tmp/amqp-probe
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund amqplib@0.10.9
+
+      - name: Probe Firecrawl queue patterns against RabbitMQ 4
+        run: |
+          cd /tmp/amqp-probe
+          node <<'NODE'
+          const amqp = require("amqplib");
+
+          (async () => {
+            const conn = await amqp.connect("amqp://guest:guest@127.0.0.1:5672");
+            const ch = await conn.createChannel();
+
+            await ch.prefetch(5, false);
+
+            const quorum = "probe.quorum";
+            await ch.assertQueue(quorum, {
+              durable: true,
+              arguments: {
+                "x-queue-type": "quorum",
+                "x-max-length": 20000,
+              },
+            });
+
+            const classic = await ch.assertQueue("", {
+              exclusive: true,
+              autoDelete: true,
+              durable: false,
+              arguments: {
+                "x-queue-type": "classic",
+              },
+            });
+
+            await ch.assertExchange("probe.dlx", "direct", { durable: true });
+            await ch.bindQueue(quorum, "probe.dlx", "probe");
+
+            ch.sendToQueue(quorum, Buffer.from(JSON.stringify({ok: true})), {
+              persistent: true,
+            });
+
+            const msg = await ch.get(quorum, { noAck: false });
+            if (!msg) throw new Error("RabbitMQ 4 did not return the published quorum message");
+            ch.ack(msg);
+
+            await ch.deleteQueue(quorum);
+            await ch.deleteExchange("probe.dlx");
+            if (!classic.queue) throw new Error("Classic ephemeral queue was not created");
+
+            await ch.close();
+            await conn.close();
+            console.log("RABBITMQ_4_FIRECRAWL_AMQP_PATTERNS_OK");
+          })().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          NODE
