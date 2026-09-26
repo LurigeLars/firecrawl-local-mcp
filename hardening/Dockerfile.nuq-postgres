@@ -1,0 +1,28 @@
+# Alpine variant avoids the Go-based gosu binary and Debian package surface
+# found in the upstream postgres:17 image. pg_cron is built against the
+# official PostgreSQL 17 installation in this image.
+FROM postgres:17-alpine
+
+ARG PG_CRON_VERSION=1.6.8
+
+RUN set -eux; \
+    apk add --no-cache --virtual .pgcron-build-deps \
+        build-base \
+        ca-certificates \
+        curl \
+    ; \
+    curl -fsSL -o /tmp/pg_cron.tar.gz \
+        "https://github.com/citusdata/pg_cron/archive/refs/tags/v${PG_CRON_VERSION}.tar.gz"; \
+    mkdir -p /tmp/pg_cron; \
+    tar -xzf /tmp/pg_cron.tar.gz --strip-components=1 -C /tmp/pg_cron; \
+    make -C /tmp/pg_cron; \
+    make -C /tmp/pg_cron install; \
+    rm -rf /tmp/pg_cron /tmp/pg_cron.tar.gz; \
+    apk del .pgcron-build-deps
+
+RUN set -eux; \
+    conf_sample="$(pg_config --sharedir)/postgresql.conf.sample"; \
+    sed -ri "s/^#?shared_preload_libraries\s*=.*/shared_preload_libraries = 'pg_cron'/" "$conf_sample"; \
+    printf "\n# Added for pg_cron\ncron.database_name = 'postgres'\n" >> "$conf_sample"
+
+COPY nuq.sql /docker-entrypoint-initdb.d/010-nuq.sql

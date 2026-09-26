@@ -1,0 +1,115 @@
+# syntax=docker/dockerfile:1
+
+FROM node:22.23.2-trixie-slim AS build-base
+
+ENV PNPM_HOME="/pnpm" \
+    PATH="$PNPM_HOME:$PATH" \
+    CI=true \
+    COREPACK_ENABLE_PROJECT_SPEC=0
+
+RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
+
+# Build Go shared library with a Go release that contains fixes for the
+# vulnerabilities reported by Docker Scout in the upstream 1.24 builder.
+FROM golang:1.26.6 AS go-build
+WORKDIR /app
+COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
+
+RUN cd sharedLibs/go-html-to-md \
+    && go mod download \
+    && go get golang.org/x/net@v0.56.0 \
+    && go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go
+
+FROM build-base AS build
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        build-essential \
+        pkg-config \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG FDB_VERSION=7.3.63
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in arm64) FDB_ARCH=aarch64 ;; *) FDB_ARCH=$ARCH ;; esac \
+    && curl -fsSL -o /tmp/fdb-clients.deb \
+        "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_${FDB_ARCH}.deb" \
+    && dpkg -i /tmp/fdb-clients.deb \
+    && rm /tmp/fdb-clients.deb
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+    && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
+
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY patches ./patches
+COPY native ./native
+
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/native/target \
+    pnpm install --frozen-lockfile
+
+COPY . .
+
+RUN rm -rf dist \
+    && pnpm run build
+
+ARG GIT_SHA=unknown
+RUN test -s dist/src/harness.js \
+    && test -s dist/src/controllers/v0/crawl-status.js \
+    && printf '%s\n' "$GIT_SHA" > BUILD_SHA
+
+RUN pnpm prune --prod --ignore-scripts
+
+FROM node:22.23.2-trixie-slim AS runtime
+
+ENV CI=true
+
+RUN apt-get update \
+    && apt-get -y upgrade \
+    && apt-get install -y --no-install-recommends \
+        git \
+        procps \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG FDB_VERSION=7.3.63
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in arm64) FDB_ARCH=aarch64 ;; *) FDB_ARCH=$ARCH ;; esac \
+    && curl -fsSL -o /tmp/fdb-clients.deb \
+        "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_${FDB_ARCH}.deb" \
+    && dpkg -i /tmp/fdb-clients.deb \
+    && rm /tmp/fdb-clients.deb
+
+WORKDIR /app
+ARG GIT_SHA=unknown
+ENV FIRECRAWL_BUILD_SHA=$GIT_SHA
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/native ./native
+COPY --from=build /app/BUILD_SHA ./BUILD_SHA
+COPY --from=go-build /app/sharedLibs/go-html-to-md/libhtml-to-markdown.so ./sharedLibs/go-html-to-md/
+
+# The production command is plain Node. npm/corepack are not needed at runtime,
+# so remove their package-manager surface after the application is assembled.
+RUN rm -rf \
+        /usr/local/lib/node_modules/npm \
+        /usr/local/lib/node_modules/corepack \
+        /root/.cache/node/corepack \
+    && rm -f \
+        /usr/local/bin/npm \
+        /usr/local/bin/npx \
+        /usr/local/bin/corepack \
+        /usr/local/bin/pnpm \
+        /usr/local/bin/pnpx \
+    && node -e 'const fs = require("fs"); for (const p of ["dist/src/harness.js", "dist/src/controllers/v0/crawl-status.js", "BUILD_SHA"]) { if (!fs.statSync(p).size) throw new Error(`${p} missing or empty`); }'
+
+EXPOSE 8080
+CMD ["node", "dist/src/harness.js", "--start-docker"]
