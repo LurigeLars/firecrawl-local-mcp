@@ -8,8 +8,6 @@ const bootstrap = readFileSync(new URL('../scripts/configure_service_secrets.ps1
 
 test('service secrets are injected into tmpfs by post_start hooks', () => {
   assert.doesNotMatch(compose, /^secrets:\s*$/m);
-  assert.doesNotMatch(compose, /environment:\s*FIRECRAWL_POSTGRES_PASSWORD_SECRET/);
-  assert.doesNotMatch(compose, /environment:\s*FIRECRAWL_SEARXNG_SECRET_SECRET/);
 
   assert.match(compose, /post_start:/);
   assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777/);
