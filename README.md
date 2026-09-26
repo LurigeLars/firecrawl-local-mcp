@@ -23,8 +23,7 @@ This repo holds only the local additions. Secrets and machine-specific files are
 1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
 2. Copy `.env.example` → `.env`, `secrets.env.example` → `secrets.env`, `public/gateway.env.example` → `public/gateway.env`,
    and fill in the placeholders (random values for the secrets; Cloudflare Access values from the dashboard).
-3. Cloudflare Tunnel: `cloudflared tunnel login`, `cloudflared tunnel create firecrawl`, then copy
-   `cloudflared.example/config.yml` → `.cloudflared/config.yml` with the tunnel id (credentials JSON goes next to it).
+3. Configure the host-level shared Cloudflare Tunnel route for your public hostname to `http://firecrawl-gateway:8080`.
 4. `secrets.env` also needs `SEARXNG_SECRET` (random hex).
 5. Ollama: `ollama pull qwen2.5:7b`, create `qwen2.5-16k` (see "Local AI model"), set user env `OLLAMA_IGPU_ENABLE=1`.
 6. `.\fc.ps1 up`, then `.\fc.ps1 test`.
@@ -49,8 +48,10 @@ claude mcp add-json firecrawl-mcp -s user '{"type":"stdio","command":"node","arg
 
 ## Public access for ChatGPT
 
-`compose.public.yaml` adds three containers (none publishes a host port):
-`mcp` (firecrawl-mcp@3.24.0 in HTTP mode) → `gateway` (`public/gateway/gateway.mjs` + `instructions.md`) → `cloudflared` (tunnel configuration in `.cloudflared/`). They're included automatically by `fc.ps1` once `.cloudflared/config.yml` exists.
+`compose.public.yaml` adds two containers (none publishes a host port):
+`mcp` (firecrawl-mcp@3.24.0 in HTTP mode) → `gateway` (`public/gateway/gateway.mjs` + `instructions.md`).
+The host-level `mcp-cloudflared` container provides the shared tunnel and reaches this stack through the
+`firecrawl-gateway:8080` alias. `fc.ps1` includes the public compose overlay when `public/gateway.env` exists.
 
 - Login: configure a Cloudflare Access application for the MCP endpoint with **Managed OAuth** (DCR; redirect URIs
   `https://chatgpt.com/connector_platform_oauth_redirect` and `https://chatgpt.com/connector/oauth/*`; grant 1 month,
@@ -60,9 +61,9 @@ claude mcp add-json firecrawl-mcp -s user '{"type":"stdio","command":"node","arg
   The gateway refuses to start when `ACCESS_AUD` is empty, so an accidentally blank value cannot silently leave only
   the secret link in place (since 2026-09-17). Emergency fallback to the secret link: set `ACCESS_AUD=` **and**
   `ALLOW_SECRET_PATH=1` in `.env`, run `.\fc.ps1 up`, and disable the Access application.
-- Address: `.\fc.ps1 url` prints the configured `https://<hostname>/mcp` endpoint (or the secret-path URL when Access is off).
+- Address: set `PUBLIC_HOSTNAME=<hostname>` in `public/gateway.env`; `.\fc.ps1 url` prints the resulting `https://<hostname>/mcp` endpoint (or the secret-path URL when Access is off).
   Anything else returns 404.
-- Secret: `public/gateway.env` (`GATEWAY_SECRET`). **Keep `public/gateway.env` and `.cloudflared/` local and out of git.**
+- Secret: `public/gateway.env` (`GATEWAY_SECRET`). **Keep `public/gateway.env` local and out of git.**
 - Rotate the secret (e.g. if the link leaks): replace the value in `public/gateway.env`, run `.\fc.ps1 up`, update the ChatGPT connector URL.
 - Gateway: only scrape/map/search/crawl/check_crawl_status are listed and callable (`firecrawl_parse` reads arbitrary
   local files in this mode and is blocked); scrape/crawl requests asking for screenshot, branding, audio or browser
@@ -72,8 +73,8 @@ claude mcp add-json firecrawl-mcp -s user '{"type":"stdio","command":"node","arg
   (read on every connect, no restart needed). ChatGPT picks them up when the connector is refreshed ("Uppdatera").
   Keep it in line with the `firecrawl-mcp` core skill.
 - Verify end to end: `node public/selftest.mjs (.\fc.ps1 url)`; watch traffic: `.\fc.ps1 logs`.
-- Kill switch: `docker stop firecrawl-cloudflared-1` (local use keeps working). Remove entirely: delete the tunnel in the
-  Cloudflare dashboard (Zero Trust → Networks → Tunnels) and the `firecrawl` DNS record.
+- Per-service public kill switch: stop the Firecrawl gateway container. Do not stop the shared `mcp-cloudflared`
+  container unless you intend to disconnect all MCP gateways that use it.
 - Docker Desktop must be running for any of this; enable "Start Docker Desktop when you sign in".
 
 ### Local interactive supplier browser bridge
