@@ -22,7 +22,7 @@ This repo holds only the local additions. Secrets and machine-specific files are
 
 1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
 2. Copy `.env.example` to `.env` and `public/gateway.env.example` to `public/gateway.env`; replace deployment placeholders locally and keep the real files out of Git.
-3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and supplied to containers through Docker Compose secret files.
+3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and injected into per-container tmpfs only at runtime.
 4. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
 5. `public/browser.env` is generated automatically by `.\fc.ps1 up`; `public/browser.env.example` documents its format only.
 6. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
@@ -96,7 +96,7 @@ The bridge is intentionally not a generic browser automation service. Adding sup
 
 `searxng` (image `searxng/searxng:2026.9.10-931fd9787`, service in `compose.local.yaml`, settings in
 `searxng/settings.yml`) is Firecrawl's search backend (reached through `searxng-proxy`, see below). It is only
-reachable on the internal Docker network. `SEARXNG_SECRET` is DPAPI-protected on the Windows host and delivered as a Docker Compose secret file; the container wrapper exports it only into the SearXNG process at startup. Limiter off (single internal
+reachable on the internal Docker network. `SEARXNG_SECRET` is DPAPI-protected on the Windows host and injected into the container's runtime tmpfs by a `post_start` hook; the container wrapper exports it only into the SearXNG process at startup. Limiter off (single internal
 client), JSON output on.
 
 Why: without it Firecrawl searched DuckDuckGo directly, which answers this home IP with CAPTCHAs, so searches often came
