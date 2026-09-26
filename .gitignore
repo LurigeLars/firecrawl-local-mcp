@@ -8,7 +8,6 @@
 secrets.env
 public/gateway.env
 public/browser.env
-.cloudflared/
 
 # Runtime / scratch
 .runtime/

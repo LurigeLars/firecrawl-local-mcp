@@ -1,4 +1,4 @@
-# Public ChatGPT access: firecrawl-mcp (HTTP) -> secret-path gateway -> Cloudflare Tunnel.
+# Public ChatGPT access: firecrawl-mcp (HTTP) -> gateway -> shared Cloudflare Tunnel.
 # Nothing here publishes a host port; the only way in is through the tunnel.
 services:
   mcp:
@@ -35,19 +35,14 @@ services:
       - ../public/gateway:/app:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    networks: [edge]
+    networks:
+      edge:
+        aliases:
+          - firecrawl-gateway
     depends_on: [mcp]
     read_only: true
     restart: unless-stopped
 
-  cloudflared:
-    image: cloudflare/cloudflared:2026.9.3
-    command: ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"]
-    volumes:
-      - ../.cloudflared:/etc/cloudflared:ro
-    networks: [edge]
-    depends_on: [gateway]
-    restart: unless-stopped
 
 networks:
   edge:
