@@ -6,21 +6,33 @@ const compose = readFileSync(new URL('../compose.local.yaml', import.meta.url), 
 const launcher = readFileSync(new URL('../fc.ps1', import.meta.url), 'utf8');
 const bootstrap = readFileSync(new URL('../scripts/configure_service_secrets.ps1', import.meta.url), 'utf8');
 
-test('service secrets use Compose secret files, not container environment values', () => {
-  assert.match(compose, /postgres_password:\s*\n\s*environment:\s*FIRECRAWL_POSTGRES_PASSWORD_SECRET/);
-  assert.match(compose, /searxng_secret:\s*\n\s*environment:\s*FIRECRAWL_SEARXNG_SECRET_SECRET/);
-  assert.match(compose, /POSTGRES_PASSWORD_FILE:\s*\/run\/secrets\/postgres_password/);
-  assert.match(compose, /cat \/run\/secrets\/postgres_password/);
-  assert.match(compose, /cat \/run\/secrets\/searxng_secret/);
+test('service secrets are injected into tmpfs by post_start hooks', () => {
+  assert.doesNotMatch(compose, /^secrets:\s*$/m);
+  assert.doesNotMatch(compose, /environment:\s*FIRECRAWL_POSTGRES_PASSWORD_SECRET/);
+  assert.doesNotMatch(compose, /environment:\s*FIRECRAWL_SEARXNG_SECRET_SECRET/);
+
+  assert.match(compose, /post_start:/);
+  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777/);
+  assert.match(compose, /printf '%s' "\$\$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > \/run\/firecrawl-secrets\/postgres_password/);
+  assert.match(compose, /printf '%s' "\$\$FIRECRAWL_SEARXNG_SECRET_SECRET" > \/run\/firecrawl-secrets\/searxng_secret/);
+  assert.match(compose, /POSTGRES_PASSWORD_FILE:\s*\/run\/firecrawl-secrets\/postgres_password/);
+});
+
+test('main processes wait for tmpfs secrets instead of receiving secret values in container config', () => {
+  assert.match(compose, /POSTGRES_PASSWORD:\s*""/);
+  assert.match(compose, /SEARXNG_SECRET:\s*""/);
+  assert.match(compose, /while \[ ! -s \/run\/firecrawl-secrets\/postgres_password \]/);
+  assert.match(compose, /while \[ ! -s \/run\/firecrawl-secrets\/searxng_secret \]/);
   assert.doesNotMatch(compose, /POSTGRES_PASSWORD:\s*\$\{/);
   assert.doesNotMatch(compose, /SEARXNG_SECRET:\s*\$\{/);
 });
 
-test('launcher no longer loads legacy secrets.env', () => {
+test('launcher no longer loads legacy secrets.env and supplies hook variables only for up', () => {
   assert.doesNotMatch(launcher, /--env-file['",\s]+\$root\\secrets\.env/);
   assert.match(launcher, /postgres_password\.dpapi/);
   assert.match(launcher, /searxng_secret\.dpapi/);
-  assert.match(launcher, /Set-ComposeServiceSecrets/);
+  assert.match(launcher, /Set-RuntimeHookSecrets/);
+  assert.match(launcher, /-UseRealSecrets \(\$Action -eq "up"\)/);
 });
 
 test('migration removes only known legacy service-secret entries after DPAPI storage', () => {
