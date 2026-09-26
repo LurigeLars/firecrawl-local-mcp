@@ -24,6 +24,7 @@ services:
     image: redis:8.10.2-alpine
     restart: unless-stopped
   rabbitmq:
+    image: rabbitmq:4.3.6-management-alpine
     restart: unless-stopped
   nuq-postgres:
     restart: unless-stopped
