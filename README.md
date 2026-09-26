@@ -6,17 +6,16 @@ This is an original deployment-wrapper project, **not a fork of Firecrawl**. It 
 
 The repository-specific layer includes:
 
-- local and public MCP proxies/gateways with explicit tool allowlists and model-context compaction;
-- Cloudflare Access integration using a shared-tunnel deployment model;
-- SearXNG routing, search normalization, and optional local/Gemini LLM adapters;
-- DPAPI-backed host secrets, Docker/network isolation, and hardened runtime configuration;
-- a narrowly scoped local browser-session bridge for explicitly configured supplier workflows; and
-- deployment scripts, tests, benchmarks, and adapted workflow skills.
+- Local and public MCP proxies/gateways with explicit tool allowlists and model-context compaction.
+- Cloudflare Access integration using a shared-tunnel deployment model.
+- SearXNG routing, search normalization, and optional local/Gemini LLM adapters.
+- DPAPI-backed host secrets, Docker/network isolation, and hardened runtime configuration.
+- A narrowly scoped local browser-session bridge for explicitly configured supplier workflows.
+- Deployment scripts, tests, benchmarks, and adapted workflow skills.
 
 Upstream Firecrawl remains a separate checkout and retains its own license and release lifecycle.
 
-
-Public reference snapshot of a self-hosted Firecrawl deployment wrapper. This repository is **not a fork of Firecrawl** and does not vendor the Firecrawl source tree. It contains deployment overrides, MCP gateway/proxy code, search/LLM adapters, tests, and adapted workflow skills that are used with an upstream Firecrawl checkout.
+This public reference snapshot contains the deployment overrides, MCP gateway/proxy code, search/LLM adapters, tests, and adapted workflow skills used with that upstream checkout.
 
 Upstream projects:
 - Firecrawl: https://github.com/firecrawl/firecrawl — AGPL-3.0
@@ -82,10 +81,7 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
   Anything else returns 404.
 - Gateway secrets and deployment identifiers are local-only and must stay out of Git.
 - Rotate the secret (e.g. if the link leaks): replace the value in `public/gateway.env`, run `.\fc.ps1 up`, update the ChatGPT connector URL.
-- Gateway: only scrape/map/search/crawl/check_crawl_status are listed and callable (`firecrawl_parse` reads arbitrary
-  local files in this mode and is blocked); scrape/crawl requests asking for screenshot, branding, audio or browser
-  `actions` are answered at once with a tool error (the instance cannot serve them); 120 requests/min per caller IP
-  (`RATE_PER_MIN`); 256 KB request cap.
+- Gateway: the Firecrawl surface is limited to scrape/map/search/crawl/check_crawl_status; `firecrawl_parse` is blocked because it can read arbitrary local files in this mode. The public deployment also exposes the separate, allowlisted supplier-browser tools documented below. Scrape/crawl requests asking for screenshot, branding, audio, or browser `actions` are rejected immediately because this self-hosted instance cannot serve them. The gateway defaults to 120 requests/min per caller IP (`RATE_PER_MIN`) with a 256 KB request cap.
 - Server instructions: the gateway replaces the MCP `initialize` instructions with `public/gateway/instructions.md`
   (read on every connect, no restart needed). ChatGPT picks them up when the connector is refreshed ("Uppdatera").
   Keep it in line with the `firecrawl-mcp` core skill.
@@ -96,17 +92,23 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
 
 ### Local interactive supplier browser bridge
 
-For the Season Hotel pilot, the public ChatGPT connector also exposes four narrowly scoped browser-session tools: `browser_session_open`, `browser_session_status`, `browser_snapshot`, and `browser_network_log`. They only accept `season-spendrups` and `season-ms`.
+For the Season Hotel pilot, the public ChatGPT connector exposes a separate, narrowly scoped supplier-browser surface:
 
-`fc.ps1 up` starts `public/browser-bridge.mjs` on the Windows host and creates `public/browser.env` with a random internal token if needed. The bridge opens a visible dedicated Chrome profile per supplier and keeps Chrome DevTools Protocol on loopback-only ports (`127.0.0.1:9440` / `9441`). The Docker gateway reaches the bridge through `host.docker.internal:8765` using the internal token; the bridge does not expose arbitrary URLs, credential entry, cookie export, storage export, request headers, or request bodies.
+- `browser_session_open` and `browser_session_status` manage the two approved sessions: `season-spendrups` and `season-ms`.
+- `browser_product_open` navigates an approved session only to a direct numeric product-detail path; it does not accept arbitrary URLs or search terms.
+- `browser_category_open` is restricted to the fixed Spendrups category flow and a bounded page number.
+- `browser_snapshot` and `browser_network_log` return bounded, redacted read-only views.
+- `browser_product_probe` and `browser_category_probe` return sanitized data from already observed Spendrups requests.
+
+`fc.ps1 up` starts `public/browser-bridge.mjs` on the Windows host and creates `public/browser.env` with a random internal token if needed. Unless `BROWSER_BRIDGE_PORT` is configured explicitly, the launcher reuses its previous valid port or selects the first free loopback port in `8765-8799`, records it under `.runtime`, and passes that port to the Docker gateway. Supplier Chrome DevTools Protocol endpoints remain loopback-only on `127.0.0.1:9440` and `127.0.0.1:9441`.
 
 Manual-auth workflow:
 1. Call `browser_session_open` for the supplier. A visible Chrome window opens on the Windows desktop.
 2. The user logs in manually in that Chrome window. Never send credentials through chat or browser automation.
-3. Call `browser_snapshot` and `browser_network_log` read-only to inspect the same authenticated session. Network capture begins when the bridge attaches, so open the session before logging in/navigating.
+3. Use the bounded snapshot, probe, category/product-open, and network-log tools as needed. Network capture begins when the bridge attaches, so open the session before logging in or navigating.
 4. Browser profiles stay under `%LOCALAPPDATA%\FirecrawlLocal\browser-profiles` and remain outside Git/Drive. `fc.ps1 down` stops the bridge process but does not delete the profiles.
 
-The bridge is intentionally not a generic browser automation service. Adding suppliers, navigation/click/type capabilities, credential handling, or broader network output requires a separate security review.
+The bridge is intentionally not a generic browser automation service. It does not expose arbitrary URLs, credential entry, cookie/storage export, request headers, or request bodies. Expanding suppliers or navigation capabilities requires an explicit code change and review.
 
 ## Search backend (SearXNG)
 
