@@ -237,7 +237,7 @@ function Test-LegacyServiceSecrets {
     return $false
 }
 
-function Set-ComposeServiceSecrets([bool]$UseRealSecrets) {
+function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
     if ($UseRealSecrets) {
         if (
             -not (Test-Path -LiteralPath $PostgresDpapiPath -PathType Leaf) -or
@@ -335,7 +335,7 @@ $searxngSecretOriginal = if ($searxngSecretWasSet) { $env:FIRECRAWL_SEARXNG_SECR
 
 try {
     if ($Action -in $composeActions) {
-        Set-ComposeServiceSecrets -UseRealSecrets ($Action -eq "up")
+        Set-RuntimeHookSecrets -UseRealSecrets ($Action -eq "up")
     }
 switch ($Action) {
     'up' {
@@ -347,7 +347,7 @@ switch ($Action) {
         }
         docker @compose up -d --build
         if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
-        Set-ComposeServiceSecrets -UseRealSecrets $false
+        Set-RuntimeHookSecrets -UseRealSecrets $false
         Import-AvailableRuntimeSecrets
     }
     'down' {
