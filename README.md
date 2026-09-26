@@ -21,10 +21,11 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 This repo holds only the local additions. Secrets and machine-specific files are gitignored.
 
 1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
-2. Provide deployment-local runtime, secret and gateway configuration out of band; keep all such files out of Git.
-3. Configure the shared Cloudflare route and Access application outside this repository.
-4. Install the required local model/runtime dependencies described below.
-5. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
+2. Copy `.env.example` to `.env`, `secrets.env.example` to `secrets.env`, and `public/gateway.env.example` to `public/gateway.env`; replace every placeholder locally and keep the real files out of Git.
+3. `public/browser.env` is generated automatically by `.\fc.ps1 up`; `public/browser.env.example` documents its format only.
+4. Configure the shared Cloudflare route and Access application for your own hostname.
+5. Install the required local model/runtime dependencies described below.
+6. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
