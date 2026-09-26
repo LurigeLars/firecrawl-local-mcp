@@ -21,12 +21,10 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 This repo holds only the local additions. Secrets and machine-specific files are gitignored.
 
 1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
-2. Copy `.env.example` → `.env`, `secrets.env.example` → `secrets.env`, `public/gateway.env.example` → `public/gateway.env`,
-   and fill in the placeholders (random values for the secrets; Cloudflare Access values from the dashboard).
-3. Configure the host-level shared Cloudflare Tunnel route for your public hostname to `http://firecrawl-gateway:8080`.
-4. `secrets.env` also needs `SEARXNG_SECRET` (random hex).
-5. Ollama: `ollama pull qwen2.5:7b`, create `qwen2.5-16k` (see "Local AI model"), set user env `OLLAMA_IGPU_ENABLE=1`.
-6. `.\fc.ps1 up`, then `.\fc.ps1 test`.
+2. Provide deployment-local runtime, secret and gateway configuration out of band; keep all such files out of Git.
+3. Configure the shared Cloudflare route and Access application outside this repository.
+4. Install the required local model/runtime dependencies described below.
+5. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
@@ -61,9 +59,9 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
   The gateway refuses to start when `ACCESS_AUD` is empty, so an accidentally blank value cannot silently leave only
   the secret link in place (since 2026-09-17). Emergency fallback to the secret link: set `ACCESS_AUD=` **and**
   `ALLOW_SECRET_PATH=1` in `.env`, run `.\fc.ps1 up`, and disable the Access application.
-- Address: set `PUBLIC_HOSTNAME=<hostname>` in `public/gateway.env`; `.\fc.ps1 url` prints the resulting `https://<hostname>/mcp` endpoint (or the secret-path URL when Access is off).
+- Address: the public endpoint is supplied only through deployment-local configuration; `.\fc.ps1 url` prints the configured endpoint.
   Anything else returns 404.
-- Secret: `public/gateway.env` (`GATEWAY_SECRET`). **Keep `public/gateway.env` local and out of git.**
+- Gateway secrets and deployment identifiers are local-only and must stay out of Git.
 - Rotate the secret (e.g. if the link leaks): replace the value in `public/gateway.env`, run `.\fc.ps1 up`, update the ChatGPT connector URL.
 - Gateway: only scrape/map/search/crawl/check_crawl_status are listed and callable (`firecrawl_parse` reads arbitrary
   local files in this mode and is blocked); scrape/crawl requests asking for screenshot, branding, audio or browser
