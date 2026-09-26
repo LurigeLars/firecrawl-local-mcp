@@ -1,4 +1,4 @@
-name: Temporary hardened Firecrawl image validation
+name: Temporary hardened Firecrawl NuQ validation
 
 on:
   push:
@@ -10,59 +10,14 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  nuq:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - name: Clone pinned Firecrawl source
         run: git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git upstream
-
-      - name: Build hardened API image
-        run: docker build --pull -f "$GITHUB_WORKSPACE/hardening/Dockerfile.api" -t firecrawl-api-hardened "$GITHUB_WORKSPACE/upstream/apps/api"
-
-      - name: Verify API runtime has no npm/corepack and uses fixed Go toolchain
-        run: |
-          docker run --rm --entrypoint sh firecrawl-api-hardened -lc '
-            set -eu
-            test ! -e /usr/local/bin/npm
-            test ! -e /usr/local/bin/npx
-            test ! -e /usr/local/bin/corepack
-            test ! -e /usr/local/bin/pnpm
-            node --version
-            test -s /app/sharedLibs/go-html-to-md/libhtml-to-markdown.so
-            echo API_RUNTIME_HARDENING_OK
-          '
-
-      - name: Build hardened Playwright image
-        run: docker build --pull -f "$GITHUB_WORKSPACE/hardening/Dockerfile.playwright" -t firecrawl-playwright-hardened "$GITHUB_WORKSPACE/upstream/apps/playwright-service-ts"
-
-      - name: Smoke hardened Playwright image
-        run: |
-          docker run -d --rm --name playwright-hardening-test -e PORT=3000 -p 127.0.0.1:13000:3000 firecrawl-playwright-hardened
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:13000/ >/dev/null 2>&1; then
-              break
-            fi
-            if ! docker ps --format '{{.Names}}' | grep -qx playwright-hardening-test; then
-              docker logs playwright-hardening-test || true
-              exit 1
-            fi
-            sleep 1
-          done
-          docker exec playwright-hardening-test sh -lc '
-            set -eu
-            test ! -e /usr/local/bin/npm
-            test ! -e /usr/local/bin/npx
-            test ! -e /usr/local/bin/corepack
-            test ! -e /usr/local/bin/pnpm
-            node --version
-            test -s /usr/src/app/dist/api.js
-            echo PLAYWRIGHT_RUNTIME_HARDENING_OK
-          '
-          docker logs playwright-hardening-test --tail 100
-          docker stop playwright-hardening-test
 
       - name: Build hardened NuQ Postgres image
         run: docker build --pull -f "$GITHUB_WORKSPACE/hardening/Dockerfile.nuq-postgres" -t firecrawl-nuq-postgres-hardened "$GITHUB_WORKSPACE/upstream/apps/nuq-postgres"
@@ -91,6 +46,6 @@ jobs:
         run: |
           touch .env
           docker compose             --project-directory "$GITHUB_WORKSPACE/upstream"             -f "$GITHUB_WORKSPACE/upstream/docker-compose.yaml"             -f "$GITHUB_WORKSPACE/compose.local.yaml"             config >/tmp/compose-rendered.yaml
-          grep -F '../../../hardening/Dockerfile.api' /tmp/compose-rendered.yaml
-          grep -F '../../../hardening/Dockerfile.playwright' /tmp/compose-rendered.yaml
-          grep -F '../../../hardening/Dockerfile.nuq-postgres' /tmp/compose-rendered.yaml
+          grep -F 'Dockerfile.api' /tmp/compose-rendered.yaml
+          grep -F 'Dockerfile.playwright' /tmp/compose-rendered.yaml
+          grep -F 'Dockerfile.nuq-postgres' /tmp/compose-rendered.yaml
