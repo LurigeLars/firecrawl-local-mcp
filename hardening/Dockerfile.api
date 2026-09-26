@@ -28,6 +28,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         build-essential \
+        cmake \
         pkg-config \
         python3 \
     && rm -rf /var/lib/apt/lists/*
