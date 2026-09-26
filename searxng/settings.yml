@@ -1,5 +1,5 @@
 # SearXNG for the self-hosted Firecrawl (search backend). Only reachable on the internal Docker network.
-# The secret key comes from SEARXNG_SECRET (secrets.env), never from this file.
+# SEARXNG_SECRET is exported by the container wrapper from /run/secrets/searxng_secret; no secret value is stored here.
 use_default_settings: true
 
 general:

@@ -21,12 +21,13 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 This repo holds only the local additions. Secrets and machine-specific files are gitignored.
 
 1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
-2. Copy `.env.example` to `.env`, `secrets.env.example` to `secrets.env`, and `public/gateway.env.example` to `public/gateway.env`; replace every placeholder locally and keep the real files out of Git.
-3. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key is stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets`, never in `secrets.env`.
-4. `public/browser.env` is generated automatically by `.\fc.ps1 up`; `public/browser.env.example` documents its format only.
-5. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
-6. Install the required local model/runtime dependencies described below.
-7. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
+2. Copy `.env.example` to `.env` and `public/gateway.env.example` to `public/gateway.env`; replace deployment placeholders locally and keep the real files out of Git.
+3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and supplied to containers through Docker Compose secret files.
+4. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
+5. `public/browser.env` is generated automatically by `.\fc.ps1 up`; `public/browser.env.example` documents its format only.
+6. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
+7. Install the required local model/runtime dependencies described below.
+8. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
@@ -95,7 +96,7 @@ The bridge is intentionally not a generic browser automation service. Adding sup
 
 `searxng` (image `searxng/searxng:2026.9.10-931fd9787`, service in `compose.local.yaml`, settings in
 `searxng/settings.yml`) is Firecrawl's search backend (reached through `searxng-proxy`, see below). It is only
-reachable on the internal Docker network; its `SEARXNG_SECRET` lives in `secrets.env`. Limiter off (single internal
+reachable on the internal Docker network. `SEARXNG_SECRET` is DPAPI-protected on the Windows host and delivered as a Docker Compose secret file; the container wrapper exports it only into the SearXNG process at startup. Limiter off (single internal
 client), JSON output on.
 
 Why: without it Firecrawl searched DuckDuckGo directly, which answers this home IP with CAPTCHAs, so searches often came
@@ -135,6 +136,14 @@ which produced confident but wrong answers. The proxy cuts the page from the end
 Wikipedia extraction went from >5 min (CPU; firecrawl-mcp times out at 300 s) to ~65 s.
 No Ollama account is involved.
 
+### Local service secrets
+
+`POSTGRES_PASSWORD` and `SEARXNG_SECRET` use Windows DPAPI plus Docker Compose secrets. Run `.\scripts\configure_service_secrets.ps1` once. On an existing installation the script reads the current values from the legacy gitignored `secrets.env`, stores verified DPAPI blobs as `postgres_password.dpapi` and `searxng_secret.dpapi`, and then removes the plaintext entries. If no unrelated entries remain, the legacy `secrets.env` file is deleted.
+
+`fc.ps1` no longer loads `secrets.env`. During `up`, it decrypts the two DPAPI blobs into temporary host-process variables used only as Compose secret sources. Compose mounts them into the granted containers under `/run/secrets/`; immediately after `docker compose up` returns, the host-process values are replaced with inert placeholders and restored/removed when `fc.ps1` exits. The actual values therefore do not appear in container `.Config.Env`/`docker inspect` metadata.
+
+The upstream PostgreSQL image supports the standard `POSTGRES_PASSWORD_FILE` convention. Firecrawl's API still expects `POSTGRES_PASSWORD`, so its startup wrapper reads `/run/secrets/postgres_password`, exports it inside the container process, then execs the normal harness. SearXNG uses the same wrapper pattern with `/run/secrets/searxng_secret` before executing its pinned image entrypoint.
+
 Optional Gemini uses a Windows DPAPI secret instead of an environment variable. Run `.\scripts\configure_gemini.ps1` once; it stores the encrypted blob at `%LOCALAPPDATA%\FirecrawlLocal\secrets\gemini_api_key.dpapi`. If an older `secrets.env` contains a non-empty `GEMINI_API_KEY`, the script migrates that value to DPAPI, verifies it can be decrypted by the current Windows user, and only then removes the plaintext line.
 
 On `.\fc.ps1 up`, the host decrypts the DPAPI blob in memory and streams the key into the `llm-proxy` container at `/run/firecrawl-secrets/gemini_api_key`. That path is tmpfs-backed, is not a Docker environment variable, does not appear in `docker inspect`, and disappears with the container. Use `.\fc.ps1 import-gemini` to refresh an already-running proxy after rotating the key. The proxy reads the secret file on demand, so no process restart is needed after import.
@@ -169,10 +178,7 @@ through `com.docker.backend.exe`. The reference deployment adds outbound firewal
 Chromium in the Playwright service runs with `--no-sandbox` (upstream default); keep Firecrawl updated.
 
 Notes
-- `secrets.env` (loaded by `fc.ps1` as a second `--env-file`) holds non-Gemini service secrets such as a random `POSTGRES_PASSWORD`, as the self-host guide
-  recommends. Never commit or publish it. The Postgres image keeps its data in an anonymous volume that survives container
-  recreation, so changing the password in `secrets.env` alone breaks the API (`28P01 auth_failed`); also run
-  `ALTER USER postgres WITH PASSWORD '…'` via `docker exec -i firecrawl-nuq-postgres-1 psql -U postgres`.
+- `POSTGRES_PASSWORD` and `SEARXNG_SECRET` are stored as DPAPI blobs under `%LOCALAPPDATA%\FirecrawlLocal\secrets`. `fc.ps1 up` decrypts them only long enough to let Docker Compose create per-service secret files. The secret values are not persisted in Compose environment metadata. PostgreSQL receives the password through `POSTGRES_PASSWORD_FILE`; the Firecrawl API and SearXNG wrappers read their secret files at process startup. The migration preserves the existing PostgreSQL password, so the existing database volume remains valid.
 - Browser viewport: `compose.local.yaml` patches the Playwright service at start-up so its viewport height comes from
   `PLAYWRIGHT_VIEWPORT_HEIGHT` (default 4000; upstream hard-codes 800). Virtualized pages can then render more rows before scrolling is required. The container logs a WARNING if an upgrade changes the patched line.
 - Model variants in Ollama carry `num_ctx 16384` and `num_predict 1536` (stops runaway generations that otherwise hit

@@ -5,6 +5,7 @@
 .env
 .env.*
 !.env.example
+# Legacy migration input; fc.ps1 no longer loads it
 secrets.env
 public/gateway.env
 public/browser.env

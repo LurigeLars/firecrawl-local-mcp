@@ -36,6 +36,7 @@ jobs:
           node --check searxng/lang-proxy.mjs
           node --check llm/trim-proxy.mjs
           node --check llm/gemini-secret.test.mjs
+          node --check security/service-secrets.test.mjs
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
@@ -49,16 +50,16 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          foreach ($path in @('./fc.ps1', './scripts/configure_gemini.ps1')) {
+          foreach ($path in @('./fc.ps1', './scripts/configure_gemini.ps1', './scripts/configure_service_secrets.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { $errors | Format-List | Out-String | Write-Error; exit 1 }
           }
 
-      - name: Run Gemini secret isolation tests
+      - name: Run secret isolation tests
         shell: bash
-        run: node --test llm/gemini-secret.test.mjs
+        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs
 
       - name: Run browser bridge/tool contract tests
         shell: bash
@@ -99,9 +100,9 @@ jobs:
           node --check public/access-test.mjs
           node --check public/selftest.mjs
 
-      - name: Run Gemini secret isolation tests
+      - name: Run secret isolation tests
         shell: bash
-        run: node --test llm/gemini-secret.test.mjs
+        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs
 
       - name: Run browser bridge/tool contract tests
         shell: bash

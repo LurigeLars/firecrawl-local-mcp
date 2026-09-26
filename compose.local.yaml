@@ -7,6 +7,16 @@ services:
     profiles: ["fdb"]
   api:
     restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ""
+    secrets:
+      - postgres_password
+    command:
+      - sh
+      - -c
+      - >-
+        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
+        exec node dist/src/harness.js --start-docker
   playwright-service:
     restart: unless-stopped
     # Taller browser viewport so virtualized pages/lists render all rows.
@@ -28,13 +38,26 @@ services:
     restart: unless-stopped
   nuq-postgres:
     restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ""
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
 
   # Search backend for Firecrawl (SEARXNG_ENDPOINT in .env). Internal network only, no host port.
   searxng:
     image: searxng/searxng:2026.9.10-931fd9787
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        export SEARXNG_SECRET="$(cat /run/secrets/searxng_secret)";
+        exec /usr/local/searxng/entrypoint.sh
     environment:
-      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in secrets.env}
+      SEARXNG_SECRET: ""
       SEARXNG_BASE_URL: http://searxng:8080/
+    secrets:
+      - searxng_secret
     volumes:
       - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks: [backend]
@@ -74,3 +97,10 @@ services:
     tmpfs:
       - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
     restart: unless-stopped
+
+
+secrets:
+  postgres_password:
+    environment: FIRECRAWL_POSTGRES_PASSWORD_SECRET
+  searxng_secret:
+    environment: FIRECRAWL_SEARXNG_SECRET_SECRET

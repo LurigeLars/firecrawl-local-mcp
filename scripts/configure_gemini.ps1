@@ -76,10 +76,24 @@ finally {
 
 if ($legacyEntryPresent) {
     $remaining = @($legacyLines | Where-Object { $_ -notmatch '^\s*GEMINI_API_KEY=' })
-    $legacyTmp = "$LegacyPath.tmp"
-    $body = if ($remaining.Count) { ($remaining -join [Environment]::NewLine) + [Environment]::NewLine } else { "" }
-    [IO.File]::WriteAllText($legacyTmp, $body, [Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $legacyTmp -Destination $LegacyPath -Force
+    $meaningful = @($remaining | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimStart().StartsWith("#")
+    })
+
+    if ($meaningful.Count -eq 0) {
+        Remove-Item -LiteralPath $LegacyPath -Force
+        Write-Host "LEGACY_SECRETS_ENV_REMOVED"
+    }
+    else {
+        $legacyTmp = "$LegacyPath.tmp"
+        [IO.File]::WriteAllText(
+            $legacyTmp,
+            (($remaining -join [Environment]::NewLine) + [Environment]::NewLine),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $legacyTmp -Destination $LegacyPath -Force
+    }
+
     if ($migratedLegacy) {
         Write-Host "GEMINI_KEY_MIGRATED_TO_DPAPI"
     } else {

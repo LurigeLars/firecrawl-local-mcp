@@ -6,12 +6,13 @@ param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url', 'import-gemini
 $root = $PSScriptRoot
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
+$PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
+$SearxngDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\searxng_secret.dpapi"
 $compose = @('compose', '--project-directory', "$root\firecrawl",
     '-f', "$root\firecrawl\docker-compose.yaml", '-f', "$root\compose.local.yaml")
 $public = Test-Path "$root\public\gateway.env"
 if ($public) { $compose += @('-f', "$root\compose.public.yaml") }
 $compose += @('--env-file', "$root\.env")
-if (Test-Path "$root\secrets.env") { $compose += @('--env-file', "$root\secrets.env") }
 
 function Ensure-BrowserEnv {
     $path = "$root\public\browser.env"
@@ -200,6 +201,89 @@ function Get-PublicUrl {
 }
 
 
+function Get-DpapiSecretValue([string]$Path, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Label DPAPI secret is missing."
+    }
+
+    $encrypted = Get-Content -LiteralPath $Path -Raw
+    $secure = ConvertTo-SecureString -String $encrypted
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+        if ([string]::IsNullOrWhiteSpace($plain)) {
+            throw "$Label DPAPI secret decrypted to an empty value."
+        }
+        return $plain
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+        $secure = $null
+    }
+}
+
+function Test-LegacyServiceSecrets {
+    $path = "$root\secrets.env"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+
+    foreach ($name in @("POSTGRES_PASSWORD", "SEARXNG_SECRET")) {
+        $pattern = "^\s*" + [regex]::Escape($name) + "="
+        $line = @(Get-Content -LiteralPath $path | Where-Object { $_ -match $pattern })[0]
+        if ($line) {
+            $value = ($line -split "=", 2)[1].Trim()
+            if (-not [string]::IsNullOrWhiteSpace($value)) { return $true }
+        }
+    }
+    return $false
+}
+
+function Set-ComposeServiceSecrets([bool]$UseRealSecrets) {
+    if ($UseRealSecrets) {
+        if (
+            -not (Test-Path -LiteralPath $PostgresDpapiPath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $SearxngDpapiPath -PathType Leaf)
+        ) {
+            if (Test-LegacyServiceSecrets) {
+                throw "Legacy POSTGRES_PASSWORD/SEARXNG_SECRET found in secrets.env. Run .\scripts\configure_service_secrets.ps1 once to migrate them to DPAPI."
+            }
+            throw "Firecrawl service DPAPI secrets are missing. Run .\scripts\configure_service_secrets.ps1."
+        }
+
+        $postgres = Get-DpapiSecretValue -Path $PostgresDpapiPath -Label "PostgreSQL"
+        $searxng = Get-DpapiSecretValue -Path $SearxngDpapiPath -Label "SearXNG"
+        try {
+            $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = $postgres
+            $env:FIRECRAWL_SEARXNG_SECRET_SECRET = $searxng
+        }
+        finally {
+            $postgres = $null
+            $searxng = $null
+        }
+        return
+    }
+
+    $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"
+    $env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"
+}
+
+function Restore-ComposeServiceSecrets(
+    [bool]$PostgresWasSet,
+    [AllowNull()][string]$PostgresValue,
+    [bool]$SearxngWasSet,
+    [AllowNull()][string]$SearxngValue
+) {
+    if ($PostgresWasSet) {
+        $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = $PostgresValue
+    } else {
+        Remove-Item Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET -ErrorAction SilentlyContinue
+    }
+
+    if ($SearxngWasSet) {
+        $env:FIRECRAWL_SEARXNG_SECRET_SECRET = $SearxngValue
+    } else {
+        Remove-Item Env:FIRECRAWL_SEARXNG_SECRET_SECRET -ErrorAction SilentlyContinue
+    }
+}
 function Test-LegacyGeminiKey {
     $path = "$root\secrets.env"
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
@@ -219,24 +303,14 @@ function Import-GeminiKey {
         throw 'llm-proxy is not running. Run .\fc.ps1 up first.'
     }
 
-    $encrypted = Get-Content -LiteralPath $GeminiDpapiPath -Raw
-    $secure = ConvertTo-SecureString -String $encrypted
-    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    $plain = $null
+    $plain = Get-DpapiSecretValue -Path $GeminiDpapiPath -Label "Gemini"
     try {
-        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-        if ([string]::IsNullOrWhiteSpace($plain)) {
-            throw 'Gemini DPAPI secret decrypted to an empty value.'
-        }
-
         $plain |
             & docker @compose exec -T llm-proxy sh -c 'umask 077; cat > /run/firecrawl-secrets/gemini_api_key'
         if ($LASTEXITCODE -ne 0) { throw 'Gemini key import failed.' }
     }
     finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
         $plain = $null
-        $secure = $null
     }
 
     & docker @compose exec -T llm-proxy sh -c 'test -s /run/firecrawl-secrets/gemini_api_key && printf "GEMINI_KEY_IMPORTED\n"'
@@ -253,6 +327,16 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
+$composeActions = @("up", "down", "status", "logs", "import-gemini")
+$postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
+$postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
+$searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
+$searxngSecretOriginal = if ($searxngSecretWasSet) { $env:FIRECRAWL_SEARXNG_SECRET_SECRET } else { $null }
+
+try {
+    if ($Action -in $composeActions) {
+        Set-ComposeServiceSecrets -UseRealSecrets ($Action -eq "up")
+    }
 switch ($Action) {
     'up' {
         if ($public) {
@@ -263,6 +347,7 @@ switch ($Action) {
         }
         docker @compose up -d --build
         if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
+        Set-ComposeServiceSecrets -UseRealSecrets $false
         Import-AvailableRuntimeSecrets
     }
     'down' {
@@ -320,4 +405,12 @@ switch ($Action) {
             if ($LASTEXITCODE -ne 0) { throw "public MCP self-test failed with exit code $LASTEXITCODE" }
         }
     }
+}
+}
+finally {
+    Restore-ComposeServiceSecrets `
+        -PostgresWasSet $postgresSecretWasSet `
+        -PostgresValue $postgresSecretOriginal `
+        -SearxngWasSet $searxngSecretWasSet `
+        -SearxngValue $searxngSecretOriginal
 }
