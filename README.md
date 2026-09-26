@@ -14,7 +14,7 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 - `firecrawl/` — untouched upstream checkout, pinned to tag `v2.11.376` (verified locally on 2026-09-21; upstream commit `95c8ab18f524d1aa813cca2a6dc8bd39191504ec`), images built locally.
 - `compose.local.yaml` — local overrides (FoundationDB off, auto-restart).
 - `.env` — settings. API bound to `127.0.0.1:3002` only; it has **no authentication**, never expose it.
-- `fc.ps1` — `up` / `down` / `status` / `logs` / `test`.
+- `fc.ps1` — `up` / `down` / `status` / `logs` / `test` / `import-gemini`.
 
 ## Restore on a new machine
 
@@ -22,10 +22,11 @@ This repo holds only the local additions. Secrets and machine-specific files are
 
 1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
 2. Copy `.env.example` to `.env`, `secrets.env.example` to `secrets.env`, and `public/gateway.env.example` to `public/gateway.env`; replace every placeholder locally and keep the real files out of Git.
-3. `public/browser.env` is generated automatically by `.\fc.ps1 up`; `public/browser.env.example` documents its format only.
-4. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
-5. Install the required local model/runtime dependencies described below.
-6. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
+3. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key is stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets`, never in `secrets.env`.
+4. `public/browser.env` is generated automatically by `.\fc.ps1 up`; `public/browser.env.example` documents its format only.
+5. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
+6. Install the required local model/runtime dependencies described below.
+7. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
@@ -134,14 +135,11 @@ which produced confident but wrong answers. The proxy cuts the page from the end
 Wikipedia extraction went from >5 min (CPU; firecrawl-mcp times out at 300 s) to ~65 s.
 No Ollama account is involved.
 
-Optional Gemini: with `GEMINI_API_KEY` in `secrets.env` (Google AI Studio key; restart with `.\fc.ps1 up`), `llm-proxy`
-sends `/v1/responses` calls (query, json and summary all use them) to Gemini's OpenAI-compatible endpoint
-(`GEMINI_MODEL`, default `gemini-3.5-flash-lite`; `gemini-2.5-flash-lite` returned 404 "no longer available to new users" on 2026-09-16), with up to 60k characters of page text (`GEMINI_MAX_CHARS`; the free tier allows 15 requests and 250k input tokens per minute and 500 requests per day (AI Studio, 2026-09-16; the day resets at midnight Pacific time, 09:00 Swedish summer time), and 9 full Wikipedia pages used 111k tokens), and converts the answer
-back. Any failure (rate limit, quota, rejected schema, 60 s timeout) falls back to the local model; after a 429 Gemini
-is skipped for 60 s. Page text and prompts then go to Google, whose free tier may use them to improve its products.
-Setting Gemini through Firecrawl's own `GOOGLE_GENERATIVE_AI_API_KEY` does not work here: its query code asks for that retired model, and `MODEL_NAME` overrides the
-model name for every provider. Tested 2026-09-16 with a mock endpoint and Firecrawl's AI SDK (text, JSON schema, 429
-fallback, pause); `docker logs firecrawl-llm-proxy-1` shows `gemini ok` or `gemini failed ..., using local model`.
+Optional Gemini uses a Windows DPAPI secret instead of an environment variable. Run `.\scripts\configure_gemini.ps1` once; it stores the encrypted blob at `%LOCALAPPDATA%\FirecrawlLocal\secrets\gemini_api_key.dpapi`. If an older `secrets.env` contains a non-empty `GEMINI_API_KEY`, the script migrates that value to DPAPI, verifies it can be decrypted by the current Windows user, and only then removes the plaintext line.
+
+On `.\fc.ps1 up`, the host decrypts the DPAPI blob in memory and streams the key into the `llm-proxy` container at `/run/firecrawl-secrets/gemini_api_key`. That path is tmpfs-backed, is not a Docker environment variable, does not appear in `docker inspect`, and disappears with the container. Use `.\fc.ps1 import-gemini` to refresh an already-running proxy after rotating the key. The proxy reads the secret file on demand, so no process restart is needed after import.
+
+When the runtime secret is present, `llm-proxy` sends `/v1/responses` calls (query, json and summary all use them) to Gemini's OpenAI-compatible endpoint (`GEMINI_MODEL`, default `gemini-3.5-flash-lite`), with up to 60k characters of page text. Any Gemini failure (rate limit, quota, rejected schema, timeout) falls back to the local model; after a 429 Gemini is skipped for 60 s. Page text and prompts then go to Google. Setting Gemini through Firecrawl's own `GOOGLE_GENERATIVE_AI_API_KEY` does not work here because its query path uses a different provider/model flow. `docker logs firecrawl-llm-proxy-1` shows `gemini ok` or `gemini failed, using local model` without logging the API key.
 
 Benchmark: `llm/run-benchmark.ps1` (switches `MODEL_NAME`, scores 4 pages against ground truth, restores the setting).
 
@@ -171,7 +169,7 @@ through `com.docker.backend.exe`. The reference deployment adds outbound firewal
 Chromium in the Playwright service runs with `--no-sandbox` (upstream default); keep Firecrawl updated.
 
 Notes
-- `secrets.env` (loaded by `fc.ps1` as a second `--env-file`) holds a random `POSTGRES_PASSWORD`, as the self-host guide
+- `secrets.env` (loaded by `fc.ps1` as a second `--env-file`) holds non-Gemini service secrets such as a random `POSTGRES_PASSWORD`, as the self-host guide
   recommends. Never commit or publish it. The Postgres image keeps its data in an anonymous volume that survives container
   recreation, so changing the password in `secrets.env` alone breaks the API (`28P01 auth_failed`); also run
   `ALTER USER postgres WITH PASSWORD '…'` via `docker exec -i firecrawl-nuq-postgres-1 psql -U postgres`.

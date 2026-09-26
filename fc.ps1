@@ -1,9 +1,11 @@
-# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | down | status | logs | test | url
+# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | down | status | logs | test | url | import-gemini
 # When public ChatGPT access is configured, also manages the narrow local browser bridge used for Season supplier login.
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url')][string]$Action = 'status')
+param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url', 'import-gemini')][string]$Action = 'status')
 
 $root = $PSScriptRoot
+if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
+$GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $compose = @('compose', '--project-directory', "$root\firecrawl",
     '-f', "$root\firecrawl\docker-compose.yaml", '-f', "$root\compose.local.yaml")
 $public = Test-Path "$root\public\gateway.env"
@@ -197,6 +199,60 @@ function Get-PublicUrl {
     if ($aud) { "https://$hostname/mcp" } else { "https://$hostname/$secret/mcp" }
 }
 
+
+function Test-LegacyGeminiKey {
+    $path = "$root\secrets.env"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $line = @(Get-Content -LiteralPath $path | Where-Object { $_ -match '^\s*GEMINI_API_KEY=' })[0]
+    if (-not $line) { return $false }
+    $value = ($line -split '=', 2)[1].Trim()
+    return -not [string]::IsNullOrWhiteSpace($value)
+}
+
+function Import-GeminiKey {
+    if (-not (Test-Path -LiteralPath $GeminiDpapiPath -PathType Leaf)) {
+        throw 'Gemini DPAPI secret is missing. Run .\scripts\configure_gemini.ps1 first.'
+    }
+
+    $serviceId = (& docker @compose ps -q llm-proxy).Trim()
+    if (-not $serviceId) {
+        throw 'llm-proxy is not running. Run .\fc.ps1 up first.'
+    }
+
+    $encrypted = Get-Content -LiteralPath $GeminiDpapiPath -Raw
+    $secure = ConvertTo-SecureString -String $encrypted
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    $plain = $null
+    try {
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+        if ([string]::IsNullOrWhiteSpace($plain)) {
+            throw 'Gemini DPAPI secret decrypted to an empty value.'
+        }
+
+        $plain |
+            & docker @compose exec -T llm-proxy sh -c 'umask 077; cat > /run/firecrawl-secrets/gemini_api_key'
+        if ($LASTEXITCODE -ne 0) { throw 'Gemini key import failed.' }
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+        $plain = $null
+        $secure = $null
+    }
+
+    & docker @compose exec -T llm-proxy sh -c 'test -s /run/firecrawl-secrets/gemini_api_key && printf "GEMINI_KEY_IMPORTED\n"'
+    if ($LASTEXITCODE -ne 0) { throw 'Gemini key verification failed.' }
+}
+
+function Import-AvailableRuntimeSecrets {
+    if (Test-Path -LiteralPath $GeminiDpapiPath -PathType Leaf) {
+        Import-GeminiKey
+        return
+    }
+    if (Test-LegacyGeminiKey) {
+        throw 'Legacy GEMINI_API_KEY found in secrets.env. Run .\scripts\configure_gemini.ps1 once to migrate it to DPAPI.'
+    }
+}
+
 switch ($Action) {
     'up' {
         if ($public) {
@@ -206,11 +262,16 @@ switch ($Action) {
             "browser bridge port: $port"
         }
         docker @compose up -d --build
+        if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
+        Import-AvailableRuntimeSecrets
     }
     'down' {
         if ($public) { Set-BrowserComposePort }
         docker @compose down
         Stop-BrowserBridge
+    }
+    'import-gemini' {
+        Import-GeminiKey
     }
     'status' {
         if ($public) { Set-BrowserComposePort }

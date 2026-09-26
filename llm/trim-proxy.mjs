@@ -1,7 +1,7 @@
 // LLM proxy between Firecrawl and the models. Node standard library only.
 //
-// Gemini first (optional): when GEMINI_API_KEY is set, OpenAI Responses calls (/v1/responses; Firecrawl's query,
-// json and summary formats all use them) go to Gemini's OpenAI-compatible chat endpoint and the answer is converted
+// Gemini first (optional): when the runtime tmpfs secret is present, OpenAI Responses calls (/v1/responses;
+// Firecrawl's query, json and summary formats all use them) go to Gemini's OpenAI-compatible chat endpoint and the answer is converted
 // back. Any Gemini failure (rate limit, quota, bad schema, timeout) falls back to the local model; after a 429 Gemini
 // is skipped for GEMINI_PAUSE_S seconds. Page text and prompts are sent to Google when this is on.
 //
@@ -9,6 +9,7 @@
 // of an over-long prompt, dropping the instructions and the top of the page. So for Ollama the longest text field is
 // cut from the END to fit MAX_INPUT_TOKENS before forwarding.
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const UPSTREAM = new URL('http://host.docker.internal:11434');
@@ -19,8 +20,16 @@ const CHARS_PER_TOKEN = Number(process.env.CHARS_PER_TOKEN ?? 3);
 const MAX_CHARS = MAX_INPUT_TOKENS * CHARS_PER_TOKEN;
 const MARKER = '\n\n[... content truncated to fit the local model context ...]';
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
+export const GEMINI_SECRET_PATH = '/run/firecrawl-secrets/gemini_api_key';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
+
+export function readGeminiApiKey(path = GEMINI_SECRET_PATH) {
+  try {
+    return readFileSync(path, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3.5-flash-lite';
 // Free tier (AI Studio, 2026-09-16): 15 requests and 250k input tokens per minute, 500 requests per day; ~60k chars (~15k tokens) lets 15 pages fit.
 const GEMINI_MAX_CHARS = Number(process.env.GEMINI_MAX_CHARS ?? 60_000);
@@ -98,10 +107,10 @@ export function chatToResponses(chat, request) {
   };
 }
 
-async function askGemini(chat) {
+async function askGemini(chat, apiKey) {
   const res = await fetch(`${GEMINI_BASE_URL}/chat/completions`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${GEMINI_API_KEY}` },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
     body: JSON.stringify(chat),
     signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
   });
@@ -116,14 +125,15 @@ async function askGemini(chat) {
 
 // Returns a Responses JSON body from Gemini, or null to use the local model.
 async function tryGemini(path, raw) {
-  if (!GEMINI_API_KEY || path !== '/v1/responses' || Date.now() < geminiPausedUntil) return null;
+  const geminiApiKey = readGeminiApiKey();
+  if (!geminiApiKey || path !== '/v1/responses' || Date.now() < geminiPausedUntil) return null;
   let request, chat;
   try { request = JSON.parse(raw.toString('utf8')); chat = responsesToChat(request); } catch { return null; }
   if (!chat) return null;
   trim(chat, GEMINI_MAX_CHARS);
   const started = Date.now();
   try {
-    const answer = await askGemini(chat);
+    const answer = await askGemini(chat, geminiApiKey);
     console.log(`${new Date().toISOString()} gemini ok in ${Date.now() - started} ms`);
     return chatToResponses(answer, request);
   } catch (err) {
@@ -171,5 +181,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       res.end(out);
     });
   }).listen(PORT, '0.0.0.0', () => console.log(
-    `llm proxy on ${PORT}: ${GEMINI_API_KEY ? `gemini ${GEMINI_MODEL} first, then ` : ''}${UPSTREAM.origin}, local max ${MAX_INPUT_TOKENS} tokens (~${MAX_CHARS} chars)`));
+    `llm proxy on ${PORT}: gemini ${GEMINI_MODEL} when runtime secret is present, then ${UPSTREAM.origin}; local max ${MAX_INPUT_TOKENS} tokens (~${MAX_CHARS} chars)`));
 }

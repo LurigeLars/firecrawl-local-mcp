@@ -56,15 +56,14 @@ services:
     read_only: true
     restart: unless-stopped
 
-  # Sends LLM calls to Gemini when a key is set, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
+  # Sends LLM calls to Gemini when the runtime secret is present, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
   llm-proxy:
     image: node:26.9.0-alpine
     command: ["node", "/app/trim-proxy.mjs"]
     user: node
     environment:
       MAX_INPUT_TOKENS: ${LLM_MAX_INPUT_TOKENS:-7000}
-      # Optional: Gemini first, local model as fallback (key in secrets.env; empty = local only).
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Optional: Gemini first when the runtime tmpfs secret is present; local model remains fallback.
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
     volumes:
       - ../llm:/app:ro
@@ -72,4 +71,6 @@ services:
       - "host.docker.internal:host-gateway"
     networks: [backend]
     read_only: true
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
     restart: unless-stopped
