@@ -9,13 +9,24 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ""
-    secrets:
-      - postgres_password
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777
+    post_start:
+      - command:
+          - sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET";
+            printf '%s' "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > /run/firecrawl-secrets/postgres_password
+        environment:
+          FIRECRAWL_POSTGRES_PASSWORD_SECRET: ${FIRECRAWL_POSTGRES_PASSWORD_SECRET:?PostgreSQL runtime secret is required}
     command:
       - sh
       - -c
       - >-
-        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
+        while [ ! -s /run/firecrawl-secrets/postgres_password ]; do sleep 0.05; done;
+        export POSTGRES_PASSWORD="$$(cat /run/firecrawl-secrets/postgres_password)";
         exec node dist/src/harness.js --start-docker
   playwright-service:
     restart: unless-stopped
@@ -49,8 +60,8 @@ services:
           - -c
           - >-
             umask 077;
-            test -n "$FIRECRAWL_POSTGRES_PASSWORD_SECRET";
-            printf '%s' "$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > /run/firecrawl-secrets/postgres_password
+            test -n "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET";
+            printf '%s' "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > /run/firecrawl-secrets/postgres_password
         environment:
           FIRECRAWL_POSTGRES_PASSWORD_SECRET: ${FIRECRAWL_POSTGRES_PASSWORD_SECRET:?PostgreSQL runtime secret is required}
     entrypoint:
@@ -67,13 +78,24 @@ services:
       - /bin/sh
       - -c
       - >-
-        export SEARXNG_SECRET="$(cat /run/secrets/searxng_secret)";
+        while [ ! -s /run/firecrawl-secrets/searxng_secret ]; do sleep 0.05; done;
+        export SEARXNG_SECRET="$$(cat /run/firecrawl-secrets/searxng_secret)";
         exec /usr/local/searxng/entrypoint.sh
     environment:
       SEARXNG_SECRET: ""
       SEARXNG_BASE_URL: http://searxng:8080/
-    secrets:
-      - searxng_secret
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777
+    post_start:
+      - command:
+          - /bin/sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$$FIRECRAWL_SEARXNG_SECRET_SECRET";
+            printf '%s' "$$FIRECRAWL_SEARXNG_SECRET_SECRET" > /run/firecrawl-secrets/searxng_secret
+        environment:
+          FIRECRAWL_SEARXNG_SECRET_SECRET: ${FIRECRAWL_SEARXNG_SECRET_SECRET:?SearXNG runtime secret is required}
     volumes:
       - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks: [backend]
