@@ -1,5 +1,21 @@
 # firecrawl-local-mcp
 
+## Repository status
+
+This is an original deployment-wrapper project, **not a fork of Firecrawl**. It layers a self-hosted MCP deployment around an upstream Firecrawl checkout without vendoring or rewriting the Firecrawl source tree.
+
+The repository-specific layer includes:
+
+- local and public MCP proxies/gateways with explicit tool allowlists and model-context compaction;
+- Cloudflare Access integration using a shared-tunnel deployment model;
+- SearXNG routing, search normalization, and optional local/Gemini LLM adapters;
+- DPAPI-backed host secrets, Docker/network isolation, and hardened runtime configuration;
+- a narrowly scoped local browser-session bridge for explicitly configured supplier workflows; and
+- deployment scripts, tests, benchmarks, and adapted workflow skills.
+
+Upstream Firecrawl remains a separate checkout and retains its own license and release lifecycle.
+
+
 Public reference snapshot of a self-hosted Firecrawl deployment wrapper. This repository is **not a fork of Firecrawl** and does not vendor the Firecrawl source tree. It contains deployment overrides, MCP gateway/proxy code, search/LLM adapters, tests, and adapted workflow skills that are used with an upstream Firecrawl checkout.
 
 Upstream projects:
