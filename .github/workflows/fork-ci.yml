@@ -61,6 +61,33 @@ jobs:
         shell: bash
         run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs
 
+      - name: Verify runtime secret stays in tmpfs
+        shell: bash
+        env:
+          SMOKE_SECRET: test-only-runtime-secret-not-a-credential
+        run: |
+          set -euo pipefail
+          project=firecrawl-secret-smoke
+          file=security/runtime-secret-smoke.compose.yaml
+          trap 'docker compose -p "$project" -f "$file" down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+
+          docker compose -p "$project" -f "$file" up -d
+          id="$(docker compose -p "$project" -f "$file" ps -q smoke)"
+          test -n "$id"
+
+          actual="$(docker exec "$id" cat /run/firecrawl-secrets/value)"
+          test "$actual" = "$SMOKE_SECRET"
+
+          if docker inspect "$id" --format '{{json .Config.Env}}' | grep -F "$SMOKE_SECRET"; then
+            echo "runtime secret leaked into container Config.Env" >&2
+            exit 1
+          fi
+
+          if docker diff "$id" | grep -F '/run/firecrawl-secrets/value'; then
+            echo "runtime secret was written into the container writable layer" >&2
+            exit 1
+          fi
+
       - name: Run browser bridge/tool contract tests
         shell: bash
         run: node public/gateway/browser-tools.test.mjs
