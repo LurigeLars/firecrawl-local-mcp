@@ -40,9 +40,25 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ""
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets:
-      - postgres_password
+      POSTGRES_PASSWORD_FILE: /run/firecrawl-secrets/postgres_password
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777
+    post_start:
+      - command:
+          - sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$FIRECRAWL_POSTGRES_PASSWORD_SECRET";
+            printf '%s' "$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > /run/firecrawl-secrets/postgres_password
+        environment:
+          FIRECRAWL_POSTGRES_PASSWORD_SECRET: ${FIRECRAWL_POSTGRES_PASSWORD_SECRET:?PostgreSQL runtime secret is required}
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        while [ ! -s /run/firecrawl-secrets/postgres_password ]; do sleep 0.05; done;
+        exec docker-entrypoint.sh postgres
 
   # Search backend for Firecrawl (SEARXNG_ENDPOINT in .env). Internal network only, no host port.
   searxng:
@@ -98,9 +114,3 @@ services:
       - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
     restart: unless-stopped
 
-
-secrets:
-  postgres_password:
-    environment: FIRECRAWL_POSTGRES_PASSWORD_SECRET
-  searxng_secret:
-    environment: FIRECRAWL_SEARXNG_SECRET_SECRET
