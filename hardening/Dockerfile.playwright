@@ -1,7 +1,7 @@
 FROM node:22.23.2-trixie-slim
 
-ENV PNPM_HOME="/pnpm" \
-    PATH="$PNPM_HOME:$PATH" \
+ENV PNPM_HOME="/pnpm"
+ENV PATH="/pnpm:$PATH" \
     CI=true \
     COREPACK_ENABLE_PROJECT_SPEC=0 \
     PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright
@@ -10,16 +10,16 @@ RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
 
 WORKDIR /usr/src/app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm --pm-on-fail=ignore install --frozen-lockfile
 
 COPY . .
 
-RUN pnpm exec playwright install chromium --with-deps \
+RUN pnpm --pm-on-fail=ignore exec playwright install chromium --with-deps \
     && apt-get update \
     && apt-get -y upgrade \
     && rm -rf /var/lib/apt/lists/* \
-    && pnpm run build \
-    && pnpm prune --prod --ignore-scripts \
+    && pnpm --pm-on-fail=ignore run build \
+    && pnpm --pm-on-fail=ignore prune --prod --ignore-scripts \
     && chown -R node:node /usr/src/app \
     && chmod -R a+rX /usr/local/share/playwright \
     && rm -rf \
