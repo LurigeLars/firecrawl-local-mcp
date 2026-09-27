@@ -36,15 +36,26 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
   assert.match(launcher, /ValidateSet\('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
-  assert.match(launcher, /docker @compose exec -T \$service sh -c 'umask 077; cat > \/run\/firecrawl-secrets\/postgres_password'/);
-  assert.match(launcher, /docker @compose exec -T searxng sh -c 'umask 077; cat > \/run\/firecrawl-secrets\/searxng_secret'/);
+  assert.match(launcher, /function Invoke-DockerWithExactStdin/);
+  assert.match(launcher, /StandardInput\.Write\(\$InputText\)/);
+  assert.match(launcher, /Invoke-DockerWithExactStdin -InputText \$postgres/);
+  assert.match(launcher, /Invoke-DockerWithExactStdin -InputText \$searxng/);
   assert.match(launcher, /'recover' \{\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets\s*if \(-not \(Test-PostgresRuntimePassword\)\)/s);
+});
+
+test('exact stdin helper does not append a host newline to runtime secrets', () => {
+  assert.match(launcher, /RedirectStandardInput = \$true/);
+  assert.match(launcher, /StandardInput\.Write\(\$InputText\)/);
+  assert.doesNotMatch(launcher, /\$postgres\s*\|\s*& docker @compose exec/);
+  assert.doesNotMatch(launcher, /\$searxng\s*\|\s*& docker @compose exec/);
+  assert.doesNotMatch(launcher, /\$plain\s*\|\s*& docker @compose exec/);
 });
 
 test('runtime recovery refuses a mismatched persisted PostgreSQL password and exposes an explicit one-time repair action', () => {
   assert.match(launcher, /repair-postgres-auth/);
   assert.match(launcher, /function Test-PostgresRuntimePassword/);
   assert.match(launcher, /function Repair-PostgresRuntimePassword/);
+  assert.match(launcher, /hostname -i/);
   assert.match(launcher, /PGPASSWORD="\$\(cat \/run\/firecrawl-secrets\/postgres_password\)"/);
   assert.match(launcher, /\\password postgres/);
   assert.match(launcher, /Run \.\\fc\.ps1 repair-postgres-auth once/);
