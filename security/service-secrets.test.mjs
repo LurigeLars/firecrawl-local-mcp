@@ -41,6 +41,15 @@ test('runtime recovery restores tmpfs secrets without rebuilding the stack', () 
   assert.match(launcher, /'recover' \{\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets/s);
 });
 
+test('runtime recovery refuses a mismatched persisted PostgreSQL password and exposes an explicit one-time repair action', () => {
+  assert.match(launcher, /repair-postgres-auth/);
+  assert.match(launcher, /function Test-PostgresRuntimePassword/);
+  assert.match(launcher, /function Repair-PostgresRuntimePassword/);
+  assert.match(launcher, /PGPASSWORD="\$\(cat \/run\/firecrawl-secrets\/postgres_password\)"/);
+  assert.match(launcher, /\\password postgres/);
+  assert.match(launcher, /Run \.\\fc\.ps1 repair-postgres-auth once/);
+});
+
 test('migration removes only known legacy service-secret entries after DPAPI storage', () => {
   assert.match(bootstrap, /POSTGRES_PASSWORD/);
   assert.match(bootstrap, /SEARXNG_SECRET/);
