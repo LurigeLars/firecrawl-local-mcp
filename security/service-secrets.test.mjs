@@ -34,11 +34,20 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
 });
 
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
-  assert.match(launcher, /ValidateSet\('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'import-gemini'\)/);
+  assert.match(launcher, /ValidateSet\('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
   assert.match(launcher, /docker @compose exec -T \$service sh -c 'umask 077; cat > \/run\/firecrawl-secrets\/postgres_password'/);
   assert.match(launcher, /docker @compose exec -T searxng sh -c 'umask 077; cat > \/run\/firecrawl-secrets\/searxng_secret'/);
-  assert.match(launcher, /'recover' \{\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets/s);
+  assert.match(launcher, /'recover' \{\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets\s*if \(-not \(Test-PostgresRuntimePassword\)\)/s);
+});
+
+test('runtime recovery refuses a mismatched persisted PostgreSQL password and exposes an explicit one-time repair action', () => {
+  assert.match(launcher, /repair-postgres-auth/);
+  assert.match(launcher, /function Test-PostgresRuntimePassword/);
+  assert.match(launcher, /function Repair-PostgresRuntimePassword/);
+  assert.match(launcher, /PGPASSWORD="\$\(cat \/run\/firecrawl-secrets\/postgres_password\)"/);
+  assert.match(launcher, /\\password postgres/);
+  assert.match(launcher, /Run \.\\fc\.ps1 repair-postgres-auth once/);
 });
 
 test('migration removes only known legacy service-secret entries after DPAPI storage', () => {

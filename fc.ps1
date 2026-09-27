@@ -1,7 +1,7 @@
-# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | down | status | logs | test | url | recover | import-gemini
+# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # When public ChatGPT access is configured, also manages the narrow local browser bridge used for Season supplier login.
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'import-gemini')][string]$Action = 'status')
+param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
 
 $root = $PSScriptRoot
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
@@ -340,6 +340,52 @@ function Import-ServiceRuntimeSecrets {
     }
 }
 
+function Test-PostgresRuntimePassword {
+    $serviceId = (& docker @compose ps -q nuq-postgres).Trim()
+    if (-not $serviceId) {
+        throw 'nuq-postgres is not running.'
+    }
+
+    & docker @compose exec -T nuq-postgres sh -c 'test -s /run/firecrawl-secrets/postgres_password'
+    if ($LASTEXITCODE -ne 0) {
+        return $false
+    }
+
+    & docker @compose exec -T nuq-postgres sh -c 'PGPASSWORD="$(cat /run/firecrawl-secrets/postgres_password)" psql -h 127.0.0.1 -U postgres -d postgres -Atqc "SELECT 1" >/dev/null 2>&1'
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Repair-PostgresRuntimePassword {
+    $serviceId = (& docker @compose ps -q nuq-postgres).Trim()
+    if (-not $serviceId) {
+        throw 'nuq-postgres is not running.'
+    }
+
+    & docker @compose exec -T nuq-postgres sh -c 'test -s /run/firecrawl-secrets/postgres_password'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'PostgreSQL runtime secret is missing from tmpfs. Run .\fc.ps1 recover first.'
+    }
+
+    # Authenticate locally over the Unix socket. The password itself never appears
+    # in Docker config or the host command line; psql reads it from tmpfs inside
+    # the container and rotates the persisted postgres role to match the DPAPI secret.
+    & docker @compose exec -T nuq-postgres sh -c 'psql -U postgres -d postgres -Atqc "SELECT 1" >/dev/null 2>&1'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Local PostgreSQL socket authentication failed; refusing to modify the postgres role.'
+    }
+
+    & docker @compose exec -T nuq-postgres sh -c 'pw="$(cat /run/firecrawl-secrets/postgres_password)"; printf "%s\n%s\n" "$pw" "$pw" | psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "\password postgres" >/dev/null'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'PostgreSQL password reconciliation failed.'
+    }
+
+    if (-not (Test-PostgresRuntimePassword)) {
+        throw 'PostgreSQL password reconciliation completed but TCP authentication still fails.'
+    }
+
+    'postgres runtime password: reconciled'
+}
+
 function Import-GeminiKey {
     if (-not (Test-Path -LiteralPath $GeminiDpapiPath -PathType Leaf)) {
         throw 'Gemini DPAPI secret is missing. Run .\scripts\configure_gemini.ps1 first.'
@@ -374,7 +420,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("up", "down", "status", "logs", "recover", "import-gemini")
+$composeActions = @("up", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -405,7 +451,14 @@ switch ($Action) {
     'recover' {
         Import-ServiceRuntimeSecrets
         Import-AvailableRuntimeSecrets
+        if (-not (Test-PostgresRuntimePassword)) {
+            throw 'PostgreSQL DPAPI runtime secret does not match the persisted postgres role password. Run .\fc.ps1 repair-postgres-auth once.'
+        }
         'runtime secrets: restored'
+    }
+    'repair-postgres-auth' {
+        Import-ServiceRuntimeSecrets
+        Repair-PostgresRuntimePassword
     }
     'import-gemini' {
         Import-GeminiKey
