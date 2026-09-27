@@ -30,12 +30,12 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
   assert.match(launcher, /postgres_password\.dpapi/);
   assert.match(launcher, /searxng_secret\.dpapi/);
   assert.match(launcher, /Set-RuntimeHookSecrets/);
-  assert.match(launcher, /-UseRealSecrets \(\$Action -eq "up"\)/);
+  assert.match(launcher, /-UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
 });
 
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
-  assert.match(launcher, /ValidateSet\('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
-  assert.match(launcher, /'redeploy' \\{/);
+  assert.match(launcher, /ValidateSet\('up', 'redeploy', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
+  assert.match(launcher, /'redeploy' \{/);
   assert.match(launcher, /docker @compose up -d --build --force-recreate/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
   assert.match(launcher, /function Invoke-DockerWithExactStdin/);
