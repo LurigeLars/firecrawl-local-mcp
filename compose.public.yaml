@@ -52,8 +52,8 @@ services:
           - -c
           - >-
             umask 077;
-            test -n "$FIRECRAWL_BROWSER_BRIDGE_SECRET";
-            printf '%s' "$FIRECRAWL_BROWSER_BRIDGE_SECRET" > /run/firecrawl-gateway-secrets/browser_bridge_token
+            test -n "$$FIRECRAWL_BROWSER_BRIDGE_SECRET";
+            printf '%s' "$$FIRECRAWL_BROWSER_BRIDGE_SECRET" > /run/firecrawl-gateway-secrets/browser_bridge_token
         environment:
           FIRECRAWL_BROWSER_BRIDGE_SECRET: ${FIRECRAWL_BROWSER_BRIDGE_SECRET:?Browser bridge runtime secret is required}
     restart: unless-stopped
