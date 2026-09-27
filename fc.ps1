@@ -1,7 +1,7 @@
-# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
+# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # When public ChatGPT access is configured, also manages the narrow local browser bridge used for Season supplier login.
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
+param([ValidateSet('up', 'redeploy', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
 
 $root = $PSScriptRoot
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
@@ -471,7 +471,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("up", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
+$composeActions = @("up", "redeploy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -479,7 +479,7 @@ $searxngSecretOriginal = if ($searxngSecretWasSet) { $env:FIRECRAWL_SEARXNG_SECR
 
 try {
     if ($Action -in $composeActions) {
-        Set-RuntimeHookSecrets -UseRealSecrets ($Action -eq "up")
+        Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy"))
     }
 switch ($Action) {
     'up' {
@@ -491,6 +491,18 @@ switch ($Action) {
         }
         docker @compose up -d --build
         if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
+        Set-RuntimeHookSecrets -UseRealSecrets $false
+        Import-AvailableRuntimeSecrets
+    }
+    'redeploy' {
+        if ($public) {
+            Stop-BrowserBridge
+            $port = Start-BrowserBridge
+            $env:BROWSER_BRIDGE_PORT = [string]$port
+            "browser bridge port: $port"
+        }
+        docker @compose up -d --build --force-recreate
+        if ($LASTEXITCODE -ne 0) { throw "docker compose redeploy failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
         Import-AvailableRuntimeSecrets
     }
