@@ -5,6 +5,7 @@ import test from 'node:test';
 const compose = readFileSync(new URL('../compose.local.yaml', import.meta.url), 'utf8');
 const launcher = readFileSync(new URL('../fc.ps1', import.meta.url), 'utf8');
 const bootstrap = readFileSync(new URL('../scripts/configure_service_secrets.ps1', import.meta.url), 'utf8');
+const composeDefaults = readFileSync(new URL('../compose.defaults.env', import.meta.url), 'utf8');
 
 test('service secrets are injected into tmpfs by post_start hooks', () => {
   assert.doesNotMatch(compose, /^secrets:\s*$/m);
@@ -73,4 +74,22 @@ test('migration removes only known legacy service-secret entries after DPAPI sto
 
 test('plaintext service-secret template is retired', () => {
   assert.equal(existsSync(new URL('../secrets.env.example', import.meta.url)), false);
+});
+
+
+test('optional Compose defaults suppress warnings without supplying values', () => {
+  const dataLines = composeDefaults
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+
+  assert.ok(dataLines.length > 0);
+  for (const line of dataLines) {
+    assert.match(line, /^[A-Z0-9_]+=$/);
+  }
+
+  assert.match(
+    launcher,
+    /'--env-file', "\$root\\compose\.defaults\.env",[\s\S]*'--env-file', "\$root\\\.env"/,
+  );
 });
