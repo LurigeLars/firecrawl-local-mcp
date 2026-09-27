@@ -15,22 +15,25 @@ services:
 
   gateway:
     image: node:26.9.0-alpine
-    command: ["node", "/app/gateway.mjs"]
+    command:
+      - sh
+      - -c
+      - >-
+        while [ ! -s /run/firecrawl-gateway-secrets/browser_bridge_token ]; do sleep 0.05; done;
+        exec node /app/gateway.mjs
     user: node
     env_file:
       - ../public/gateway.env
-      - ../public/browser.env
     environment:
       UPSTREAM_HOST: mcp
       UPSTREAM_PORT: "3000"
-      # Cloudflare Access (Managed OAuth). Empty ACCESS_AUD = off (secret-path only).
+      # Cloudflare Access (Managed OAuth) is mandatory.
       ACCESS_TEAM_DOMAIN: ${ACCESS_TEAM_DOMAIN:-}
       ACCESS_AUD: ${ACCESS_AUD:-}
       ACCESS_ALLOWED_EMAILS: ${ACCESS_ALLOWED_EMAILS:-}
-      # Emergency fallback only: without ACCESS_AUD the gateway refuses to start unless this is 1.
-      ALLOW_SECRET_PATH: ${ALLOW_SECRET_PATH:-}
       ALLOWED_TOOLS: firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,browser_session_open,browser_session_status,browser_product_open,browser_snapshot,browser_network_log,browser_product_probe,browser_category_probe,browser_category_open
       BROWSER_BRIDGE_URL: http://host.docker.internal:${BROWSER_BRIDGE_PORT:-8766}
+      BROWSER_BRIDGE_TOKEN_FILE: /run/firecrawl-gateway-secrets/browser_bridge_token
     volumes:
       - ../public/gateway:/app:ro
     extra_hosts:
@@ -41,6 +44,18 @@ services:
           - firecrawl-gateway
     depends_on: [mcp]
     read_only: true
+    tmpfs:
+      - /run/firecrawl-gateway-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
+    post_start:
+      - command:
+          - sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$$FIRECRAWL_BROWSER_BRIDGE_SECRET";
+            printf '%s' "$$FIRECRAWL_BROWSER_BRIDGE_SECRET" > /run/firecrawl-gateway-secrets/browser_bridge_token
+        environment:
+          FIRECRAWL_BROWSER_BRIDGE_SECRET: ${FIRECRAWL_BROWSER_BRIDGE_SECRET:?Browser bridge runtime secret is required}
     restart: unless-stopped
 
 

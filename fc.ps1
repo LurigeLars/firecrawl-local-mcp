@@ -8,6 +8,7 @@ if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
 $SearxngDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\searxng_secret.dpapi"
+$BrowserBridgeDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\browser_bridge_token.dpapi"
 $compose = @('compose', '--project-directory', "$root\firecrawl",
     '-f', "$root\firecrawl\docker-compose.yaml", '-f', "$root\compose.local.yaml")
 $public = Test-Path "$root\public\gateway.env"
@@ -17,21 +18,100 @@ $compose += @(
     '--env-file', "$root\.env"
 )
 
-function Ensure-BrowserEnv {
-    $path = "$root\public\browser.env"
-    if (Test-Path $path) { return }
-    $bytes = New-Object byte[] 32
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-    $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-    Set-Content -LiteralPath $path -Value "BROWSER_BRIDGE_TOKEN=$token" -Encoding ascii
+function Read-BrowserTokenDpapi {
+    if (-not (Test-Path -LiteralPath $BrowserBridgeDpapiPath -PathType Leaf)) {
+        throw 'Browser bridge DPAPI secret is missing.'
+    }
+    $encrypted = Get-Content -LiteralPath $BrowserBridgeDpapiPath -Raw
+    $secure = ConvertTo-SecureString -String $encrypted
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+        if ([string]::IsNullOrWhiteSpace($plain)) {
+            throw 'Browser bridge DPAPI secret decrypted to an empty value.'
+        }
+        return $plain
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+        $secure = $null
+    }
+}
+
+function Save-BrowserTokenDpapi([string]$Token) {
+    if ([string]::IsNullOrWhiteSpace($Token) -or $Token.Length -lt 32) {
+        throw 'Browser bridge token is missing or too short.'
+    }
+    $secretDir = Split-Path $BrowserBridgeDpapiPath -Parent
+    New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
+    $secure = ConvertTo-SecureString -String $Token -AsPlainText -Force
+    try {
+        $encrypted = ConvertFrom-SecureString -SecureString $secure
+        [IO.File]::WriteAllText($BrowserBridgeDpapiPath, $encrypted, [Text.UTF8Encoding]::new($false))
+    }
+    finally {
+        $secure = $null
+    }
+    $roundTrip = Read-BrowserTokenDpapi
+    try {
+        if ($roundTrip -cne $Token) {
+            Remove-Item -LiteralPath $BrowserBridgeDpapiPath -Force -ErrorAction SilentlyContinue
+            throw 'Browser bridge DPAPI verification failed.'
+        }
+    }
+    finally {
+        $roundTrip = $null
+    }
+}
+
+function Ensure-BrowserTokenSecret {
+    $legacyPath = "$root\public\browser.env"
+    $legacyToken = $null
+    if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+        $line = @(Get-Content -LiteralPath $legacyPath | Where-Object { $_ -match '^BROWSER_BRIDGE_TOKEN=' })[0]
+        if (-not $line) {
+            throw 'Legacy public\\browser.env exists but does not contain BROWSER_BRIDGE_TOKEN.'
+        }
+        $legacyToken = ($line -replace '^BROWSER_BRIDGE_TOKEN=', '').Trim()
+        if ($legacyToken.Length -lt 32) {
+            throw 'Legacy BROWSER_BRIDGE_TOKEN is too short.'
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $BrowserBridgeDpapiPath -PathType Leaf)) {
+        $token = $legacyToken
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            $bytes = New-Object byte[] 32
+            $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+            try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+            $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        }
+        try {
+            Save-BrowserTokenDpapi -Token $token
+        }
+        finally {
+            $token = $null
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($legacyToken)) {
+        $stored = Read-BrowserTokenDpapi
+        try {
+            if ($stored -cne $legacyToken) {
+                throw 'Browser bridge DPAPI secret does not match legacy browser.env; refusing to remove plaintext.'
+            }
+        }
+        finally {
+            $stored = $null
+        }
+        Remove-Item -LiteralPath $legacyPath -Force
+    }
+    $legacyToken = $null
 }
 
 function Get-BrowserToken {
-    Ensure-BrowserEnv
-    $line = @(Get-Content "$root\public\browser.env" | Where-Object { $_ -match '^BROWSER_BRIDGE_TOKEN=' })[0]
-    if (-not $line) { throw 'BROWSER_BRIDGE_TOKEN missing from public\\browser.env' }
-    $token = $line -replace '^BROWSER_BRIDGE_TOKEN=', ''
+    Ensure-BrowserTokenSecret
+    $token = Read-BrowserTokenDpapi
     if ($token.Length -lt 32) { throw 'BROWSER_BRIDGE_TOKEN is too short' }
     return $token
 }
@@ -143,7 +223,7 @@ function Set-BrowserComposePort {
 
 function Start-BrowserBridge {
     if (-not $public) { return $null }
-    Ensure-BrowserEnv
+    Ensure-BrowserTokenSecret
 
     $existingPort = Get-BrowserPort
     if ($null -ne $existingPort -and (Test-BrowserBridgeAtPort $existingPort)) {
@@ -192,15 +272,27 @@ function Stop-BrowserBridge {
     Remove-Item "$root\.runtime\browser-bridge.port" -Force -ErrorAction SilentlyContinue
 }
 
-if ($public) { Ensure-BrowserEnv }
+function Remove-LegacyGatewaySecret {
+    $path = "$root\public\gateway.env"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+    $lines = @(Get-Content -LiteralPath $path)
+    $kept = @($lines | Where-Object { $_ -notmatch '^\s*GATEWAY_SECRET=' })
+    if ($kept.Count -ne $lines.Count) {
+        [IO.File]::WriteAllLines($path, $kept, [Text.UTF8Encoding]::new($false))
+    }
+}
+
+if ($public) {
+    Remove-LegacyGatewaySecret
+    Ensure-BrowserTokenSecret
+}
 
 function Get-PublicUrl {
-    $secret = ((Get-Content "$root\public\gateway.env") -match '^GATEWAY_SECRET=')[0] -replace '^GATEWAY_SECRET=', ''
     $hostnameLine = @(Get-Content "$root\public\gateway.env" | Where-Object { $_ -match '^PUBLIC_HOSTNAME=' })[0]
     if (-not $hostnameLine) { throw 'PUBLIC_HOSTNAME missing from public\gateway.env' }
     $hostname = ($hostnameLine -replace '^PUBLIC_HOSTNAME=', '').Trim()
-    $aud = ((Get-Content "$root\.env") -match '^ACCESS_AUD=')[0] -replace '^ACCESS_AUD=', ''
-    if ($aud) { "https://$hostname/mcp" } else { "https://$hostname/$secret/mcp" }
+    if ([string]::IsNullOrWhiteSpace($hostname)) { throw 'PUBLIC_HOSTNAME is empty in public\gateway.env' }
+    "https://$hostname/mcp"
 }
 
 
@@ -293,26 +385,37 @@ function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
 
         $postgres = Get-DpapiSecretValue -Path $PostgresDpapiPath -Label "PostgreSQL"
         $searxng = Get-DpapiSecretValue -Path $SearxngDpapiPath -Label "SearXNG"
+        $browser = $null
         try {
             $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = $postgres
             $env:FIRECRAWL_SEARXNG_SECRET_SECRET = $searxng
+            if ($public) {
+                $browser = Get-BrowserToken
+                $env:FIRECRAWL_BROWSER_BRIDGE_SECRET = $browser
+            }
         }
         finally {
             $postgres = $null
             $searxng = $null
+            $browser = $null
         }
         return
     }
 
     $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"
     $env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"
+    if ($public) {
+        $env:FIRECRAWL_BROWSER_BRIDGE_SECRET = "compose-config-only"
+    }
 }
 
 function Restore-ComposeServiceSecrets(
     [bool]$PostgresWasSet,
     [AllowNull()][string]$PostgresValue,
     [bool]$SearxngWasSet,
-    [AllowNull()][string]$SearxngValue
+    [AllowNull()][string]$SearxngValue,
+    [bool]$BrowserWasSet,
+    [AllowNull()][string]$BrowserValue
 ) {
     if ($PostgresWasSet) {
         $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = $PostgresValue
@@ -324,6 +427,12 @@ function Restore-ComposeServiceSecrets(
         $env:FIRECRAWL_SEARXNG_SECRET_SECRET = $SearxngValue
     } else {
         Remove-Item Env:FIRECRAWL_SEARXNG_SECRET_SECRET -ErrorAction SilentlyContinue
+    }
+
+    if ($BrowserWasSet) {
+        $env:FIRECRAWL_BROWSER_BRIDGE_SECRET = $BrowserValue
+    } else {
+        Remove-Item Env:FIRECRAWL_BROWSER_BRIDGE_SECRET -ErrorAction SilentlyContinue
     }
 }
 function Test-LegacyGeminiKey {
@@ -479,6 +588,8 @@ $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
 $searxngSecretOriginal = if ($searxngSecretWasSet) { $env:FIRECRAWL_SEARXNG_SECRET_SECRET } else { $null }
+$browserSecretWasSet = Test-Path Env:FIRECRAWL_BROWSER_BRIDGE_SECRET
+$browserSecretOriginal = if ($browserSecretWasSet) { $env:FIRECRAWL_BROWSER_BRIDGE_SECRET } else { $null }
 
 try {
     if ($Action -in $composeActions) {
@@ -583,5 +694,7 @@ finally {
         -PostgresWasSet $postgresSecretWasSet `
         -PostgresValue $postgresSecretOriginal `
         -SearxngWasSet $searxngSecretWasSet `
-        -SearxngValue $searxngSecretOriginal
+        -SearxngValue $searxngSecretOriginal `
+        -BrowserWasSet $browserSecretWasSet `
+        -BrowserValue $browserSecretOriginal
 }

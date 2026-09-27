@@ -6,6 +6,8 @@ const compose = readFileSync(new URL('../compose.local.yaml', import.meta.url), 
 const launcher = readFileSync(new URL('../fc.ps1', import.meta.url), 'utf8');
 const bootstrap = readFileSync(new URL('../scripts/configure_service_secrets.ps1', import.meta.url), 'utf8');
 const composeDefaults = readFileSync(new URL('../compose.defaults.env', import.meta.url), 'utf8');
+const publicCompose = readFileSync(new URL('../compose.public.yaml', import.meta.url), 'utf8');
+const gateway = readFileSync(new URL('../public/gateway/gateway.mjs', import.meta.url), 'utf8');
 
 test('service secrets are injected into tmpfs by post_start hooks', () => {
   assert.doesNotMatch(compose, /^secrets:\s*$/m);
@@ -76,6 +78,32 @@ test('plaintext service-secret template is retired', () => {
   assert.equal(existsSync(new URL('../secrets.env.example', import.meta.url)), false);
 });
 
+
+
+test('public gateway browser token is DPAPI-backed and injected through tmpfs', () => {
+  assert.match(launcher, /browser_bridge_token\.dpapi/);
+  assert.match(launcher, /Ensure-BrowserTokenSecret/);
+  assert.match(launcher, /Remove-Item -LiteralPath \$legacyPath -Force/);
+  assert.match(launcher, /FIRECRAWL_BROWSER_BRIDGE_SECRET/);
+  assert.doesNotMatch(publicCompose, /browser\.env/);
+  assert.match(publicCompose, /\/run\/firecrawl-gateway-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700/);
+  assert.match(publicCompose, /BROWSER_BRIDGE_TOKEN_FILE:\s*\/run\/firecrawl-gateway-secrets\/browser_bridge_token/);
+  assert.match(publicCompose, /printf '%s' "\$\$FIRECRAWL_BROWSER_BRIDGE_SECRET" > \/run\/firecrawl-gateway-secrets\/browser_bridge_token/);
+  assert.doesNotMatch(publicCompose, /BROWSER_BRIDGE_TOKEN:\s*\$\{/);
+  assert.match(gateway, /readFileSync\(BROWSER_BRIDGE_TOKEN_FILE,'utf8'\)/);
+  assert.doesNotMatch(gateway, /process\.env\.BROWSER_BRIDGE_TOKEN(?:\?\?|\|\|)/);
+});
+
+test('public gateway is Cloudflare Access only with no secret-path fallback', () => {
+  assert.doesNotMatch(gateway, /GATEWAY_SECRET/);
+  assert.doesNotMatch(gateway, /ALLOW_SECRET_PATH/);
+  assert.doesNotMatch(publicCompose, /ALLOW_SECRET_PATH/);
+  assert.match(gateway, /ACCESS_AUD is required/);
+  assert.match(gateway, /split\('\?'\)\[0\]==='\/mcp'/);
+  assert.match(launcher, /Remove-LegacyGatewaySecret/);
+  assert.match(launcher, /Where-Object \{ \$_ -notmatch '\^\\s\*GATEWAY_SECRET='/);
+  assert.equal(existsSync(new URL('../public/browser.env.example', import.meta.url)), false);
+});
 
 test('optional Compose defaults suppress warnings without supplying values', () => {
   const dataLines = composeDefaults

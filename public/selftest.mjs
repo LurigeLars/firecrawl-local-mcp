@@ -1,5 +1,5 @@
-// Exercises the gateway end to end. Usage: node selftest.mjs <base-url-with-secret-path>
-// e.g. http://gateway:8080/<secret>/mcp  or  https://firecrawl.example.com/<secret>/mcp
+// Exercises the gateway end to end. Usage: node selftest.mjs <base-url>
+// e.g. https://firecrawl.example.com/mcp
 const url = process.argv[2];
 // This operator-run diagnostic intentionally probes the explicitly supplied gateway URL.
 // It is not part of the gateway request path and must be able to test local deployments.
@@ -27,8 +27,8 @@ if (probe.status === 401 && /resource_metadata/.test(probe.headers.get('www-auth
   process.exit(meta.authorization_servers?.length ? 0 : 1);
 }
 
-const bad = await fetch(`${origin}/wrong-secret/mcp`, { method: 'POST', headers, body: '{}' });
-check('wrong secret -> 404', bad.status === 404, `got ${bad.status}`);
+const bad = await fetch(`${origin}/legacy-secret/mcp`, { method: 'POST', headers, body: '{}' });
+check('legacy secret-style path -> 404', bad.status === 404, `got ${bad.status}`);
 const root = await fetch(`${origin}/`);
 check('root -> 404', root.status === 404, `got ${root.status}`);
 
