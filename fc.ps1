@@ -12,7 +12,10 @@ $compose = @('compose', '--project-directory', "$root\firecrawl",
     '-f', "$root\firecrawl\docker-compose.yaml", '-f', "$root\compose.local.yaml")
 $public = Test-Path "$root\public\gateway.env"
 if ($public) { $compose += @('-f', "$root\compose.public.yaml") }
-$compose += @('--env-file', "$root\.env")
+$compose += @(
+    '--env-file', "$root\compose.defaults.env",
+    '--env-file', "$root\.env"
+)
 
 function Ensure-BrowserEnv {
     $path = "$root\public\browser.env"
