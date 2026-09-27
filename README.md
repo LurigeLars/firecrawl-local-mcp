@@ -39,7 +39,7 @@ This repo holds only the local additions. Secrets and machine-specific files are
 2. Copy `.env.example` to `.env` and `public/gateway.env.example` to `public/gateway.env`; replace deployment placeholders locally and keep the real files out of Git.
 3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and injected into per-container tmpfs only at runtime.
 4. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
-5. `public/browser.env` is generated automatically by `.\fc.ps1 up`; `public/browser.env.example` documents its format only.
+5. The supplier-browser bridge token is generated automatically on first `.\fc.ps1 up`, protected with Windows DPAPI at `%LOCALAPPDATA%\FirecrawlLocal\secrets\browser_bridge_token.dpapi`, and injected into the gateway tmpfs only at runtime.
 6. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
 7. Install the required local model/runtime dependencies described below.
 8. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
@@ -74,13 +74,11 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
   access token 10 min). Unauthenticated requests get 401 + OAuth metadata at the edge. The gateway also verifies the
   Access JWT (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ACCESS_ALLOWED_EMAILS` in `.env`; offline test:
   `node public/access-test.mjs file:///<repo-path>/public/gateway/gateway.mjs`).
-  The gateway refuses to start when `ACCESS_AUD` is empty, so an accidentally blank value cannot silently leave only
-  the secret link in place (since 2026-09-17). Emergency fallback to the secret link: set `ACCESS_AUD=` **and**
-  `ALLOW_SECRET_PATH=1` in `.env`, run `.\fc.ps1 up`, and disable the Access application.
+  The gateway refuses to start when the Access team, audience, or allowed identity is missing. Cloudflare Access is the
+  only public authentication path; the old secret-link fallback has been retired.
 - Address: the public endpoint is supplied only through deployment-local configuration; `.\fc.ps1 url` prints the configured endpoint.
   Anything else returns 404.
-- Gateway secrets and deployment identifiers are local-only and must stay out of Git.
-- Rotate the secret (e.g. if the link leaks): replace the value in `public/gateway.env`, run `.\fc.ps1 up`, update the ChatGPT connector URL.
+- Deployment identifiers are local-only and must stay out of Git. `fc.ps1` removes any legacy `GATEWAY_SECRET` entry from the ignored `public/gateway.env` during startup.
 - Gateway: the Firecrawl surface is limited to scrape/map/search/crawl/check_crawl_status; `firecrawl_parse` is blocked because it can read arbitrary local files in this mode. The public deployment also exposes the separate, allowlisted supplier-browser tools documented below. Scrape/crawl requests asking for screenshot, branding, audio, or browser `actions` are rejected immediately because this self-hosted instance cannot serve them. The gateway defaults to 120 requests/min per caller IP (`RATE_PER_MIN`) with a 256 KB request cap.
 - Server instructions: the gateway replaces the MCP `initialize` instructions with `public/gateway/instructions.md`
   (read on every connect, no restart needed). ChatGPT picks them up when the connector is refreshed ("Uppdatera").
@@ -100,7 +98,7 @@ For the Season Hotel pilot, the public ChatGPT connector exposes a separate, nar
 - `browser_snapshot` and `browser_network_log` return bounded, redacted read-only views.
 - `browser_product_probe` and `browser_category_probe` return sanitized data from already observed Spendrups requests.
 
-`fc.ps1 up` starts `public/browser-bridge.mjs` on the Windows host and creates `public/browser.env` with a random internal token if needed. Unless `BROWSER_BRIDGE_PORT` is configured explicitly, the launcher reuses its previous valid port or selects the first free loopback port in `8765-8799`, records it under `.runtime`, and passes that port to the Docker gateway. Supplier Chrome DevTools Protocol endpoints remain loopback-only on `127.0.0.1:9440` and `127.0.0.1:9441`.
+`fc.ps1 up` starts `public/browser-bridge.mjs` on the Windows host and creates a random internal token if needed. The token is persisted only as a Windows DPAPI blob under `%LOCALAPPDATA%\FirecrawlLocal\secrets`; an older gitignored `public/browser.env` is verified, migrated, and deleted automatically. During gateway startup the token is decrypted only long enough for a Compose `post_start` hook to write it into `/run/firecrawl-gateway-secrets/browser_bridge_token` on tmpfs. It is absent from the gateway service `.Config.Env`. Unless `BROWSER_BRIDGE_PORT` is configured explicitly, the launcher reuses its previous valid port or selects the first free loopback port in `8765-8799`, records it under `.runtime`, and passes that port to the Docker gateway. Supplier Chrome DevTools Protocol endpoints remain loopback-only on `127.0.0.1:9440` and `127.0.0.1:9441`.
 
 Manual-auth workflow:
 1. Call `browser_session_open` for the supplier. A visible Chrome window opens on the Windows desktop.
