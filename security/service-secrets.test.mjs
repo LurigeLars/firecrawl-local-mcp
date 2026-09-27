@@ -25,7 +25,7 @@ test('main processes wait for tmpfs secrets instead of receiving secret values i
   assert.doesNotMatch(compose, /SEARXNG_SECRET:\s*\$\{/);
 });
 
-test('launcher no longer loads legacy secrets.env and supplies hook variables only for up', () => {
+test('launcher no longer loads legacy secrets.env and supplies hook variables only for secret-bearing start actions', () => {
   assert.doesNotMatch(launcher, /--env-file['",\s]+\$root\\secrets\.env/);
   assert.match(launcher, /postgres_password\.dpapi/);
   assert.match(launcher, /searxng_secret\.dpapi/);
@@ -35,6 +35,8 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
 
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
   assert.match(launcher, /ValidateSet\('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
+  assert.match(launcher, /'redeploy' \\{/);
+  assert.match(launcher, /docker @compose up -d --build --force-recreate/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
   assert.match(launcher, /function Invoke-DockerWithExactStdin/);
   assert.match(launcher, /StandardInput\.Write\(\$InputText\)/);
