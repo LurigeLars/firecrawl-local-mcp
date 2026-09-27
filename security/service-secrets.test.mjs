@@ -33,6 +33,14 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
   assert.match(launcher, /-UseRealSecrets \(\$Action -eq "up"\)/);
 });
 
+test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
+  assert.match(launcher, /ValidateSet\('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'import-gemini'\)/);
+  assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
+  assert.match(launcher, /docker @compose exec -T \$service sh -c 'umask 077; cat > \/run\/firecrawl-secrets\/postgres_password'/);
+  assert.match(launcher, /docker @compose exec -T searxng sh -c 'umask 077; cat > \/run\/firecrawl-secrets\/searxng_secret'/);
+  assert.match(launcher, /'recover' \{\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets/s);
+});
+
 test('migration removes only known legacy service-secret entries after DPAPI storage', () => {
   assert.match(bootstrap, /POSTGRES_PASSWORD/);
   assert.match(bootstrap, /SEARXNG_SECRET/);

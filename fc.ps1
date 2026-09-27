@@ -1,7 +1,7 @@
-# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | down | status | logs | test | url | import-gemini
+# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | down | status | logs | test | url | recover | import-gemini
 # When public ChatGPT access is configured, also manages the narrow local browser bridge used for Season supplier login.
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url', 'import-gemini')][string]$Action = 'status')
+param([ValidateSet('up', 'down', 'status', 'logs', 'test', 'url', 'recover', 'import-gemini')][string]$Action = 'status')
 
 $root = $PSScriptRoot
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
@@ -293,6 +293,53 @@ function Test-LegacyGeminiKey {
     return -not [string]::IsNullOrWhiteSpace($value)
 }
 
+function Import-ServiceRuntimeSecrets {
+    $postgres = Get-DpapiSecretValue -Path $PostgresDpapiPath -Label "PostgreSQL"
+    $searxng = Get-DpapiSecretValue -Path $SearxngDpapiPath -Label "SearXNG"
+
+    try {
+        foreach ($service in @("api", "nuq-postgres")) {
+            $serviceId = (& docker @compose ps -q $service).Trim()
+            if (-not $serviceId) {
+                throw "$service is not running; cannot restore PostgreSQL runtime secret."
+            }
+
+            $postgres |
+                & docker @compose exec -T $service sh -c 'umask 077; cat > /run/firecrawl-secrets/postgres_password'
+            if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL runtime secret import failed for $service."
+            }
+        }
+
+        $searxngId = (& docker @compose ps -q searxng).Trim()
+        if (-not $searxngId) {
+            throw 'searxng is not running; cannot restore SearXNG runtime secret.'
+        }
+
+        $searxng |
+            & docker @compose exec -T searxng sh -c 'umask 077; cat > /run/firecrawl-secrets/searxng_secret'
+        if ($LASTEXITCODE -ne 0) {
+            throw 'SearXNG runtime secret import failed.'
+        }
+    }
+    finally {
+        $postgres = $null
+        $searxng = $null
+    }
+
+    foreach ($service in @("api", "nuq-postgres")) {
+        & docker @compose exec -T $service sh -c 'test -s /run/firecrawl-secrets/postgres_password'
+        if ($LASTEXITCODE -ne 0) {
+            throw "PostgreSQL runtime secret verification failed for $service."
+        }
+    }
+
+    & docker @compose exec -T searxng sh -c 'test -s /run/firecrawl-secrets/searxng_secret'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'SearXNG runtime secret verification failed.'
+    }
+}
+
 function Import-GeminiKey {
     if (-not (Test-Path -LiteralPath $GeminiDpapiPath -PathType Leaf)) {
         throw 'Gemini DPAPI secret is missing. Run .\scripts\configure_gemini.ps1 first.'
@@ -327,7 +374,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("up", "down", "status", "logs", "import-gemini")
+$composeActions = @("up", "down", "status", "logs", "recover", "import-gemini")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -354,6 +401,11 @@ switch ($Action) {
         if ($public) { Set-BrowserComposePort }
         docker @compose down
         Stop-BrowserBridge
+    }
+    'recover' {
+        Import-ServiceRuntimeSecrets
+        Import-AvailableRuntimeSecrets
+        'runtime secrets: restored'
     }
     'import-gemini' {
         Import-GeminiKey
