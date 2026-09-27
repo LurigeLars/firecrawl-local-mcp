@@ -222,6 +222,45 @@ function Get-DpapiSecretValue([string]$Path, [string]$Label) {
     }
 }
 
+function Invoke-DockerWithExactStdin {
+    param(
+        [Parameter(Mandatory)][string]$InputText,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $dockerCommand = Get-Command docker.exe -ErrorAction SilentlyContinue
+    if (-not $dockerCommand) {
+        $dockerCommand = Get-Command docker -ErrorAction Stop
+    }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $dockerCommand.Source
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.CreateNoWindow = $true
+
+    foreach ($argument in $Arguments) {
+        [void]$psi.ArgumentList.Add([string]$argument)
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+
+    try {
+        [void]$process.Start()
+        $process.StandardInput.Write($InputText)
+        $process.StandardInput.Close()
+        $process.WaitForExit()
+        return [int]$process.ExitCode
+    }
+    finally {
+        if (-not $process.HasExited) {
+            try { $process.Kill($true) } catch {}
+        }
+        $process.Dispose()
+    }
+}
+
 function Test-LegacyServiceSecrets {
     $path = "$root\secrets.env"
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
@@ -304,9 +343,13 @@ function Import-ServiceRuntimeSecrets {
                 throw "$service is not running; cannot restore PostgreSQL runtime secret."
             }
 
-            $postgres |
-                & docker @compose exec -T $service sh -c 'umask 077; cat > /run/firecrawl-secrets/postgres_password'
-            if ($LASTEXITCODE -ne 0) {
+            $secretArgs = $compose + @(
+                "exec", "-T", $service,
+                "sh", "-c",
+                "umask 077; cat > /run/firecrawl-secrets/postgres_password"
+            )
+            $secretExit = Invoke-DockerWithExactStdin -InputText $postgres -Arguments $secretArgs
+            if ($secretExit -ne 0) {
                 throw "PostgreSQL runtime secret import failed for $service."
             }
         }
@@ -316,9 +359,13 @@ function Import-ServiceRuntimeSecrets {
             throw 'searxng is not running; cannot restore SearXNG runtime secret.'
         }
 
-        $searxng |
-            & docker @compose exec -T searxng sh -c 'umask 077; cat > /run/firecrawl-secrets/searxng_secret'
-        if ($LASTEXITCODE -ne 0) {
+        $searxArgs = $compose + @(
+            "exec", "-T", "searxng",
+            "sh", "-c",
+            "umask 077; cat > /run/firecrawl-secrets/searxng_secret"
+        )
+        $searxExit = Invoke-DockerWithExactStdin -InputText $searxng -Arguments $searxArgs
+        if ($searxExit -ne 0) {
             throw 'SearXNG runtime secret import failed.'
         }
     }
@@ -351,7 +398,7 @@ function Test-PostgresRuntimePassword {
         return $false
     }
 
-    & docker @compose exec -T nuq-postgres sh -c 'PGPASSWORD="$(cat /run/firecrawl-secrets/postgres_password)" psql -h 127.0.0.1 -U postgres -d postgres -Atqc "SELECT 1" >/dev/null 2>&1'
+    & docker @compose exec -T nuq-postgres sh -c 'dbhost="$(hostname -i | awk ''{print $1}'')"; test -n "$dbhost"; PGPASSWORD="$(cat /run/firecrawl-secrets/postgres_password)" psql -h "$dbhost" -U postgres -d postgres -Atqc "SELECT 1" >/dev/null 2>&1'
     return ($LASTEXITCODE -eq 0)
 }
 
@@ -398,9 +445,13 @@ function Import-GeminiKey {
 
     $plain = Get-DpapiSecretValue -Path $GeminiDpapiPath -Label "Gemini"
     try {
-        $plain |
-            & docker @compose exec -T llm-proxy sh -c 'umask 077; cat > /run/firecrawl-secrets/gemini_api_key'
-        if ($LASTEXITCODE -ne 0) { throw 'Gemini key import failed.' }
+        $geminiArgs = $compose + @(
+            "exec", "-T", "llm-proxy",
+            "sh", "-c",
+            "umask 077; cat > /run/firecrawl-secrets/gemini_api_key"
+        )
+        $geminiExit = Invoke-DockerWithExactStdin -InputText $plain -Arguments $geminiArgs
+        if ($geminiExit -ne 0) { throw 'Gemini key import failed.' }
     }
     finally {
         $plain = $null
