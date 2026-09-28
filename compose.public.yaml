@@ -11,6 +11,10 @@ services:
     depends_on: [api]
     read_only: true
     tmpfs: [/tmp, /home/node]
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   gateway:
@@ -44,6 +48,10 @@ services:
           - firecrawl-gateway
     depends_on: [mcp]
     read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     tmpfs:
       - /run/firecrawl-gateway-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
     post_start:
