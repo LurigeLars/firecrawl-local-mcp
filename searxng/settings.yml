@@ -1,6 +1,10 @@
 # SearXNG for the self-hosted Firecrawl (search backend). Only reachable on the internal Docker network.
 # SEARXNG_SECRET is exported by the container wrapper from /run/secrets/searxng_secret; no secret value is stored here.
-use_default_settings: true
+use_default_settings:
+  engines:
+    remove:
+      - ahmia
+      - torch
 
 general:
   instance_name: "firecrawl-search"
@@ -39,8 +43,4 @@ engines:
   - name: yahoo          # parsing errors with this SearXNG version
     disabled: true
   - name: duckduckgo
-    disabled: true
-  - name: ahmia          # unused onion-search engine; fails to load in this minimal internal deployment
-    disabled: true
-  - name: torch          # unused onion-search engine; fails to load in this minimal internal deployment
     disabled: true
