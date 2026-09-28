@@ -22,6 +22,13 @@ test('service secrets are injected into tmpfs by post_start hooks', () => {
   assert.match(compose, /POSTGRES_PASSWORD_FILE:\s*\/run\/firecrawl-secrets\/postgres_password/);
 });
 
+test('internal proxies and broker/cache services use compatible privilege hardening', () => {
+  assert.match(compose, /searxng-proxy:[\s\S]*?user:\s+node[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
+  assert.match(compose, /llm-proxy:[\s\S]*?user:\s+node[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
+  assert.match(compose, /redis:[\s\S]*?no-new-privileges:true/);
+  assert.match(compose, /rabbitmq:[\s\S]*?no-new-privileges:true/);
+});
+
 test('API and SearXNG run non-root with bounded Linux privileges', () => {
   assert.match(compose, /api:\n\s+user:\s+node/);
   assert.match(compose, /api:[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
