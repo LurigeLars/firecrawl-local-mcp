@@ -92,7 +92,7 @@ services:
       SEARXNG_BASE_URL: http://searxng:8080/
       FORCE_OWNERSHIP: "false"
     tmpfs:
-      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=977,gid=977,mode=0700
     post_start:
       - command:
           - /bin/sh
