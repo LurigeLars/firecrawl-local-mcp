@@ -6,11 +6,16 @@ services:
   foundationdb-init:
     profiles: ["fdb"]
   api:
+    user: node
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_PASSWORD: ""
     tmpfs:
-      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
     post_start:
       - command:
           - sh
@@ -53,7 +58,7 @@ services:
       POSTGRES_PASSWORD: ""
       POSTGRES_PASSWORD_FILE: /run/firecrawl-secrets/postgres_password
     tmpfs:
-      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=0,gid=0,mode=0700
     post_start:
       - command:
           - sh
@@ -74,6 +79,7 @@ services:
   # Search backend for Firecrawl (SEARXNG_ENDPOINT in .env). Internal network only, no host port.
   searxng:
     image: searxng/searxng:2026.9.10-931fd9787
+    user: "977:977"
     entrypoint:
       - /bin/sh
       - -c
@@ -84,6 +90,7 @@ services:
     environment:
       SEARXNG_SECRET: ""
       SEARXNG_BASE_URL: http://searxng:8080/
+      FORCE_OWNERSHIP: "false"
     tmpfs:
       - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777
     post_start:
@@ -99,6 +106,8 @@ services:
     volumes:
       - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks: [backend]
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
