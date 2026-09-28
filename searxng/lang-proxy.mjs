@@ -68,17 +68,21 @@ export function mergeResults(first, second) {
   return [...first, ...second.filter(r => !seen.has(r.url) && seen.add(r.url))];
 }
 
-async function searchUpstream(params, engines, language) {
+async function searchUpstream(params, engines, language, clientIp) {
   const p = new URLSearchParams(params);
   p.delete('categories'); // categories would add every engine of that category on top of `engines`
   p.set('engines', engines);
   p.set('language', language);
-  const res = await fetch(new URL('/search?' + p, UPSTREAM), { signal: AbortSignal.timeout(20_000) });
+  const headers = clientIp ? { 'x-real-ip': clientIp } : {};
+  const res = await fetch(new URL('/search?' + p, UPSTREAM), {
+    headers,
+    signal: AbortSignal.timeout(20_000),
+  });
   if (!res.ok) throw new Error(`searxng HTTP ${res.status}`);
   return res.json();
 }
 
-async function routedSearch(url) {
+async function routedSearch(url, clientIp) {
   const params = new URLSearchParams(url.searchParams);
   const split = splitSiteOperators(params.get('q') ?? '');
   if (split) params.set('q', split.q);
@@ -86,12 +90,12 @@ async function routedSearch(url) {
   const isDefault = DEFAULT_LANGS.has(asked.toLowerCase());
   const keep = results => (split ? filterResults(results, split) : results);
 
-  const primary = await searchUpstream(params, PRIMARY_ENGINES, isDefault ? PRIMARY_LANG : asked);
+  const primary = await searchUpstream(params, PRIMARY_ENGINES, isDefault ? PRIMARY_LANG : asked, clientIp);
   let results = keep(primary.results ?? []);
   const unresponsive = [...(primary.unresponsive_engines ?? [])];
   if (results.length < MIN_RESULTS && FALLBACK_ENGINES) {
     try {
-      const fallback = await searchUpstream(params, FALLBACK_ENGINES, isDefault ? FALLBACK_LANG : asked);
+      const fallback = await searchUpstream(params, FALLBACK_ENGINES, isDefault ? FALLBACK_LANG : asked, clientIp);
       results = mergeResults(results, keep(fallback.results ?? []));
       unresponsive.push(...(fallback.unresponsive_engines ?? []));
     } catch (err) {
@@ -104,7 +108,11 @@ async function routedSearch(url) {
 function passThrough(req, res) {
   const up = http.request(
     { hostname: UPSTREAM.hostname, port: UPSTREAM.port, method: req.method, path: req.url,
-      headers: { ...req.headers, host: UPSTREAM.host } },
+      headers: {
+        ...req.headers,
+        host: UPSTREAM.host,
+        'x-real-ip': req.headers['x-real-ip'] ?? req.socket.remoteAddress ?? '127.0.0.1',
+      } },
     upRes => { res.writeHead(upRes.statusCode ?? 502, upRes.headers); upRes.pipe(res); },
   );
   up.on('error', err => {
@@ -123,7 +131,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       && url.searchParams.get('format') === 'json' && !url.searchParams.get('engines');
     if (!routable) return passThrough(req, res);
     try {
-      const body = JSON.stringify(await routedSearch(url));
+      const body = JSON.stringify(await routedSearch(url, req.socket.remoteAddress ?? '127.0.0.1'));
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
       res.end(body);
     } catch (err) {
