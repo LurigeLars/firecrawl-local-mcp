@@ -1,5 +1,17 @@
 # firecrawl-local-mcp
 
+## Current deployment and security posture
+
+This repository wraps a self-hosted Firecrawl stack with local policy, secret isolation, search routing, and a bounded MCP surface.
+
+- Firecrawl API, MCP, Playwright, gateway, SearXNG proxy, and LLM proxy run non-root; SearXNG runs under its dedicated UID/GID.
+- Node-facing services use dropped Linux capabilities and `no-new-privileges` where compatible.
+- Redis, RabbitMQ, and PostgreSQL retain their official root-entrypoint-to-service-user startup model; `no-new-privileges` is applied where compatible instead of forcing an unsafe `user:` override.
+- PostgreSQL, SearXNG, Gemini, and browser-bridge secrets are host-protected with DPAPI and injected into service-specific tmpfs at runtime. Secret tmpfs directories use service-owned or root-owned mode `0700`.
+- SearXNG is internal-only, has explicit pinned configuration, and the local proxy forwards internal client identity without enabling public rate limiting.
+- Public MCP access is mediated by Cloudflare Access and explicit tool/request policy. The supplier-browser bridge is intentionally narrow and is not generic browser automation.
+- Machine-specific paths, IPs, identities, Cloudflare values, supplier sessions, and credentials must remain outside Git.
+
 ## Repository status
 
 This is an original deployment-wrapper project, **not a fork of Firecrawl**. It layers a self-hosted MCP deployment around an upstream Firecrawl checkout without vendoring or rewriting the Firecrawl source tree.
