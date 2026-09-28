@@ -109,6 +109,7 @@ services:
           FIRECRAWL_SEARXNG_SECRET_SECRET: ${FIRECRAWL_SEARXNG_SECRET_SECRET:?SearXNG runtime secret is required}
     volumes:
       - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ../searxng/limiter.toml:/etc/searxng/limiter.toml:ro
     networks: [backend]
     cap_drop:
       - ALL
