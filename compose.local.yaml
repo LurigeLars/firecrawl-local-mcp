@@ -48,9 +48,13 @@ services:
         exec node dist/api.js
   redis:
     image: redis:8.10.2-alpine
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
   rabbitmq:
     image: rabbitmq:4.3.6-management-alpine
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
   nuq-postgres:
     restart: unless-stopped
@@ -124,6 +128,10 @@ services:
     networks: [backend]
     depends_on: [searxng]
     read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # Sends LLM calls to Gemini when the runtime secret is present, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
@@ -143,5 +151,9 @@ services:
     read_only: true
     tmpfs:
       - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
