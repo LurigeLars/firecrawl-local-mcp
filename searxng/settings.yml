@@ -40,3 +40,7 @@ engines:
     disabled: true
   - name: duckduckgo
     disabled: true
+  - name: ahmia          # unused onion-search engine; fails to load in this minimal internal deployment
+    disabled: true
+  - name: torch          # unused onion-search engine; fails to load in this minimal internal deployment
+    disabled: true
