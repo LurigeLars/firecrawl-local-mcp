@@ -13,10 +13,21 @@ test('service secrets are injected into tmpfs by post_start hooks', () => {
   assert.doesNotMatch(compose, /^secrets:\s*$/m);
 
   assert.match(compose, /post_start:/);
-  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,mode=0777/);
+  assert.doesNotMatch(compose, /mode=0777/);
+  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700/);
+  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=0,gid=0,mode=0700/);
+  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=977,gid=977,mode=0700/);
   assert.match(compose, /printf '%s' "\$\$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > \/run\/firecrawl-secrets\/postgres_password/);
   assert.match(compose, /printf '%s' "\$\$FIRECRAWL_SEARXNG_SECRET_SECRET" > \/run\/firecrawl-secrets\/searxng_secret/);
   assert.match(compose, /POSTGRES_PASSWORD_FILE:\s*\/run\/firecrawl-secrets\/postgres_password/);
+});
+
+test('API and SearXNG run non-root with bounded Linux privileges', () => {
+  assert.match(compose, /api:\n\s+user:\s+node/);
+  assert.match(compose, /api:[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
+  assert.match(compose, /searxng:[\s\S]*?user:\s+"977:977"/);
+  assert.match(compose, /searxng:[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
+  assert.match(compose, /FORCE_OWNERSHIP:\s*"false"/);
 });
 
 test('main processes wait for tmpfs secrets instead of receiving secret values in container config', () => {
