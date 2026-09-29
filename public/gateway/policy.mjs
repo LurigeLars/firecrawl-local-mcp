@@ -43,7 +43,7 @@ for (const [network, prefix] of [
 for (const [network, prefix] of [
   ['::', 128],
   ['::1', 128],
-  ['::ffff:0:0', 96],
+  ['::', 96],
   ['64:ff9b::', 96],
   ['100::', 64],
   ['2001:db8::', 32],
@@ -60,8 +60,23 @@ function normalizeHostname(hostname) {
   return value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
 }
 
+function ipv4FromMappedIpv6(address) {
+  const normalized = normalizeHostname(address);
+  const dotted = normalized.match(/^(?:::ffff:|0:0:0:0:0:ffff:)(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (dotted && isIP(dotted[1]) === 4) return dotted[1];
+
+  const hex = normalized.match(/^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+  if (!hex) return null;
+  const high = Number.parseInt(hex[1], 16);
+  const low = Number.parseInt(hex[2], 16);
+  return [high >> 8, high & 255, low >> 8, low & 255].join('.');
+}
+
 function blockedAddress(address) {
   const normalized = normalizeHostname(address);
+  const mapped = ipv4FromMappedIpv6(normalized);
+  if (mapped) return BLOCKED_DESTINATIONS.check(mapped, 'ipv4');
+
   const family = isIP(normalized);
   if (family === 4) return BLOCKED_DESTINATIONS.check(normalized, 'ipv4');
   if (family === 6) return BLOCKED_DESTINATIONS.check(normalized, 'ipv6');
