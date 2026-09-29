@@ -6,7 +6,7 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import {
-  parseAllowedTools, checkRequest, wantsCompactResult, rewriteResponse, rpcError, rpcToolError,
+  parseAllowedTools, checkRequest, urlSafetyReason, wantsCompactResult, rewriteResponse, rpcError, rpcToolError,
 } from '../public/gateway/policy.mjs';
 
 const allowedTools = parseAllowedTools(process.env.ALLOWED_TOOLS);
@@ -20,8 +20,9 @@ const child = spawn(isWindows ? 'cmd.exe' : 'npx',
 
 const toClient = obj => process.stdout.write(JSON.stringify(obj) + '\n');
 
-// client -> server
-readline.createInterface({ input: process.stdin }).on('line', line => {
+// client -> server. Serialize asynchronous DNS checks so pipelined MCP
+// requests preserve their original order when forwarded to the child process.
+async function handleClientLine(line) {
   if (!line.trim()) return;
   let msg;
   try { msg = JSON.parse(line); } catch { child.stdin.write(line + '\n'); return; }
@@ -29,11 +30,22 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const verdict = checkRequest(m, allowedTools);
     if (verdict.error) return toClient(rpcError(m.id, verdict.error));
     if (verdict.toolError) return toClient(rpcToolError(m.id, verdict.toolError));
+    const safetyReason = await urlSafetyReason(m.params);
+    if (safetyReason) return toClient(rpcToolError(m.id, safetyReason));
     if (m?.method === 'tools/call' && m.id !== undefined && wantsCompactResult(m.params)) compactIds.add(m.id);
   }
   child.stdin.write(line + '\n');
+}
+
+let clientQueue = Promise.resolve();
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  clientQueue = clientQueue
+    .then(() => handleClientLine(line))
+    .catch(() => toClient(rpcError(null, 'Firecrawl request policy check failed')));
 });
-process.stdin.on('end', () => child.stdin.end());
+process.stdin.on('end', () => {
+  clientQueue.finally(() => child.stdin.end());
+});
 
 // server -> client
 readline.createInterface({ input: child.stdout }).on('line', line => {
