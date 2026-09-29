@@ -8,6 +8,8 @@ on:
       - "**/*.psm1"
       - "**/*.psd1"
       - "**/*.sh"
+      - "public/gateway/**"
+      - "local-mcp/**"
       - "**/Dockerfile"
       - "**/Dockerfile.*"
       - ".github/workflows/**"
@@ -18,6 +20,8 @@ on:
       - "**/*.psm1"
       - "**/*.psd1"
       - "**/*.sh"
+      - "public/gateway/**"
+      - "local-mcp/**"
       - "**/Dockerfile"
       - "**/Dockerfile.*"
       - ".github/workflows/**"
@@ -50,6 +54,9 @@ jobs:
 
       - name: Lint GitHub Actions workflows
         run: /tmp/actionlint -color
+
+      - name: Run Firecrawl gateway policy tests
+        run: node --test public/gateway/policy-ssrf.test.mjs
 
       - name: Enforce immutable action pins
         shell: bash
