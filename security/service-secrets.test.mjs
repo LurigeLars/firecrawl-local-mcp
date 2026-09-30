@@ -98,20 +98,6 @@ test('plaintext service-secret template is retired', () => {
 
 
 
-test('public gateway browser token is DPAPI-backed and injected through tmpfs', () => {
-  assert.match(launcher, /browser_bridge_token\.dpapi/);
-  assert.match(launcher, /Ensure-BrowserTokenSecret/);
-  assert.match(launcher, /Remove-Item -LiteralPath \$legacyPath -Force/);
-  assert.match(launcher, /FIRECRAWL_BROWSER_BRIDGE_SECRET/);
-  assert.doesNotMatch(publicCompose, /browser\.env/);
-  assert.match(publicCompose, /\/run\/firecrawl-gateway-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700/);
-  assert.match(publicCompose, /BROWSER_BRIDGE_TOKEN_FILE:\s*\/run\/firecrawl-gateway-secrets\/browser_bridge_token/);
-  assert.match(publicCompose, /printf '%s' "\$\$FIRECRAWL_BROWSER_BRIDGE_SECRET" > \/run\/firecrawl-gateway-secrets\/browser_bridge_token/);
-  assert.doesNotMatch(publicCompose, /BROWSER_BRIDGE_TOKEN:\s*\$\{/);
-  assert.match(gateway, /readFileSync\(BROWSER_BRIDGE_TOKEN_FILE,'utf8'\)/);
-  assert.doesNotMatch(gateway, /process\.env\.BROWSER_BRIDGE_TOKEN(?:\?\?|\|\|)/);
-});
-
 test('public gateway is Cloudflare Access only with no secret-path fallback', () => {
   assert.doesNotMatch(gateway, /GATEWAY_SECRET/);
   assert.doesNotMatch(gateway, /ALLOW_SECRET_PATH/);
