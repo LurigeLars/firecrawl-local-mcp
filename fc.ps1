@@ -21,6 +21,7 @@ $compose += @(
 function Assert-UpstreamFirecrawlPin {
     $pinPath = Join-Path $root "upstream\firecrawl.json"
     $checkout = Join-Path $root "firecrawl"
+    $safeCheckout = $checkout.Replace('\', '/')
     if (-not (Test-Path -LiteralPath $pinPath -PathType Leaf)) {
         throw "Upstream Firecrawl pin is missing: $pinPath"
     }
@@ -33,7 +34,7 @@ function Assert-UpstreamFirecrawlPin {
         throw "Upstream Firecrawl pin metadata is invalid."
     }
 
-    $origin = (& git -C $checkout remote get-url origin 2>$null | Select-Object -First 1)
+    $origin = (& git -c "safe.directory=$safeCheckout" -C $checkout remote get-url origin 2>$null | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($origin)) {
         throw "Unable to read upstream Firecrawl origin."
     }
@@ -42,12 +43,12 @@ function Assert-UpstreamFirecrawlPin {
         throw "Unexpected upstream Firecrawl origin: $origin"
     }
 
-    $head = (& git -C $checkout rev-parse HEAD 2>$null | Select-Object -First 1)
+    $head = (& git -c "safe.directory=$safeCheckout" -C $checkout rev-parse HEAD 2>$null | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or $head.Trim() -ne [string]$pin.commit) {
         throw "Upstream Firecrawl checkout does not match the reviewed pin $($pin.tag) / $($pin.commit)."
     }
 
-    $dirty = @(& git -C $checkout status --porcelain --untracked-files=no 2>$null)
+    $dirty = @(& git -c "safe.directory=$safeCheckout" -C $checkout status --porcelain --untracked-files=no 2>$null)
     if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
         throw "Upstream Firecrawl checkout contains tracked local modifications."
     }
