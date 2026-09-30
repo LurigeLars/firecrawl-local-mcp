@@ -1,6 +1,10 @@
 FROM node:26.10.0-alpine
-RUN npm install -g --omit=dev --no-audit --no-fund firecrawl-mcp@3.25.4 && npm cache clean --force
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
+ENV PATH="/app/node_modules/.bin:$PATH" \
+    HTTP_STREAMABLE_SERVER=true \
+    HOST=0.0.0.0 \
+    PORT=3000
 USER node
-WORKDIR /home/node
-ENV HTTP_STREAMABLE_SERVER=true HOST=0.0.0.0 PORT=3000
 CMD ["firecrawl-mcp"]

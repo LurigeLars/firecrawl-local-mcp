@@ -5,9 +5,17 @@
 // Node standard library only. Usage: node stdio-proxy.mjs   (env FIRECRAWL_API_URL, optional ALLOWED_TOOLS)
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import { readFileSync } from 'node:fs';
 import {
   parseAllowedTools, checkRequest, urlSafetyReason, wantsCompactResult, rewriteResponse, rpcError, rpcToolError,
 } from '../public/gateway/policy.mjs';
+
+const manifest = JSON.parse(readFileSync(new URL('../public/package.json', import.meta.url), 'utf8'));
+const mcpVersion = String(manifest?.dependencies?.['firecrawl-mcp'] ?? '');
+if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(mcpVersion)) {
+  throw new Error('public/package.json does not contain an exact firecrawl-mcp version');
+}
+const mcpSpec = `firecrawl-mcp@${mcpVersion}`;
 
 const allowedTools = parseAllowedTools(process.env.ALLOWED_TOOLS);
 const compactIds = new Set();
@@ -15,7 +23,7 @@ const ctx = { allowedTools, compactIds };
 
 const isWindows = process.platform === 'win32';
 const child = spawn(isWindows ? 'cmd.exe' : 'npx',
-  isWindows ? ['/d', '/s', '/c', 'npx', '-y', 'firecrawl-mcp@3.25.4'] : ['-y', 'firecrawl-mcp@3.25.4'],
+  isWindows ? ['/d', '/s', '/c', 'npx', '-y', mcpSpec] : ['-y', mcpSpec],
   { env: { ...process.env, FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL ?? 'http://127.0.0.1:3002' }, stdio: ['pipe', 'pipe', 'inherit'] });
 
 const toClient = obj => process.stdout.write(JSON.stringify(obj) + '\n');

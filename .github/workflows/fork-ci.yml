@@ -38,6 +38,7 @@ jobs:
           node --check llm/gemini-secret.test.mjs
           node --check security/service-secrets.test.mjs
           node --check security/resource-guardrails.test.mjs
+          node --check security/dependency-pins.test.mjs
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
@@ -60,7 +61,7 @@ jobs:
 
       - name: Run secret isolation tests
         shell: bash
-        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs
+        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
 
       - name: Verify runtime secret stays in tmpfs
         shell: bash
@@ -130,7 +131,7 @@ jobs:
 
       - name: Run secret isolation tests
         shell: bash
-        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs
+        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
 
       - name: Run browser bridge/tool contract tests
         shell: bash

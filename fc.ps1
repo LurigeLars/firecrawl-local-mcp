@@ -18,6 +18,41 @@ $compose += @(
     '--env-file', "$root\.env"
 )
 
+function Assert-UpstreamFirecrawlPin {
+    $pinPath = Join-Path $root "upstream\firecrawl.json"
+    $checkout = Join-Path $root "firecrawl"
+    if (-not (Test-Path -LiteralPath $pinPath -PathType Leaf)) {
+        throw "Upstream Firecrawl pin is missing: $pinPath"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $checkout ".git"))) {
+        throw "Upstream Firecrawl checkout is missing: $checkout"
+    }
+
+    $pin = Get-Content -LiteralPath $pinPath -Raw | ConvertFrom-Json
+    if ($pin.repository -ne "firecrawl/firecrawl" -or $pin.commit -notmatch '^[0-9a-f]{40}$') {
+        throw "Upstream Firecrawl pin metadata is invalid."
+    }
+
+    $origin = (& git -C $checkout remote get-url origin 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($origin)) {
+        throw "Unable to read upstream Firecrawl origin."
+    }
+    $origin = $origin.Trim()
+    if ($origin -notin @("https://github.com/firecrawl/firecrawl.git", "git@github.com:firecrawl/firecrawl.git")) {
+        throw "Unexpected upstream Firecrawl origin: $origin"
+    }
+
+    $head = (& git -C $checkout rev-parse HEAD 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or $head.Trim() -ne [string]$pin.commit) {
+        throw "Upstream Firecrawl checkout does not match the reviewed pin $($pin.tag) / $($pin.commit)."
+    }
+
+    $dirty = @(& git -C $checkout status --porcelain --untracked-files=no 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
+        throw "Upstream Firecrawl checkout contains tracked local modifications."
+    }
+}
+
 function Read-BrowserTokenDpapi {
     if (-not (Test-Path -LiteralPath $BrowserBridgeDpapiPath -PathType Leaf)) {
         throw 'Browser bridge DPAPI secret is missing.'
@@ -597,6 +632,7 @@ try {
     }
 switch ($Action) {
     'up' {
+        Assert-UpstreamFirecrawlPin
         if ($public) {
             Stop-BrowserBridge
             $port = Start-BrowserBridge
@@ -609,6 +645,7 @@ switch ($Action) {
         Import-AvailableRuntimeSecrets
     }
     'redeploy' {
+        Assert-UpstreamFirecrawlPin
         if ($public) {
             Stop-BrowserBridge
             $port = Start-BrowserBridge
