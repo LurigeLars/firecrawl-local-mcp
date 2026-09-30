@@ -1,5 +1,4 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
-# When public ChatGPT access is configured, also manages the narrow local browser bridge used for Season supplier login.
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
 param([ValidateSet('up', 'redeploy', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
 
@@ -8,7 +7,6 @@ if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
 $SearxngDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\searxng_secret.dpapi"
-$BrowserBridgeDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\browser_bridge_token.dpapi"
 $compose = @('compose', '--project-directory', "$root\firecrawl",
     '-f', "$root\firecrawl\docker-compose.yaml", '-f', "$root\compose.local.yaml")
 $public = Test-Path "$root\public\gateway.env"
@@ -74,253 +72,14 @@ function Assert-UpstreamFirecrawlPin {
     }
 }
 
-function Read-BrowserTokenDpapi {
-    if (-not (Test-Path -LiteralPath $BrowserBridgeDpapiPath -PathType Leaf)) {
-        throw 'Browser bridge DPAPI secret is missing.'
-    }
-    $encrypted = Get-Content -LiteralPath $BrowserBridgeDpapiPath -Raw
-    $secure = ConvertTo-SecureString -String $encrypted
-    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try {
-        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-        if ([string]::IsNullOrWhiteSpace($plain)) {
-            throw 'Browser bridge DPAPI secret decrypted to an empty value.'
-        }
-        return $plain
-    }
-    finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-        $secure = $null
-    }
-}
-
-function Save-BrowserTokenDpapi([string]$Token) {
-    if ([string]::IsNullOrWhiteSpace($Token) -or $Token.Length -lt 32) {
-        throw 'Browser bridge token is missing or too short.'
-    }
-    $secretDir = Split-Path $BrowserBridgeDpapiPath -Parent
-    New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
-    $secure = ConvertTo-SecureString -String $Token -AsPlainText -Force
-    try {
-        $encrypted = ConvertFrom-SecureString -SecureString $secure
-        [IO.File]::WriteAllText($BrowserBridgeDpapiPath, $encrypted, [Text.UTF8Encoding]::new($false))
-    }
-    finally {
-        $secure = $null
-    }
-    $roundTrip = Read-BrowserTokenDpapi
-    try {
-        if ($roundTrip -cne $Token) {
-            Remove-Item -LiteralPath $BrowserBridgeDpapiPath -Force -ErrorAction SilentlyContinue
-            throw 'Browser bridge DPAPI verification failed.'
-        }
-    }
-    finally {
-        $roundTrip = $null
-    }
-}
-
-function Ensure-BrowserTokenSecret {
-    $legacyPath = "$root\public\browser.env"
-    $legacyToken = $null
-    if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
-        $line = @(Get-Content -LiteralPath $legacyPath | Where-Object { $_ -match '^BROWSER_BRIDGE_TOKEN=' })[0]
-        if (-not $line) {
-            throw 'Legacy public\\browser.env exists but does not contain BROWSER_BRIDGE_TOKEN.'
-        }
-        $legacyToken = ($line -replace '^BROWSER_BRIDGE_TOKEN=', '').Trim()
-        if ($legacyToken.Length -lt 32) {
-            throw 'Legacy BROWSER_BRIDGE_TOKEN is too short.'
-        }
-    }
-
-    if (-not (Test-Path -LiteralPath $BrowserBridgeDpapiPath -PathType Leaf)) {
-        $token = $legacyToken
-        if ([string]::IsNullOrWhiteSpace($token)) {
-            $bytes = New-Object byte[] 32
-            $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-            try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-            $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-        }
-        try {
-            Save-BrowserTokenDpapi -Token $token
-        }
-        finally {
-            $token = $null
-        }
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($legacyToken)) {
-        $stored = Read-BrowserTokenDpapi
-        try {
-            if ($stored -cne $legacyToken) {
-                throw 'Browser bridge DPAPI secret does not match legacy browser.env; refusing to remove plaintext.'
-            }
-        }
-        finally {
-            $stored = $null
-        }
-        Remove-Item -LiteralPath $legacyPath -Force
-    }
-    $legacyToken = $null
-}
-
-function Get-BrowserToken {
-    Ensure-BrowserTokenSecret
-    $token = Read-BrowserTokenDpapi
-    if ($token.Length -lt 32) { throw 'BROWSER_BRIDGE_TOKEN is too short' }
-    return $token
-}
-
-function Get-ConfiguredBrowserPort {
-    $line = @(Get-Content "$root\.env" -ErrorAction SilentlyContinue | Where-Object { $_ -match '^BROWSER_BRIDGE_PORT=' })[0]
-    if (-not $line) { return $null }
-    $value = ($line -replace '^BROWSER_BRIDGE_PORT=', '').Trim()
-    $port = 0
-    if (-not [int]::TryParse($value, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
-        throw 'BROWSER_BRIDGE_PORT in .env must be an integer between 1024 and 65535'
-    }
-    return $port
-}
-
-function Get-RuntimeBrowserPort {
-    $path = "$root\.runtime\browser-bridge.port"
-    if (-not (Test-Path $path)) { return $null }
-    $value = (Get-Content $path -Raw).Trim()
-    $port = 0
-    if (-not [int]::TryParse($value, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) {
-        return $null
-    }
-    return $port
-}
-
-function Save-RuntimeBrowserPort([int]$Port) {
-    $runtime = "$root\.runtime"
-    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
-    Set-Content -LiteralPath "$runtime\browser-bridge.port" -Value $Port -Encoding ascii
-}
-
-function Test-TcpPortFree([int]$Port) {
-    $listener = $null
-    try {
-        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
-        $listener.Start()
-        return $true
-    } catch {
-        return $false
-    } finally {
-        if ($listener) {
-            try { $listener.Stop() } catch {}
-        }
-    }
-}
-
-function Test-BrowserBridgeAtPort([int]$Port) {
-    try {
-        $token = Get-BrowserToken
-        $h = @{ Authorization = "Bearer $token" }
-        $r = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$Port/health" -Headers $h -TimeoutSec 1
-        return [bool]$r.ok
-    } catch {
-        return $false
-    }
-}
-
-function Get-BrowserPort {
-    $configured = Get-ConfiguredBrowserPort
-    if ($null -ne $configured) { return [int]$configured }
-    $runtimePort = Get-RuntimeBrowserPort
-    if ($null -ne $runtimePort) { return [int]$runtimePort }
-    return $null
-}
-
-function Select-BrowserPort {
-    $configured = Get-ConfiguredBrowserPort
-    if ($null -ne $configured) {
-        if (Test-BrowserBridgeAtPort $configured) {
-            Save-RuntimeBrowserPort $configured
-            return [int]$configured
-        }
-        if (-not (Test-TcpPortFree $configured)) {
-            throw "Configured BROWSER_BRIDGE_PORT $configured is already in use by another process."
-        }
-        Save-RuntimeBrowserPort $configured
-        return [int]$configured
-    }
-
-    $runtimePort = Get-RuntimeBrowserPort
-    if ($null -ne $runtimePort) {
-        if ((Test-BrowserBridgeAtPort $runtimePort) -or (Test-TcpPortFree $runtimePort)) {
-            return [int]$runtimePort
-        }
-    }
-
-    foreach ($candidate in 8765..8799) {
-        if (Test-TcpPortFree $candidate) {
-            Save-RuntimeBrowserPort $candidate
-            return [int]$candidate
-        }
-    }
-    throw 'No free browser bridge port found in 8765-8799. Set BROWSER_BRIDGE_PORT in .env to an available localhost port.'
-}
-
-function Test-BrowserBridge {
-    $port = Get-BrowserPort
-    if ($null -eq $port) { return $false }
-    return Test-BrowserBridgeAtPort $port
-}
-
-function Set-BrowserComposePort {
-    $port = Get-BrowserPort
-    if ($null -ne $port) {
-        $env:BROWSER_BRIDGE_PORT = [string]$port
-    }
-}
-
-function Start-BrowserBridge {
-    if (-not $public) { return $null }
-    Ensure-BrowserTokenSecret
-
-    $existingPort = Get-BrowserPort
-    if ($null -ne $existingPort -and (Test-BrowserBridgeAtPort $existingPort)) {
-        $env:BROWSER_BRIDGE_PORT = [string]$existingPort
-        return [int]$existingPort
-    }
-
-    $runtime = "$root\.runtime"
-    New-Item -ItemType Directory -Path $runtime -Force | Out-Null
-    $node = (Get-Command node -ErrorAction Stop).Source
-    $token = Get-BrowserToken
-    $port = Select-BrowserPort
-    $oldToken = $env:BROWSER_BRIDGE_TOKEN
-    $oldPort = $env:BROWSER_BRIDGE_PORT
-    try {
-        $env:BROWSER_BRIDGE_TOKEN = $token
-        $env:BROWSER_BRIDGE_PORT = [string]$port
-        $proc = Start-Process -FilePath $node -ArgumentList @("`"$root\public\browser-bridge.mjs`"") -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput "$runtime\browser-bridge.out.log" -RedirectStandardError "$runtime\browser-bridge.err.log"
-    } finally {
-        $env:BROWSER_BRIDGE_TOKEN = $oldToken
-        $env:BROWSER_BRIDGE_PORT = $oldPort
-    }
-    Set-Content -LiteralPath "$runtime\browser-bridge.pid" -Value $proc.Id -Encoding ascii
-    for ($i = 0; $i -lt 40; $i++) {
-        Start-Sleep -Milliseconds 250
-        if (Test-BrowserBridgeAtPort $port) {
-            $env:BROWSER_BRIDGE_PORT = [string]$port
-            return [int]$port
-        }
-        if ($proc.HasExited) { break }
-    }
-    throw "Browser bridge failed to start on port $port. See $runtime\browser-bridge.err.log"
-}
-
-function Stop-BrowserBridge {
+function Stop-RetiredHostHelper {
+    # One-release migration cleanup for the former application-owned browser helper.
+    # It is intentionally identified by the old exact script path before termination.
     $pidFile = "$root\.runtime\browser-bridge.pid"
     if (Test-Path $pidFile) {
         $pidValue = [int](Get-Content $pidFile -Raw)
         $p = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
-        if ($p -and [string]$p.CommandLine -like '*browser-bridge.mjs*') {
+        if ($p -and [string]$p.CommandLine -like '*public\browser-bridge.mjs*') {
             Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
         }
         Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
@@ -340,7 +99,6 @@ function Remove-LegacyGatewaySecret {
 
 if ($public) {
     Remove-LegacyGatewaySecret
-    Ensure-BrowserTokenSecret
 }
 
 function Get-PublicUrl {
@@ -441,37 +199,26 @@ function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
 
         $postgres = Get-DpapiSecretValue -Path $PostgresDpapiPath -Label "PostgreSQL"
         $searxng = Get-DpapiSecretValue -Path $SearxngDpapiPath -Label "SearXNG"
-        $browser = $null
         try {
             $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = $postgres
             $env:FIRECRAWL_SEARXNG_SECRET_SECRET = $searxng
-            if ($public) {
-                $browser = Get-BrowserToken
-                $env:FIRECRAWL_BROWSER_BRIDGE_SECRET = $browser
-            }
         }
         finally {
             $postgres = $null
             $searxng = $null
-            $browser = $null
         }
         return
     }
 
     $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"
     $env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"
-    if ($public) {
-        $env:FIRECRAWL_BROWSER_BRIDGE_SECRET = "compose-config-only"
-    }
 }
 
 function Restore-ComposeServiceSecrets(
     [bool]$PostgresWasSet,
     [AllowNull()][string]$PostgresValue,
     [bool]$SearxngWasSet,
-    [AllowNull()][string]$SearxngValue,
-    [bool]$BrowserWasSet,
-    [AllowNull()][string]$BrowserValue
+    [AllowNull()][string]$SearxngValue
 ) {
     if ($PostgresWasSet) {
         $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = $PostgresValue
@@ -485,11 +232,6 @@ function Restore-ComposeServiceSecrets(
         Remove-Item Env:FIRECRAWL_SEARXNG_SECRET_SECRET -ErrorAction SilentlyContinue
     }
 
-    if ($BrowserWasSet) {
-        $env:FIRECRAWL_BROWSER_BRIDGE_SECRET = $BrowserValue
-    } else {
-        Remove-Item Env:FIRECRAWL_BROWSER_BRIDGE_SECRET -ErrorAction SilentlyContinue
-    }
 }
 function Test-LegacyGeminiKey {
     $path = "$root\secrets.env"
@@ -644,9 +386,6 @@ $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
 $searxngSecretOriginal = if ($searxngSecretWasSet) { $env:FIRECRAWL_SEARXNG_SECRET_SECRET } else { $null }
-$browserSecretWasSet = Test-Path Env:FIRECRAWL_BROWSER_BRIDGE_SECRET
-$browserSecretOriginal = if ($browserSecretWasSet) { $env:FIRECRAWL_BROWSER_BRIDGE_SECRET } else { $null }
-
 try {
     if ($Action -in $composeActions) {
         Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy"))
@@ -654,12 +393,7 @@ try {
 switch ($Action) {
     'up' {
         Assert-UpstreamFirecrawlPin
-        if ($public) {
-            Stop-BrowserBridge
-            $port = Start-BrowserBridge
-            $env:BROWSER_BRIDGE_PORT = [string]$port
-            "browser bridge port: $port"
-        }
+        Stop-RetiredHostHelper
         docker @compose up -d --build
         if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
@@ -667,21 +401,15 @@ switch ($Action) {
     }
     'redeploy' {
         Assert-UpstreamFirecrawlPin
-        if ($public) {
-            Stop-BrowserBridge
-            $port = Start-BrowserBridge
-            $env:BROWSER_BRIDGE_PORT = [string]$port
-            "browser bridge port: $port"
-        }
+        Stop-RetiredHostHelper
         docker @compose up -d --build --force-recreate
         if ($LASTEXITCODE -ne 0) { throw "docker compose redeploy failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
         Import-AvailableRuntimeSecrets
     }
     'down' {
-        if ($public) { Set-BrowserComposePort }
+        Stop-RetiredHostHelper
         docker @compose down
-        Stop-BrowserBridge
     }
     'recover' {
         Import-ServiceRuntimeSecrets
@@ -699,15 +427,10 @@ switch ($Action) {
         Import-GeminiKey
     }
     'status' {
-        if ($public) { Set-BrowserComposePort }
         docker @compose ps
-        if ($public) {
-            $port = Get-BrowserPort
-            if (Test-BrowserBridge) { "browser bridge: healthy (port $port)" } else { "browser bridge: down" }
-        }
     }
     'logs' {
-        if ($public) { Set-BrowserComposePort; docker @compose logs -f --tail 50 api gateway }
+        if ($public) { docker @compose logs -f --tail 50 api gateway }
         else { docker @compose logs -f --tail 100 api }
     }
     'url' {
@@ -734,10 +457,6 @@ switch ($Action) {
         "local engine: success=True"
 
         if ($public) {
-            Set-BrowserComposePort
-            $port = Get-BrowserPort
-            "browser bridge: healthy=$(Test-BrowserBridge) port=$port"
-
             # selftest.mjs understands both supported public modes:
             # - Cloudflare Access: unauthenticated 401 + OAuth metadata is a PASS
             # - secret-path fallback: run the full unauthenticated gateway checks
@@ -752,7 +471,5 @@ finally {
         -PostgresWasSet $postgresSecretWasSet `
         -PostgresValue $postgresSecretOriginal `
         -SearxngWasSet $searxngSecretWasSet `
-        -SearxngValue $searxngSecretOriginal `
-        -BrowserWasSet $browserSecretWasSet `
-        -BrowserValue $browserSecretOriginal
+        -SearxngValue $searxngSecretOriginal
 }
