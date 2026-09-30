@@ -1,0 +1,72 @@
+name: One-time public history maintenance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-time-public-history-maintenance
+  cancel-in-progress: false
+
+jobs:
+  rewrite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out complete repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Replace reachable history with current public snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_sha="$GITHUB_SHA"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git switch --orphan __public_snapshot__
+          git checkout "$source_sha" -- .
+          git rm -f .github/workflows/one-time-history-maintenance.yml
+          git add -A
+          git commit -m "Initial public snapshot"
+
+          fields="$(git rev-list --parents -n 1 HEAD | awk '{print NF}')"
+          test "$fields" -eq 1
+
+          git push --force origin HEAD:refs/heads/main
+
+          mapfile -t branches < <(
+            git ls-remote --heads origin |
+              awk '{sub("refs/heads/", "", $2); print $2}'
+          )
+          for branch in "${branches[@]}"; do
+            if [ "$branch" != "main" ]; then
+              git push origin --delete "$branch"
+            fi
+          done
+
+          mapfile -t tags < <(
+            git ls-remote --tags --refs origin |
+              awk '{sub("refs/tags/", "", $2); print $2}'
+          )
+          for tag in "${tags[@]}"; do
+            git push origin --delete "refs/tags/$tag"
+          done
+
+          mapfile -t remaining_heads < <(
+            git ls-remote --heads origin |
+              awk '{print $2}'
+          )
+          test "${#remaining_heads[@]}" -eq 1
+          test "${remaining_heads[0]}" = "refs/heads/main"
+
+          if git ls-remote --tags --refs origin | grep -q .; then
+            echo "unexpected tag refs remain" >&2
+            exit 1
+          fi
