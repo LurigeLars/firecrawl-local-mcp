@@ -27,4 +27,7 @@ test('upstream Firecrawl pin is machine-readable and enforced before builds', ()
   assert.match(launcher, /Assert-UpstreamFirecrawlPin/);
   assert.match(launcher, /Unexpected upstream Firecrawl origin/);
   assert.match(launcher, /safe\.directory=\$safeCheckout/);
+  assert.match(launcher, /Get-Command git\.exe/);
+  assert.match(launcher, /\$originExit = \$LASTEXITCODE/);
+  assert.match(launcher, /\$statusExit = \$LASTEXITCODE/);
 });
