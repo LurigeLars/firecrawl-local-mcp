@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { readFileSync } from 'node:fs';
 import {
-  parseAllowedTools, checkRequest, urlSafetyReason, wantsCompactResult, rewriteResponse, rpcError, rpcToolError,
+  parseAllowedTools, checkRequest, urlSafetyReason, wantsCompactResult, rememberCrawlRequest, rewriteResponse, rpcError, rpcToolError,
 } from '../public/gateway/policy.mjs';
 
 const manifest = JSON.parse(readFileSync(new URL('../public/package.json', import.meta.url), 'utf8'));
@@ -19,7 +19,8 @@ const mcpSpec = `firecrawl-mcp@${mcpVersion}`;
 
 const allowedTools = parseAllowedTools(process.env.ALLOWED_TOOLS);
 const compactIds = new Set();
-const ctx = { allowedTools, compactIds };
+const crawlRequests = new Map();
+const ctx = { allowedTools, compactIds, crawlRequests };
 
 const isWindows = process.platform === 'win32';
 const child = spawn(isWindows ? 'cmd.exe' : 'npx',
@@ -41,6 +42,7 @@ async function handleClientLine(line) {
     const safetyReason = await urlSafetyReason(m.params);
     if (safetyReason) return toClient(rpcToolError(m.id, safetyReason));
     if (m?.method === 'tools/call' && m.id !== undefined && wantsCompactResult(m.params)) compactIds.add(m.id);
+    rememberCrawlRequest(m, crawlRequests);
   }
   child.stdin.write(line + '\n');
 }

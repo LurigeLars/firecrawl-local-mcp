@@ -56,6 +56,69 @@ for (const [network, prefix] of [
 
 const formatNames = opts => (Array.isArray(opts?.formats) ? opts.formats : []).map(f => (typeof f === 'string' ? f : f?.type));
 const scrapeOptions = params => (params?.name === 'firecrawl_crawl' ? params?.arguments?.scrapeOptions : params?.arguments) ?? {};
+const CRAWL_RESULT_TOOLS = new Set(['firecrawl_crawl', 'firecrawl_check_crawl_status']);
+
+const finiteNumber = value => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+const requestNumber = (args, key) => {
+  const value = Number(args?.[key]);
+  return Number.isFinite(value) ? value : null;
+};
+
+export function rememberCrawlRequest(msg, crawlRequests) {
+  if (!crawlRequests || msg?.method !== 'tools/call' || msg.id === undefined) return false;
+  const name = msg.params?.name;
+  if (!CRAWL_RESULT_TOOLS.has(name)) return false;
+  const args = msg.params?.arguments ?? {};
+  crawlRequests.set(msg.id, {
+    name,
+    requestedLimit: name === 'firecrawl_crawl' ? requestNumber(args, 'limit') : null,
+    requestedMaxConcurrency: name === 'firecrawl_crawl' ? requestNumber(args, 'maxConcurrency') : null,
+    requestedDelaySeconds: name === 'firecrawl_crawl' ? requestNumber(args, 'delay') : null,
+  });
+  return true;
+}
+
+function returnedDataHttpSignals(payload) {
+  const documents = Array.isArray(payload?.data) ? payload.data : [];
+  let rateLimited429 = 0, forbidden403 = 0, server5xx = 0, documentErrors = 0;
+  for (const document of documents) {
+    const code = finiteNumber(document?.metadata?.statusCode);
+    if (code === 429) rateLimited429 += 1;
+    if (code === 403) forbidden403 += 1;
+    if (code !== null && code >= 500 && code <= 599) server5xx += 1;
+    if (document?.error || document?.metadata?.error) documentErrors += 1;
+  }
+  return { returnedDocuments: documents.length, rateLimited429, forbidden403, server5xx, documentErrors };
+}
+
+function annotateCrawlResult(result, request) {
+  const item = result?.content?.[0];
+  if (result?.isError || item?.type !== 'text' || typeof item.text !== 'string') return result;
+  let payload;
+  try { payload = JSON.parse(item.text); } catch { return result; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return result;
+
+  const completed = finiteNumber(payload.completed);
+  const total = finiteNumber(payload.total);
+  const limit = request?.requestedLimit ?? null;
+  payload.localCrawlEvidence = {
+    semantics: 'bounded-firecrawl-job',
+    siteCoverage: 'NOT_PROVEN',
+    note: 'A completed or count-reconciled bounded crawl job does not by itself prove complete site coverage.',
+    status: typeof payload.status === 'string' ? payload.status : null,
+    boundedJobCompleted: payload.status === 'completed',
+    pagesCompleted: completed,
+    pagesExpectedByJob: total,
+    jobCountsReconciled: completed !== null && total !== null ? completed === total : null,
+    requestedLimit: limit,
+    requestedLimitBoundaryReached: limit !== null && completed !== null ? completed >= limit : null,
+    requestedMaxConcurrency: request?.requestedMaxConcurrency ?? null,
+    requestedDelaySeconds: request?.requestedDelaySeconds ?? null,
+    resultPageHasMore: Boolean(payload.next),
+    returnedDataHttpSignals: returnedDataHttpSignals(payload),
+  };
+  return { ...result, content: [{ ...item, text: JSON.stringify(payload) }, ...result.content.slice(1)] };
+}
 
 function normalizeHostname(hostname) {
   const value = String(hostname ?? '').trim().toLowerCase();
@@ -183,7 +246,7 @@ function constrainToolSchema(tool) {
   return tool;
 }
 
-export function rewriteResponse(msg, { allowedTools, compactIds }) {
+export function rewriteResponse(msg, { allowedTools, compactIds, crawlRequests }) {
   if (!msg || typeof msg !== 'object') return msg;
   if (msg.result?.tools) msg.result.tools = msg.result.tools.filter(t => allowedTools.has(t.name)).map(constrainToolSchema);
   if (msg.result?.serverInfo) {
@@ -191,6 +254,11 @@ export function rewriteResponse(msg, { allowedTools, compactIds }) {
     if (instructions) msg.result.instructions = instructions;
   }
   if (compactIds?.has(msg.id) && msg.result) msg.result = compactToolResult(msg.result);
+  const crawlRequest = crawlRequests?.get(msg.id);
+  if (crawlRequest && (msg.result !== undefined || msg.error !== undefined)) {
+    if (msg.result) msg.result = annotateCrawlResult(msg.result, crawlRequest);
+    crawlRequests.delete(msg.id);
+  }
   return msg;
 }
 
