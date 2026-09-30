@@ -77,7 +77,7 @@ claude mcp add-json firecrawl-mcp -s user '{"type":"stdio","command":"node","arg
 ## Public access for ChatGPT
 
 `compose.public.yaml` adds two containers (none publishes a host port):
-`mcp` (firecrawl-mcp@3.24.0 in HTTP mode) → `gateway` (`public/gateway/gateway.mjs` + `instructions.md`).
+`mcp` (the exact `firecrawl-mcp` version declared in `public/package.json`, in HTTP mode) → `gateway` (`public/gateway/gateway.mjs` + `instructions.md`).
 The host-level `mcp-cloudflared` container provides the shared tunnel and reaches this stack through the
 `firecrawl-gateway:8080` alias. `fc.ps1` includes the public compose overlay when `public/gateway.env` exists.
 
