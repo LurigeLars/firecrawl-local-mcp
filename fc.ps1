@@ -34,22 +34,42 @@ function Assert-UpstreamFirecrawlPin {
         throw "Upstream Firecrawl pin metadata is invalid."
     }
 
-    $origin = (& git -c "safe.directory=$safeCheckout" -C $checkout remote get-url origin 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($origin)) {
-        throw "Unable to read upstream Firecrawl origin."
+    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        $gitCommand = Get-Command git -ErrorAction Stop
+    }
+    $gitExe = $gitCommand.Source
+
+    # Capture the complete native-process output before inspecting it. Piping a
+    # native command directly into Select-Object can obscure its exit status in
+    # non-interactive maintenance-runner sessions.
+    $originOutput = @(& $gitExe -c "safe.directory=$safeCheckout" -C $checkout remote get-url origin 2>&1)
+    $originExit = $LASTEXITCODE
+    if ($originExit -ne 0 -or $originOutput.Count -lt 1) {
+        throw "Unable to read upstream Firecrawl origin (git exit $originExit)."
+    }
+    $origin = [string]$originOutput[0]
+    if ([string]::IsNullOrWhiteSpace($origin)) {
+        throw "Upstream Firecrawl origin was empty."
     }
     $origin = $origin.Trim()
     if ($origin -notin @("https://github.com/firecrawl/firecrawl.git", "git@github.com:firecrawl/firecrawl.git")) {
         throw "Unexpected upstream Firecrawl origin: $origin"
     }
 
-    $head = (& git -c "safe.directory=$safeCheckout" -C $checkout rev-parse HEAD 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or $head.Trim() -ne [string]$pin.commit) {
+    $headOutput = @(& $gitExe -c "safe.directory=$safeCheckout" -C $checkout rev-parse HEAD 2>&1)
+    $headExit = $LASTEXITCODE
+    $head = if ($headOutput.Count -ge 1) { [string]$headOutput[0] } else { "" }
+    if ($headExit -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or $head.Trim() -ne [string]$pin.commit) {
         throw "Upstream Firecrawl checkout does not match the reviewed pin $($pin.tag) / $($pin.commit)."
     }
 
-    $dirty = @(& git -c "safe.directory=$safeCheckout" -C $checkout status --porcelain --untracked-files=no 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) {
+    $statusOutput = @(& $gitExe -c "safe.directory=$safeCheckout" -C $checkout status --porcelain --untracked-files=no 2>&1)
+    $statusExit = $LASTEXITCODE
+    if ($statusExit -ne 0) {
+        throw "Unable to verify upstream Firecrawl working tree (git exit $statusExit)."
+    }
+    if ($statusOutput.Count -ne 0) {
         throw "Upstream Firecrawl checkout contains tracked local modifications."
     }
 }
