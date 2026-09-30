@@ -42,7 +42,9 @@ jobs:
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
+          node --check public/gateway/policy.mjs
           node --check public/gateway/browser-tools.mjs
+          node --check public/gateway/policy-crawl.test.mjs
           node --check public/browser-bridge.mjs
           node --check public/access-test.mjs
           node --check public/selftest.mjs
@@ -90,6 +92,10 @@ jobs:
             exit 1
           fi
 
+      - name: Run crawl policy regression
+        shell: bash
+        run: node --test public/gateway/policy-crawl.test.mjs
+
       - name: Run browser bridge/tool contract tests
         shell: bash
         run: node public/gateway/browser-tools.test.mjs
@@ -124,7 +130,9 @@ jobs:
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
+          node --check public/gateway/policy.mjs
           node --check public/gateway/browser-tools.mjs
+          node --check public/gateway/policy-crawl.test.mjs
           node --check public/browser-bridge.mjs
           node --check public/access-test.mjs
           node --check public/selftest.mjs
@@ -132,6 +140,10 @@ jobs:
       - name: Run secret isolation tests
         shell: bash
         run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
+
+      - name: Run crawl policy regression
+        shell: bash
+        run: node --test public/gateway/policy-crawl.test.mjs
 
       - name: Run browser bridge/tool contract tests
         shell: bash
