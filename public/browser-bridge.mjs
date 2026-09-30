@@ -311,6 +311,52 @@ function directCategoryUrl(sessionName, pageNumber) {
   return `https://ehandel.spendrups.se/c/drycker/sprit/all-sprit?page=${page}`;
 }
 
+function jsonResponseAfter(item, startedAt) {
+  return Number(item?.ts || 0) >= startedAt
+    && item?.kind === 'response'
+    && Number(item.status) === 200
+    && String(item.mimeType || '').includes('application/json');
+}
+
+function spendrupsProductReady(client, startedAt) {
+  return client.network.some(item => {
+    if (!jsonResponseAfter(item, startedAt)) return false;
+    try {
+      const url = new URL(String(item.url || ''));
+      return url.hostname === 'prod-cd-front-ehandel.spendrups.se' && url.pathname === SPENDRUPS_PRODUCT_DETAILS_PATH;
+    } catch { return false; }
+  });
+}
+
+function spendrupsCategoryReady(client, startedAt, pageNumber) {
+  return client.network.some(item => {
+    if (!jsonResponseAfter(item, startedAt)) return false;
+    const meta = spendrupsCategoryRequestMeta(item.url);
+    return Boolean(meta && meta.pageNumber === Number(pageNumber));
+  });
+}
+
+async function waitForNavigationReady(client, startedAt, targetReady = null) {
+  const deadline = startedAt + 15_000;
+  let value = null;
+  let targetResponseObserved = false;
+  let domCompleteMs = null;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (targetReady && targetReady()) targetResponseObserved = true;
+    try {
+      value = await client.evaluate(`({ url: location.href, title: document.title, readyState: document.readyState })`);
+      if (value?.readyState === 'complete' && domCompleteMs === null) domCompleteMs = Date.now() - startedAt;
+    } catch {}
+    if (targetReady ? (targetResponseObserved && value) : value?.readyState === 'complete') break;
+  }
+  const navigationMs = Date.now() - startedAt;
+  const readyReason = targetReady
+    ? (targetResponseObserved ? 'target-response' : (value?.readyState === 'complete' ? 'dom-complete-no-target' : 'timeout'))
+    : (value?.readyState === 'complete' ? 'dom-complete' : 'timeout');
+  return { value, readyReason, navigationMs, domCompleteMs, targetResponseObserved };
+}
+
 async function openCategory(sessionName, pageNumber) {
   const cfg = sessionConfig(sessionName);
   const { client } = await attach(sessionName);
@@ -320,22 +366,20 @@ async function openCategory(sessionName, pageNumber) {
   if (parsed.pathname !== '/c/drycker/sprit/all-sprit') throw new Error('Spendrups category path rejected');
   const keys = [...new Set(parsed.searchParams.keys())];
   if (keys.length !== 1 || keys[0] !== 'page' || parsed.searchParams.get('page') !== String(Number(pageNumber))) throw new Error('Spendrups category query rejected');
+  const startedAt = Date.now();
   await client.send('Page.navigate', { url });
-  const deadline = Date.now() + 15_000;
-  let value = null;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 250));
-    try {
-      value = await client.evaluate(`({ url: location.href, title: document.title, readyState: document.readyState })`);
-      if (value?.readyState === 'complete') break;
-    } catch {}
-  }
+  const readiness = await waitForNavigationReady(
+    client,
+    startedAt,
+    () => spendrupsCategoryReady(client, startedAt, pageNumber),
+  );
+  const value = readiness.value;
   if (!value || !allowedUrl(String(value.url || ''), cfg)) throw new Error('category navigation left the allowed supplier host');
   const finalUrl = new URL(String(value.url || ''));
   if (finalUrl.pathname !== '/c/drycker/sprit/all-sprit' || finalUrl.hash) throw new Error('Spendrups navigation left the approved category path');
   const finalKeys = [...new Set(finalUrl.searchParams.keys())];
   if (finalKeys.length !== 1 || finalKeys[0] !== 'page' || finalUrl.searchParams.get('page') !== String(Number(pageNumber))) throw new Error('Spendrups navigation changed the approved category query');
-  return { session: sessionName, pageNumber: Number(pageNumber), url: redactUrl(finalUrl.href), title: String(value.title || ''), readyState: String(value.readyState || '') };
+  return { session: sessionName, pageNumber: Number(pageNumber), url: redactUrl(finalUrl.href), title: String(value.title || ''), readyState: String(value.readyState || ''), readyReason: readiness.readyReason, navigationMs: readiness.navigationMs, domCompleteMs: readiness.domCompleteMs, targetResponseObserved: readiness.targetResponseObserved };
 }
 
 async function openProduct(sessionName, productId) {
@@ -346,22 +390,20 @@ async function openProduct(sessionName, productId) {
   if (!allowedUrl(url, cfg) || parsed.search || parsed.hash) throw new Error('product URL rejected');
   if (sessionName === 'season-spendrups' && !/^\/Product\/[0-9]{1,12}$/.test(parsed.pathname)) throw new Error('Spendrups product path rejected');
   if (sessionName === 'season-ms' && !/^\/produkter\/[0-9]{1,12}$/.test(parsed.pathname)) throw new Error('M&S product path rejected');
+  const startedAt = Date.now();
   await client.send('Page.navigate', { url });
-  const deadline = Date.now() + 15_000;
-  let value = null;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 250));
-    try {
-      value = await client.evaluate(`({ url: location.href, title: document.title, readyState: document.readyState })`);
-      if (value?.readyState === 'complete') break;
-    } catch {}
-  }
+  const readiness = await waitForNavigationReady(
+    client,
+    startedAt,
+    sessionName === 'season-spendrups' ? () => spendrupsProductReady(client, startedAt) : null,
+  );
+  const value = readiness.value;
   if (!value || !allowedUrl(String(value.url || ''), cfg)) throw new Error('product navigation left the allowed supplier host');
   const finalUrl = new URL(String(value.url || ''));
   if (finalUrl.search || finalUrl.hash) throw new Error('product navigation added a query string or fragment');
   if (sessionName === 'season-spendrups' && !/^\/Product\/[0-9]{1,12}$/i.test(finalUrl.pathname)) throw new Error('Spendrups navigation left the approved product path');
   if (sessionName === 'season-ms' && !/^\/produkter\/[0-9]{1,12}(?:\/[^/?#]+)?$/.test(finalUrl.pathname)) throw new Error('M&S navigation left the approved product path');
-  return { session: sessionName, productId: String(productId), url: redactUrl(finalUrl.href), title: String(value.title || ''), readyState: String(value.readyState || '') };
+  return { session: sessionName, productId: String(productId), url: redactUrl(finalUrl.href), title: String(value.title || ''), readyState: String(value.readyState || ''), readyReason: readiness.readyReason, navigationMs: readiness.navigationMs, domCompleteMs: readiness.domCompleteMs, targetResponseObserved: readiness.targetResponseObserved };
 }
 
 async function snapshot(sessionName) {

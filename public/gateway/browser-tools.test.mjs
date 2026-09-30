@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { BROWSER_TOOL_DEFINITIONS, BROWSER_TOOL_NAMES, browserBridgeRequest, browserToolsFor } from './browser-tools.mjs';
 
@@ -20,3 +21,11 @@ assert.throws(() => browserBridgeRequest('browser_category_probe', { session: 's
 assert.throws(() => browserBridgeRequest('browser_category_probe', { session: 'season-spendrups', pageNumber: 0 }), /invalid category page number/);
 assert.throws(() => browserBridgeRequest('browser_session_open', { session: 'arbitrary' }), /invalid browser session/);
 console.log('PASS browser tool contract');
+
+const bridgeSource = readFileSync(new URL('../browser-bridge.mjs', import.meta.url), 'utf8');
+assert.match(bridgeSource, /function waitForNavigationReady/);
+assert.match(bridgeSource, /spendrupsProductReady\(client, startedAt\)/);
+assert.match(bridgeSource, /spendrupsCategoryReady\(client, startedAt, pageNumber\)/);
+assert.match(bridgeSource, /targetResponseObserved/);
+assert.match(bridgeSource, /navigationMs/);
+assert.match(bridgeSource, /setTimeout\(resolve, 100\)/);

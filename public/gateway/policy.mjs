@@ -20,6 +20,8 @@ export function loadInstructions() {
 const UNSUPPORTED_FORMATS = new Set(['screenshot', 'branding', 'audio']);
 const LOCAL_MODEL_FORMATS = new Set(['query', 'json', 'summary']);
 const MAX_SEARCH_MODEL_RESULTS = 5;
+export const MAX_CRAWL_LIMIT = 100;
+export const MAX_CRAWL_CONCURRENCY = 4;
 const URL_FETCH_TOOLS = new Set(['firecrawl_scrape', 'firecrawl_map', 'firecrawl_crawl']);
 const BLOCKED_DESTINATIONS = new BlockList();
 
@@ -120,6 +122,17 @@ export function unsupportedReason(params) {
   const bad = formatNames(opts).filter(f => UNSUPPORTED_FORMATS.has(f));
   if (bad.length) return `Format(s) ${bad.join(', ')} are not available on this self-hosted Firecrawl. Use markdown, html, rawHtml, links, summary, query or json instead.`;
   if (Array.isArray(opts.actions) && opts.actions.length) return 'Browser actions (click, scroll, write, screenshot) are not available on this self-hosted Firecrawl. Scrape the page as-is, or scrape each paginated URL directly.';
+  if (params?.name === 'firecrawl_crawl') {
+    const args = params.arguments ?? {};
+    const limit = Number(args.limit);
+    const maxConcurrency = Number(args.maxConcurrency);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_CRAWL_LIMIT) {
+      return `firecrawl_crawl requires an explicit integer limit from 1 to ${MAX_CRAWL_LIMIT}.`;
+    }
+    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > MAX_CRAWL_CONCURRENCY) {
+      return `firecrawl_crawl requires explicit maxConcurrency from 1 to ${MAX_CRAWL_CONCURRENCY}.`;
+    }
+  }
   // query/json/summary on search hits: Gemini (15 requests/min) answers a few pages in seconds, but the local fallback
   // handles one page at a time (1-2 min each), so more hits would run into the 5-minute call limit.
   if (params?.name === 'firecrawl_search') {
@@ -158,9 +171,21 @@ export function compactToolResult(result) {
 
 // Applies tool filtering, instructions and compaction to one JSON-RPC response.
 // `compactIds` holds the ids of tools/call requests whose results may be compacted.
+function constrainToolSchema(tool) {
+  if (tool?.name !== 'firecrawl_crawl' || !tool.inputSchema?.properties) return tool;
+  const properties = tool.inputSchema.properties;
+  if (properties.limit) properties.limit = { ...properties.limit, minimum: 1, maximum: MAX_CRAWL_LIMIT };
+  if (properties.maxConcurrency) properties.maxConcurrency = { ...properties.maxConcurrency, minimum: 1, maximum: MAX_CRAWL_CONCURRENCY };
+  const required = new Set(Array.isArray(tool.inputSchema.required) ? tool.inputSchema.required : []);
+  required.add('limit');
+  required.add('maxConcurrency');
+  tool.inputSchema.required = [...required];
+  return tool;
+}
+
 export function rewriteResponse(msg, { allowedTools, compactIds }) {
   if (!msg || typeof msg !== 'object') return msg;
-  if (msg.result?.tools) msg.result.tools = msg.result.tools.filter(t => allowedTools.has(t.name));
+  if (msg.result?.tools) msg.result.tools = msg.result.tools.filter(t => allowedTools.has(t.name)).map(constrainToolSchema);
   if (msg.result?.serverInfo) {
     const instructions = loadInstructions();
     if (instructions) msg.result.instructions = instructions;
