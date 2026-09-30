@@ -32,7 +32,7 @@ jobs:
       - name: Commit lockfile if changed
         shell: bash
         run: |
-          if git diff --quiet -- public/package-lock.json; then
+          if [[ -z "$(git status --porcelain -- public/package-lock.json)" ]]; then
             echo "package-lock.json already current"
             exit 0
           fi
