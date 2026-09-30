@@ -17,6 +17,10 @@ test('firecrawl-mcp has one exact manifest version source and reproducible publi
   assert.equal(lock.lockfileVersion, 3);
   assert.equal(lock?.packages?.['']?.dependencies?.['firecrawl-mcp'], version);
   assert.equal(lock?.packages?.['node_modules/firecrawl-mcp']?.version, version);
+  assert.equal(
+    lock?.packages?.['node_modules/firecrawl-mcp']?.resolved,
+    `https://registry.npmjs.org/firecrawl-mcp/-/firecrawl-mcp-${version}.tgz`,
+  );
   assert.match(lock?.packages?.['node_modules/firecrawl-mcp']?.integrity ?? '', /^sha512-/);
   assert.match(dockerfile, /COPY package\.json package-lock\.json \.\//);
   assert.match(dockerfile, /npm ci --omit=dev --no-audit --no-fund/);
