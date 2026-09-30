@@ -72,21 +72,6 @@ function Assert-UpstreamFirecrawlPin {
     }
 }
 
-function Stop-RetiredHostHelper {
-    # One-release migration cleanup for the former application-owned browser helper.
-    # It is intentionally identified by the old exact script path before termination.
-    $pidFile = "$root\.runtime\browser-bridge.pid"
-    if (Test-Path $pidFile) {
-        $pidValue = [int](Get-Content $pidFile -Raw)
-        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
-        if ($p -and [string]$p.CommandLine -like '*public\browser-bridge.mjs*') {
-            Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
-        }
-        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item "$root\.runtime\browser-bridge.port" -Force -ErrorAction SilentlyContinue
-}
-
 function Remove-LegacyGatewaySecret {
     $path = "$root\public\gateway.env"
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
@@ -393,7 +378,6 @@ try {
 switch ($Action) {
     'up' {
         Assert-UpstreamFirecrawlPin
-        Stop-RetiredHostHelper
         docker @compose up -d --build
         if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
@@ -401,14 +385,12 @@ switch ($Action) {
     }
     'redeploy' {
         Assert-UpstreamFirecrawlPin
-        Stop-RetiredHostHelper
         docker @compose up -d --build --force-recreate
         if ($LASTEXITCODE -ne 0) { throw "docker compose redeploy failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
         Import-AvailableRuntimeSecrets
     }
     'down' {
-        Stop-RetiredHostHelper
         docker @compose down
     }
     'recover' {
