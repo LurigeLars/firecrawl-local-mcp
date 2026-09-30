@@ -52,7 +52,7 @@ This repo holds only the local additions. Secrets and machine-specific files are
 4. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
 5. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
 6. Install the required local model/runtime dependencies described below.
-8. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
+7. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
