@@ -1,0 +1,145 @@
+name: Fork CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fork-ci:
+    name: fork-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.21.0"
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check searxng/lang-proxy.mjs
+          node --check llm/trim-proxy.mjs
+          node --check llm/gemini-secret.test.mjs
+          node --check security/service-secrets.test.mjs
+          node --check security/resource-guardrails.test.mjs
+          node --check security/dependency-pins.test.mjs
+          node --check local-mcp/stdio-proxy.mjs
+          node --check local-mcp/test-proxy.mjs
+          node --check public/gateway/gateway.mjs
+          node --check public/gateway/policy.mjs
+          node --check public/gateway/policy-crawl.test.mjs
+          node --check public/access-test.mjs
+          node --check public/selftest.mjs
+
+      - name: Parse PowerShell launcher
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          foreach ($path in @('./fc.ps1', './scripts/configure_gemini.ps1', './scripts/configure_service_secrets.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { $errors | Format-List | Out-String | Write-Error; exit 1 }
+          }
+
+      - name: Run secret isolation tests
+        shell: bash
+        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
+
+      - name: Verify runtime secret stays in tmpfs
+        shell: bash
+        env:
+          SMOKE_SECRET: test-only-runtime-secret-not-a-credential
+        run: |
+          set -euo pipefail
+          project=firecrawl-secret-smoke
+          file=security/runtime-secret-smoke.compose.yaml
+          trap 'docker compose -p "$project" -f "$file" down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+
+          docker compose -p "$project" -f "$file" up -d
+          id="$(docker compose -p "$project" -f "$file" ps -q smoke)"
+          test -n "$id"
+
+          actual="$(docker exec "$id" cat /run/firecrawl-secrets/value)"
+          test "$actual" = "$SMOKE_SECRET"
+
+          if docker inspect "$id" --format '{{json .Config.Env}}' | grep -F "$SMOKE_SECRET"; then
+            echo "runtime secret leaked into container Config.Env" >&2
+            exit 1
+          fi
+
+          if docker diff "$id" | grep -F '/run/firecrawl-secrets/value'; then
+            echo "runtime secret was written into the container writable layer" >&2
+            exit 1
+          fi
+
+      - name: Run crawl policy regression
+        shell: bash
+        run: node --test public/gateway/policy-crawl.test.mjs
+
+      - name: Run offline gateway security regression
+        shell: bash
+        run: node public/access-test.mjs "file://$GITHUB_WORKSPACE/public/gateway/gateway.mjs"
+
+      - name: Build public MCP image
+        run: docker build --pull -f public/Dockerfile.mcp public
+
+  node26-compat:
+    name: node26-compat
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26.9.0"
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check searxng/lang-proxy.mjs
+          node --check llm/trim-proxy.mjs
+          node --check local-mcp/stdio-proxy.mjs
+          node --check local-mcp/test-proxy.mjs
+          node --check public/gateway/gateway.mjs
+          node --check public/gateway/policy.mjs
+          node --check public/gateway/policy-crawl.test.mjs
+          node --check public/access-test.mjs
+          node --check public/selftest.mjs
+
+      - name: Run secret isolation tests
+        shell: bash
+        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
+
+      - name: Run crawl policy regression
+        shell: bash
+        run: node --test public/gateway/policy-crawl.test.mjs
+
+      - name: Run offline gateway security regression
+        shell: bash
+        run: node public/access-test.mjs "file://$GITHUB_WORKSPACE/public/gateway/gateway.mjs"
+
+      - name: Build public MCP image
+        run: docker build --pull -f public/Dockerfile.mcp public

@@ -1,0 +1,51 @@
+# Public ChatGPT access: firecrawl-mcp (HTTP) -> gateway -> shared Cloudflare Tunnel.
+# Nothing here publishes a host port; the only way in is through the tunnel.
+services:
+  mcp:
+    build:
+      context: ../public
+      dockerfile: Dockerfile.mcp
+    environment:
+      FIRECRAWL_API_URL: http://api:3002
+    networks: [backend, edge]
+    depends_on: [api]
+    read_only: true
+    tmpfs: [/tmp, /home/node]
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  gateway:
+    image: node:26.10.0-alpine
+    command: ["node", "/app/gateway.mjs"]
+    user: node
+    env_file:
+      - ../public/gateway.env
+    environment:
+      UPSTREAM_HOST: mcp
+      UPSTREAM_PORT: "3000"
+      # Cloudflare Access (Managed OAuth) is mandatory.
+      ACCESS_TEAM_DOMAIN: ${ACCESS_TEAM_DOMAIN:-}
+      ACCESS_AUD: ${ACCESS_AUD:-}
+      ACCESS_ALLOWED_EMAILS: ${ACCESS_ALLOWED_EMAILS:-}
+      ALLOWED_TOOLS: firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status
+    volumes:
+      - ../public/gateway:/app:ro
+    networks:
+      edge:
+        aliases:
+          - firecrawl-gateway
+    depends_on: [mcp]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+
+networks:
+  edge:
+    driver: bridge

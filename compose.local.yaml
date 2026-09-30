@@ -1,0 +1,172 @@
+# Local overrides layered on top of firecrawl/docker-compose.yaml (upstream stays untouched).
+services:
+  # FoundationDB is only needed with NUQ_BACKEND=fdb; keep it off by default.
+  foundationdb:
+    profiles: ["fdb"]
+  foundationdb-init:
+    profiles: ["fdb"]
+  api:
+    user: node
+    restart: unless-stopped
+    # Wrapper-owned DoS blast-radius limits. Keep these explicit even while
+    # upstream currently ships the same CPU/RAM caps.
+    cpus: 4.0
+    mem_limit: 8G
+    memswap_limit: 8G
+    pids_limit: 512
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_PASSWORD: ""
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
+    post_start:
+      - command:
+          - sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET";
+            printf '%s' "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > /run/firecrawl-secrets/postgres_password
+        environment:
+          FIRECRAWL_POSTGRES_PASSWORD_SECRET: ${FIRECRAWL_POSTGRES_PASSWORD_SECRET:?PostgreSQL runtime secret is required}
+    command:
+      - sh
+      - -c
+      - >-
+        while [ ! -s /run/firecrawl-secrets/postgres_password ]; do sleep 0.05; done;
+        export POSTGRES_PASSWORD="$$(cat /run/firecrawl-secrets/postgres_password)";
+        exec node dist/src/harness.js --start-docker
+  playwright-service:
+    restart: unless-stopped
+    # Wrapper-owned DoS blast-radius limits. The PID cap is local hardening;
+    # CPU/RAM values intentionally match the current upstream defaults.
+    cpus: 2.0
+    mem_limit: 4G
+    memswap_limit: 4G
+    pids_limit: 512
+    # Taller browser viewport so virtualized pages/lists render all rows.
+    # Upstream hard-codes 1280x800; patch the compiled file at start-up (warns if upstream changed the line).
+    environment:
+      VIEWPORT_HEIGHT: ${PLAYWRIGHT_VIEWPORT_HEIGHT:-4000}
+    command:
+      - sh
+      - -c
+      - >-
+        sed -i 's/const viewport = { width: 1280, height: 800 };/const viewport = { width: 1280, height: Number(process.env.VIEWPORT_HEIGHT || 800) };/' dist/api.js;
+        grep -q 'process.env.VIEWPORT_HEIGHT' dist/api.js || echo 'WARNING: viewport patch not applied (upstream changed dist/api.js)' >&2;
+        exec node dist/api.js
+  redis:
+    image: redis:8.10.2-alpine
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+  rabbitmq:
+    image: rabbitmq:4.3.6-management-alpine
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+  nuq-postgres:
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ""
+      POSTGRES_PASSWORD_FILE: /run/firecrawl-secrets/postgres_password
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=0,gid=0,mode=0700
+    post_start:
+      - command:
+          - sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET";
+            printf '%s' "$$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > /run/firecrawl-secrets/postgres_password
+        environment:
+          FIRECRAWL_POSTGRES_PASSWORD_SECRET: ${FIRECRAWL_POSTGRES_PASSWORD_SECRET:?PostgreSQL runtime secret is required}
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        while [ ! -s /run/firecrawl-secrets/postgres_password ]; do sleep 0.05; done;
+        exec docker-entrypoint.sh postgres
+
+  # Search backend for Firecrawl (SEARXNG_ENDPOINT in .env). Internal network only, no host port.
+  searxng:
+    image: searxng/searxng:2026.9.10-931fd9787
+    user: "977:977"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        while [ ! -s /run/firecrawl-secrets/searxng_secret ]; do sleep 0.05; done;
+        export SEARXNG_SECRET="$$(cat /run/firecrawl-secrets/searxng_secret)";
+        exec /usr/local/searxng/entrypoint.sh
+    environment:
+      SEARXNG_SECRET: ""
+      SEARXNG_BASE_URL: http://searxng:8080/
+      FORCE_OWNERSHIP: "false"
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=977,gid=977,mode=0700
+    post_start:
+      - command:
+          - /bin/sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$$FIRECRAWL_SEARXNG_SECRET_SECRET";
+            printf '%s' "$$FIRECRAWL_SEARXNG_SECRET_SECRET" > /run/firecrawl-secrets/searxng_secret
+        environment:
+          FIRECRAWL_SEARXNG_SECRET_SECRET: ${FIRECRAWL_SEARXNG_SECRET_SECRET:?SearXNG runtime secret is required}
+    volumes:
+      - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ../searxng/limiter.toml:/etc/searxng/limiter.toml:ro
+    networks: [backend]
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # Routes Firecrawl searches: Google+Startpage (language all) first, Bing (en-GB) as fallback; handles site: filters.
+  searxng-proxy:
+    image: node:26.10.0-alpine
+    command: ["node", "/app/lang-proxy.mjs"]
+    user: node
+    environment:
+      UPSTREAM: http://searxng:8080
+    volumes:
+      - ../searxng/lang-proxy.mjs:/app/lang-proxy.mjs:ro
+    networks: [backend]
+    depends_on: [searxng]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # Sends LLM calls to Gemini when the runtime secret is present, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
+  llm-proxy:
+    image: node:26.10.0-alpine
+    command: ["node", "/app/trim-proxy.mjs"]
+    user: node
+    environment:
+      MAX_INPUT_TOKENS: ${LLM_MAX_INPUT_TOKENS:-7000}
+      # Optional: Gemini first when the runtime tmpfs secret is present; local model remains fallback.
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+    volumes:
+      - ../llm:/app:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [backend]
+    read_only: true
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+

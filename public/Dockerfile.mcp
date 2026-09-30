@@ -1,0 +1,10 @@
+FROM node:26.10.0-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund && npm cache clean --force
+ENV PATH="/app/node_modules/.bin:$PATH" \
+    HTTP_STREAMABLE_SERVER=true \
+    HOST=0.0.0.0 \
+    PORT=3000
+USER node
+CMD ["firecrawl-mcp"]

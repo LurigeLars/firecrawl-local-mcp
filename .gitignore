@@ -1,0 +1,20 @@
+# Upstream Firecrawl checkout (pinned tag, see README) - re-clone instead of committing
+/firecrawl/
+
+# Secrets and machine-local settings - never commit
+.env
+.env.*
+!.env.example
+# Legacy migration input; fc.ps1 no longer loads it
+secrets.env
+public/gateway.env
+public/browser.env
+
+# Runtime / scratch
+.runtime/
+node_modules/
+*.log
+.firecrawl/
+
+# Local ChatGPT developer-app binding
+marketplace/chatgpt-overlay/.app.json
