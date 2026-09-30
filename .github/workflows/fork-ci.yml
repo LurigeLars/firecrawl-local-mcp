@@ -43,9 +43,7 @@ jobs:
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
           node --check public/gateway/policy.mjs
-          node --check public/gateway/browser-tools.mjs
           node --check public/gateway/policy-crawl.test.mjs
-          node --check public/browser-bridge.mjs
           node --check public/access-test.mjs
           node --check public/selftest.mjs
 
@@ -96,10 +94,6 @@ jobs:
         shell: bash
         run: node --test public/gateway/policy-crawl.test.mjs
 
-      - name: Run browser bridge/tool contract tests
-        shell: bash
-        run: node public/gateway/browser-tools.test.mjs
-
       - name: Run offline gateway security regression
         shell: bash
         run: node public/access-test.mjs "file://$GITHUB_WORKSPACE/public/gateway/gateway.mjs"
@@ -131,9 +125,7 @@ jobs:
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
           node --check public/gateway/policy.mjs
-          node --check public/gateway/browser-tools.mjs
           node --check public/gateway/policy-crawl.test.mjs
-          node --check public/browser-bridge.mjs
           node --check public/access-test.mjs
           node --check public/selftest.mjs
 
@@ -144,10 +136,6 @@ jobs:
       - name: Run crawl policy regression
         shell: bash
         run: node --test public/gateway/policy-crawl.test.mjs
-
-      - name: Run browser bridge/tool contract tests
-        shell: bash
-        run: node public/gateway/browser-tools.test.mjs
 
       - name: Run offline gateway security regression
         shell: bash

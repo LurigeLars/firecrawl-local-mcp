@@ -7,10 +7,10 @@ This repository wraps a self-hosted Firecrawl stack with local policy, secret is
 - Firecrawl API, MCP, Playwright, gateway, SearXNG proxy, and LLM proxy run non-root; SearXNG runs under its dedicated UID/GID.
 - Node-facing services use dropped Linux capabilities and `no-new-privileges` where compatible.
 - Redis, RabbitMQ, and PostgreSQL retain their official root-entrypoint-to-service-user startup model; `no-new-privileges` is applied where compatible instead of forcing an unsafe `user:` override.
-- PostgreSQL, SearXNG, Gemini, and browser-bridge secrets are host-protected with DPAPI and injected into service-specific tmpfs at runtime. Secret tmpfs directories use service-owned or root-owned mode `0700`.
+- PostgreSQL, SearXNG, and Gemini secrets are host-protected with DPAPI and injected through local runtime boundaries; service-secret tmpfs directories use service-owned or root-owned mode `0700`.
 - SearXNG is internal-only, has explicit pinned configuration, and the local proxy forwards internal client identity without enabling public rate limiting.
-- Public MCP access is mediated by Cloudflare Access and explicit tool/request policy. The supplier-browser bridge is intentionally narrow and is not generic browser automation.
-- Machine-specific paths, IPs, identities, Cloudflare values, supplier sessions, and credentials must remain outside Git.
+- Public MCP access is mediated by Cloudflare Access and explicit tool/request policy. Application-specific browser adapters are out of scope for this repository.
+- Machine-specific paths, IPs, identities, Cloudflare values, application sessions, and credentials must remain outside Git.
 
 ## Repository status
 
@@ -22,7 +22,6 @@ The repository-specific layer includes:
 - Cloudflare Access integration using a shared-tunnel deployment model.
 - SearXNG routing, search normalization, and optional local/Gemini LLM adapters.
 - DPAPI-backed host secrets, Docker/network isolation, and hardened runtime configuration.
-- A narrowly scoped local browser-session bridge for explicitly configured supplier workflows.
 - Deployment scripts, tests, benchmarks, and adapted workflow skills.
 
 Upstream Firecrawl remains a separate checkout and retains its own license and release lifecycle.
@@ -51,10 +50,9 @@ This repo holds only the local additions. Secrets and machine-specific files are
 2. Copy `.env.example` to `.env` and `public/gateway.env.example` to `public/gateway.env`; replace deployment placeholders locally and keep the real files out of Git.
 3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and injected into per-container tmpfs only at runtime.
 4. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
-5. The supplier-browser bridge token is generated automatically on first `.\fc.ps1 up`, protected with Windows DPAPI at `%LOCALAPPDATA%\FirecrawlLocal\secrets\browser_bridge_token.dpapi`, and injected into the gateway tmpfs only at runtime.
-6. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
-7. Install the required local model/runtime dependencies described below.
-8. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
+5. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
+6. Install the required local model/runtime dependencies described below.
+7. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
@@ -91,7 +89,7 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
 - Address: the public endpoint is supplied only through deployment-local configuration; `.\fc.ps1 url` prints the configured endpoint.
   Anything else returns 404.
 - Deployment identifiers are local-only and must stay out of Git. `fc.ps1` removes any legacy `GATEWAY_SECRET` entry from the ignored `public/gateway.env` during startup.
-- Gateway: the Firecrawl surface is limited to scrape/map/search/crawl/check_crawl_status; `firecrawl_parse` is blocked because it can read arbitrary local files in this mode. The public deployment also exposes the separate, allowlisted supplier-browser tools documented below. Scrape/crawl requests asking for screenshot, branding, audio, or browser `actions` are rejected immediately because this self-hosted instance cannot serve them. The gateway defaults to 120 requests/min per caller IP (`RATE_PER_MIN`) with a 256 KB request cap.
+- Gateway: the Firecrawl surface is limited to scrape/map/search/crawl/check_crawl_status; `firecrawl_parse` is blocked because it can read arbitrary local files in this mode. Scrape/crawl requests asking for screenshot, branding, audio, or browser `actions` are rejected immediately because this self-hosted instance cannot serve them. The gateway defaults to 120 requests/min per caller IP (`RATE_PER_MIN`) with a 256 KB request cap.
 - Server instructions: the gateway replaces the MCP `initialize` instructions with `public/gateway/instructions.md`
   (read on every connect, no restart needed). ChatGPT picks them up when the connector is refreshed ("Uppdatera").
   Keep it in line with the `firecrawl-mcp` core skill.
@@ -99,26 +97,6 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
 - Per-service public kill switch: stop the Firecrawl gateway container. Do not stop the shared `mcp-cloudflared`
   container unless you intend to disconnect all MCP gateways that use it.
 - Docker Desktop must be running for any of this; enable "Start Docker Desktop when you sign in".
-
-### Local interactive supplier browser bridge
-
-For the Season Hotel pilot, the public ChatGPT connector exposes a separate, narrowly scoped supplier-browser surface:
-
-- `browser_session_open` and `browser_session_status` manage the two approved sessions: `season-spendrups` and `season-ms`.
-- `browser_product_open` navigates an approved session only to a direct numeric product-detail path; it does not accept arbitrary URLs or search terms.
-- `browser_category_open` is restricted to the fixed Spendrups category flow and a bounded page number.
-- `browser_snapshot` and `browser_network_log` return bounded, redacted read-only views.
-- `browser_product_probe` and `browser_category_probe` return sanitized data from already observed Spendrups requests.
-
-`fc.ps1 up` starts `public/browser-bridge.mjs` on the Windows host and creates a random internal token if needed. The token is persisted only as a Windows DPAPI blob under `%LOCALAPPDATA%\FirecrawlLocal\secrets`; an older gitignored `public/browser.env` is verified, migrated, and deleted automatically. During gateway startup the token is decrypted only long enough for a Compose `post_start` hook to write it into `/run/firecrawl-gateway-secrets/browser_bridge_token` on tmpfs. It is absent from the gateway service `.Config.Env`. Unless `BROWSER_BRIDGE_PORT` is configured explicitly, the launcher reuses its previous valid port or selects the first free loopback port in `8765-8799`, records it under `.runtime`, and passes that port to the Docker gateway. Supplier Chrome DevTools Protocol endpoints remain loopback-only on `127.0.0.1:9440` and `127.0.0.1:9441`.
-
-Manual-auth workflow:
-1. Call `browser_session_open` for the supplier. A visible Chrome window opens on the Windows desktop.
-2. The user logs in manually in that Chrome window. Never send credentials through chat or browser automation.
-3. Use the bounded snapshot, probe, category/product-open, and network-log tools as needed. Network capture begins when the bridge attaches, so open the session before logging in or navigating.
-4. Browser profiles stay under `%LOCALAPPDATA%\FirecrawlLocal\browser-profiles` and remain outside Git/Drive. `fc.ps1 down` stops the bridge process but does not delete the profiles.
-
-The bridge is intentionally not a generic browser automation service. It does not expose arbitrary URLs, credential entry, cookie/storage export, request headers, or request bodies. Expanding suppliers or navigation capabilities requires an explicit code change and review.
 
 ## Search backend (SearXNG)
 
