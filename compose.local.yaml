@@ -8,6 +8,12 @@ services:
   api:
     user: node
     restart: unless-stopped
+    # Wrapper-owned DoS blast-radius limits. Keep these explicit even while
+    # upstream currently ships the same CPU/RAM caps.
+    cpus: 4.0
+    mem_limit: 8G
+    memswap_limit: 8G
+    pids_limit: 512
     cap_drop:
       - ALL
     security_opt:
@@ -35,6 +41,12 @@ services:
         exec node dist/src/harness.js --start-docker
   playwright-service:
     restart: unless-stopped
+    # Wrapper-owned DoS blast-radius limits. The PID cap is local hardening;
+    # CPU/RAM values intentionally match the current upstream defaults.
+    cpus: 2.0
+    mem_limit: 4G
+    memswap_limit: 4G
+    pids_limit: 512
     # Taller browser viewport so virtualized pages/lists render all rows.
     # Upstream hard-codes 1280x800; patch the compiled file at start-up (warns if upstream changed the line).
     environment:
