@@ -10,7 +10,7 @@ This repository wraps a self-hosted Firecrawl stack with local policy, secret is
 - PostgreSQL, SearXNG, and Gemini secrets are host-protected with DPAPI and injected through local runtime boundaries; service-secret tmpfs directories use service-owned or root-owned mode `0700`.
 - SearXNG is internal-only, has explicit pinned configuration, and the local proxy forwards internal client identity without enabling public rate limiting.
 - Public MCP access is mediated by Cloudflare Access and explicit tool/request policy. Application-specific browser adapters are out of scope for this repository.
-- Machine-specific paths, IPs, identities, Cloudflare values, supplier sessions, and credentials must remain outside Git.
+- Machine-specific paths, IPs, identities, Cloudflare values, application sessions, and credentials must remain outside Git.
 
 ## Repository status
 
