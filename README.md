@@ -38,7 +38,7 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 
 > **Public-snapshot note:** hostnames, identities, app IDs, tunnel IDs, local paths, and LAN details are examples/placeholders. Real deployment secrets and machine-specific configuration are intentionally excluded.
 
-- `firecrawl/` — untouched upstream checkout, pinned to tag `v2.11.376` (verified locally on 2026-09-21; upstream commit `95c8ab18f524d1aa813cca2a6dc8bd39191504ec`), images built locally.
+- `firecrawl/` — untouched upstream checkout. The reviewed tag/commit is machine-readable in `upstream/firecrawl.json`; `fc.ps1 up/redeploy` verifies origin, commit and tracked cleanliness before building.
 - `compose.local.yaml` — local overrides (FoundationDB off, auto-restart).
 - `.env` — settings. API bound to `127.0.0.1:3002` only; it has **no authentication**, never expose it.
 - `fc.ps1` — `up` / `down` / `status` / `logs` / `test` / `import-gemini`.
@@ -47,7 +47,7 @@ Original wrapper code in this repository is licensed under the MIT License; see 
 
 This repo holds only the local additions. Secrets and machine-specific files are gitignored.
 
-1. `git clone --depth 1 --branch v2.11.376 https://github.com/firecrawl/firecrawl.git firecrawl`
+1. Read `upstream/firecrawl.json`, then clone the exact reviewed tag from `https://github.com/firecrawl/firecrawl.git` into `firecrawl` and verify that `HEAD` equals the recorded commit.
 2. Copy `.env.example` to `.env` and `public/gateway.env.example` to `public/gateway.env`; replace deployment placeholders locally and keep the real files out of Git.
 3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and injected into per-container tmpfs only at runtime.
 4. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
@@ -58,7 +58,7 @@ This repo holds only the local additions. Secrets and machine-specific files are
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
-`local-mcp/stdio-proxy.mjs` wraps `firecrawl-mcp@3.24.0` over stdio and applies the same rules as the public gateway
+`local-mcp/stdio-proxy.mjs` wraps the exact `firecrawl-mcp` version in `public/package.json` over stdio and applies the same rules as the public gateway
 (`public/gateway/policy.mjs`): only the 5 working tools are listed/callable (tool definitions ~3.9k instead of ~10.6k
 tokens), `parse` and unsupported formats are refused, the server instructions come from
 `public/gateway/instructions.md`, and scrapes that only ask for `query`/`json`/`summary` drop the page metadata
