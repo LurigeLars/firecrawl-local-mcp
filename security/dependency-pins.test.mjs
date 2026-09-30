@@ -26,4 +26,5 @@ test('upstream Firecrawl pin is machine-readable and enforced before builds', ()
   assert.match(launcher, /upstream\\firecrawl\.json/);
   assert.match(launcher, /Assert-UpstreamFirecrawlPin/);
   assert.match(launcher, /Unexpected upstream Firecrawl origin/);
+  assert.match(launcher, /safe\.directory=\$safeCheckout/);
 });
