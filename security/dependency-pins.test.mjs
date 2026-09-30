@@ -5,15 +5,22 @@ import { readFileSync } from 'node:fs';
 const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
 const manifest = JSON.parse(read('public/package.json'));
+const lock = JSON.parse(read('public/package-lock.json'));
 const dockerfile = read('public/Dockerfile.mcp');
 const proxy = read('local-mcp/stdio-proxy.mjs');
 const pin = JSON.parse(read('upstream/firecrawl.json'));
 const launcher = read('fc.ps1');
 
-test('firecrawl-mcp has one exact manifest version source', () => {
+test('firecrawl-mcp has one exact manifest version source and reproducible public install', () => {
   const version = manifest?.dependencies?.['firecrawl-mcp'];
   assert.match(version, /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
-  assert.match(dockerfile, /COPY package\.json/);
+  assert.equal(lock.lockfileVersion, 3);
+  assert.equal(lock?.packages?.['']?.dependencies?.['firecrawl-mcp'], version);
+  assert.equal(lock?.packages?.['node_modules/firecrawl-mcp']?.version, version);
+  assert.match(lock?.packages?.['node_modules/firecrawl-mcp']?.integrity ?? '', /^sha512-/);
+  assert.match(dockerfile, /COPY package\.json package-lock\.json \.\//);
+  assert.match(dockerfile, /npm ci --omit=dev --no-audit --no-fund/);
+  assert.doesNotMatch(dockerfile, /npm install/);
   assert.doesNotMatch(dockerfile, /firecrawl-mcp@\d/);
   assert.match(proxy, /public\/package\.json/);
   assert.doesNotMatch(proxy, /firecrawl-mcp@\d/);
