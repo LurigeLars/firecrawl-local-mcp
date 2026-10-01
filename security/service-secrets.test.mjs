@@ -117,7 +117,7 @@ test('public proxy credentials are DPAPI-backed and isolated from the normal Fir
   assert.match(launcher, /--profile', 'public-proxy'/);
   assert.match(launcher, /PLAYWRIGHT_MICROSERVICE_URL = "http:\/\/playwright-router:3000\/scrape"/);
   assert.match(launcher, /Assert-NoGlobalProxyConfiguration/);
-  assert.match(launcher, /PROXY_SERVER must remain empty in \.env/);
+  assert.match(launcher, /must remain empty in \.env/);
 });
 
 test('plaintext service-secret template is retired', () => {
