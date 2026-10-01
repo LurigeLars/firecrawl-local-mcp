@@ -115,6 +115,21 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  public-proxy-metrics-init:
+    profiles: ["public-proxy"]
+    image: node:26.10.0-alpine
+    user: root
+    command: ["sh", "-c", "chown 1000:1000 /var/lib/firecrawl-proxy"]
+    volumes:
+      - public-proxy-metrics:/var/lib/firecrawl-proxy
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   playwright-router:
     profiles: ["public-proxy"]
     image: node:26.10.0-alpine
@@ -130,22 +145,18 @@ services:
       PUBLIC_PROXY_HOSTS: ${FIRECRAWL_PUBLIC_PROXY_HOSTS:-curemydisease.com}
       PUBLIC_PROXY_ATTEMPTS: ${FIRECRAWL_PUBLIC_PROXY_ATTEMPTS:-3}
       PUBLIC_PROXY_METRICS_PATH: /var/lib/firecrawl-proxy/metrics.json
-    command:
-      - sh
-      - -c
-      - >-
-        while [ ! -w /var/lib/firecrawl-proxy ]; do sleep 0.05; done;
-        exec node /app/public-proxy-router.mjs
+    command: ["node", "/app/public-proxy-router.mjs"]
     volumes:
       - ../playwright:/app:ro
       - public-proxy-metrics:/var/lib/firecrawl-proxy
-    post_start:
-      - command: ["sh", "-c", "chown -R node:node /var/lib/firecrawl-proxy"]
-        user: root
     networks: [backend]
     depends_on:
-      - playwright-service
-      - playwright-public-proxy-service
+      playwright-service:
+        condition: service_started
+      playwright-public-proxy-service:
+        condition: service_started
+      public-proxy-metrics-init:
+        condition: service_completed_successfully
     read_only: true
     tmpfs:
       - /tmp
@@ -154,6 +165,23 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+  public-proxy-smoke:
+    profiles: ["smoke"]
+    image: node:26.10.0-alpine
+    user: node
+    command: ["node", "/app/public-proxy-live-smoke.mjs"]
+    environment:
+      ROUTER_URL: http://playwright-router:3000
+    volumes:
+      - ../playwright:/app:ro
+    networks: [backend]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
 
   redis:
     image: redis:8.10.2-alpine

@@ -38,6 +38,7 @@ jobs:
           node --check llm/gemini-secret.test.mjs
           node --check playwright/public-proxy-router.mjs
           node --check playwright/public-proxy-router.test.mjs
+          node --check playwright/public-proxy-live-smoke.mjs
           node --check security/service-secrets.test.mjs
           node --check security/resource-guardrails.test.mjs
           node --check security/dependency-pins.test.mjs
@@ -129,6 +130,7 @@ jobs:
           node --check llm/trim-proxy.mjs
           node --check playwright/public-proxy-router.mjs
           node --check playwright/public-proxy-router.test.mjs
+          node --check playwright/public-proxy-live-smoke.mjs
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs

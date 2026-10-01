@@ -134,8 +134,23 @@ test('public proxy observability stores aggregate counters only in an isolated v
   assert.match(compose, /PUBLIC_PROXY_METRICS_PATH:\s*\/var\/lib\/firecrawl-proxy\/metrics\.json/);
   assert.match(compose, /public-proxy-metrics:\/var\/lib\/firecrawl-proxy/);
   assert.match(compose, /public-proxy-metrics:/);
-  assert.match(compose, /while \[ ! -w \/var\/lib\/firecrawl-proxy \]/);
-  assert.match(compose, /chown -R node:node \/var\/lib\/firecrawl-proxy/);
+  assert.match(compose, /public-proxy-metrics-init:/);
+  assert.match(compose, /command:\s*\["sh", "-c", "chown 1000:1000 \/var\/lib\/firecrawl-proxy"\]/);
+  assert.match(compose, /cap_add:\s*\n\s+- CHOWN/);
+  assert.match(compose, /public-proxy-metrics-init:\s*\n\s+condition: service_completed_successfully/);
+  assert.match(compose, /playwright-router:[\s\S]*?user:\s+node/);
+});
+
+test('public proxy live smoke test is deployment-gated and uses only dummy session data', () => {
+  assert.match(compose, /public-proxy-smoke:/);
+  assert.match(compose, /profiles:\s*\["smoke"\]/);
+  assert.match(compose, /public-proxy-live-smoke\.mjs/);
+  assert.match(launcher, /function Invoke-PublicProxySmokeTest/);
+  assert.match(launcher, /"run", "--rm", "--no-deps"/);
+  assert.match(launcher, /Invoke-PublicProxySmokeTest/);
+  assert.match(launcher, /function Remove-PublicProxyInitContainer/);
+  assert.match(launcher, /rm -f public-proxy-metrics-init/);
+  assert.match(launcher, /Invoke-PublicProxySmokeTest\s*\n\s*Remove-PublicProxyInitContainer/);
 });
 
 test('plaintext service-secret template is retired', () => {

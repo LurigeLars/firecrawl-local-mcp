@@ -467,6 +467,29 @@ function Import-PublicProxyRuntimeSecrets {
     if ($LASTEXITCODE -ne 0) { throw 'Public proxy runtime secret verification failed.' }
 }
 
+function Remove-PublicProxyInitContainer {
+    if (-not $PublicProxyConfigured) { return }
+
+    & docker @compose rm -f public-proxy-metrics-init | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not remove completed public-proxy-metrics-init container."
+    }
+}
+
+function Invoke-PublicProxySmokeTest {
+    if (-not $PublicProxyConfigured) { return }
+
+    $args = $compose + @(
+        "--profile", "smoke",
+        "run", "--rm", "--no-deps",
+        "public-proxy-smoke"
+    )
+    & docker @args
+    if ($LASTEXITCODE -ne 0) {
+        throw "Public proxy live fail-closed smoke test failed."
+    }
+}
+
 function Import-AvailableRuntimeSecrets {
     if (Test-Path -LiteralPath $GeminiDpapiPath -PathType Leaf) {
         Import-GeminiKey
@@ -504,6 +527,8 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
         Import-AvailableRuntimeSecrets
+        Invoke-PublicProxySmokeTest
+        Remove-PublicProxyInitContainer
     }
     'redeploy' {
         Assert-UpstreamFirecrawlPin
@@ -511,6 +536,8 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { throw "docker compose redeploy failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
         Import-AvailableRuntimeSecrets
+        Invoke-PublicProxySmokeTest
+        Remove-PublicProxyInitContainer
     }
     'down' {
         docker @compose down
