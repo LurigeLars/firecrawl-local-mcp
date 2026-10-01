@@ -5,6 +5,7 @@ import test from 'node:test';
 const compose = readFileSync(new URL('../compose.local.yaml', import.meta.url), 'utf8');
 const launcher = readFileSync(new URL('../fc.ps1', import.meta.url), 'utf8');
 const bootstrap = readFileSync(new URL('../scripts/configure_service_secrets.ps1', import.meta.url), 'utf8');
+const publicProxyBootstrap = readFileSync(new URL('../scripts/configure_public_proxy.ps1', import.meta.url), 'utf8');
 const composeDefaults = readFileSync(new URL('../compose.defaults.env', import.meta.url), 'utf8');
 const publicCompose = readFileSync(new URL('../compose.public.yaml', import.meta.url), 'utf8');
 const gateway = readFileSync(new URL('../public/gateway/gateway.mjs', import.meta.url), 'utf8');
@@ -90,6 +91,33 @@ test('migration removes only known legacy service-secret entries after DPAPI sto
   assert.match(bootstrap, /ConvertFrom-SecureString/);
   assert.match(bootstrap, /ConvertTo-SecureString/);
   assert.match(bootstrap, /LEGACY_SECRETS_ENV_REMOVED/);
+});
+
+test('public proxy credentials are DPAPI-backed and isolated from the normal Firecrawl path', () => {
+  assert.match(publicProxyBootstrap, /Read-Host .*Webshare proxy URL.*-AsSecureString/);
+  assert.match(publicProxyBootstrap, /public_proxy_server\.dpapi/);
+  assert.match(publicProxyBootstrap, /public_proxy_username\.dpapi/);
+  assert.match(publicProxyBootstrap, /public_proxy_password\.dpapi/);
+  assert.match(publicProxyBootstrap, /ConvertFrom-SecureString/);
+
+  assert.match(compose, /playwright-public-proxy-service:/);
+  assert.match(compose, /profiles:\s*\["public-proxy"\]/);
+  assert.match(compose, /PROXY_SERVER:\s*""/);
+  assert.match(compose, /PROXY_USERNAME:\s*""/);
+  assert.match(compose, /PROXY_PASSWORD:\s*""/);
+  assert.match(compose, /\/run\/firecrawl-secrets\/proxy_server/);
+  assert.match(compose, /\/run\/firecrawl-secrets\/proxy_username/);
+  assert.match(compose, /\/run\/firecrawl-secrets\/proxy_password/);
+  assert.match(compose, /playwright-router:/);
+  assert.match(compose, /PUBLIC_PROXY_HOSTS:/);
+
+  assert.match(launcher, /public_proxy_server\.dpapi/);
+  assert.match(launcher, /public_proxy_username\.dpapi/);
+  assert.match(launcher, /public_proxy_password\.dpapi/);
+  assert.match(launcher, /--profile', 'public-proxy'/);
+  assert.match(launcher, /PLAYWRIGHT_MICROSERVICE_URL = "http:\/\/playwright-router:3000\/scrape"/);
+  assert.match(launcher, /Assert-NoGlobalProxyConfiguration/);
+  assert.match(launcher, /PROXY_SERVER must remain empty in \.env/);
 });
 
 test('plaintext service-secret template is retired', () => {
