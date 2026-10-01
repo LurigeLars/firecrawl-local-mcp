@@ -62,8 +62,10 @@ are used only by a separate `public-proxy` profile:
 
 - `playwright-router` receives browser-engine requests from the Firecrawl API.
 - Non-allowlisted hosts always use the normal direct Playwright service.
-- Allowlisted public hosts are tried direct first and retry through
-  `playwright-public-proxy-service` only when the target page returns HTTP 403 or 429.
+- Allowlisted public hosts are tried direct first. On target HTTP 403/429 the router makes up to
+  three bounded attempts through `playwright-public-proxy-service`.
+- Webshare runtime traffic uses the Backbone endpoint `p.webshare.io:80` with the documented
+  `-rotate` username parameter, so each retry can receive a different exit IP from the plan's pool.
 - Requests carrying authentication/session headers fail closed before proxy routing.
 - Proxy credentials are never stored in Git, `.env`, normal container environment, or the normal
   Firecrawl/Playwright path. They are stored with Windows DPAPI and injected into tmpfs for the
@@ -78,8 +80,9 @@ Configure once:
 
 The configuration script accepts a **Webshare API key** via a secure prompt. It uses the key only
 for the bootstrap call to Webshare's direct Proxy List API, tests the returned valid proxies against
-Webshare's IP endpoint, stores only the selected proxy server/username/password under
-`%LOCALAPPDATA%\FirecrawlLocal\secrets`, and discards the API key without persisting it. This is
+Webshare's IP endpoint, and stores only proxy credentials under
+`%LOCALAPPDATA%\FirecrawlLocal\secrets`. At runtime the launcher reuses those credentials with
+Webshare's rotating Backbone endpoint; the API key itself is discarded and never persisted. This is
 intentional because Webshare API keys have full account access.
 
 The initial proxy hostname allowlist defaults to `curemydisease.com`. Extend
