@@ -36,6 +36,8 @@ jobs:
           node --check searxng/lang-proxy.mjs
           node --check llm/trim-proxy.mjs
           node --check llm/gemini-secret.test.mjs
+          node --check playwright/public-proxy-router.mjs
+          node --check playwright/public-proxy-router.test.mjs
           node --check security/service-secrets.test.mjs
           node --check security/resource-guardrails.test.mjs
           node --check security/dependency-pins.test.mjs
@@ -52,7 +54,7 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          foreach ($path in @('./fc.ps1', './scripts/configure_gemini.ps1', './scripts/configure_service_secrets.ps1')) {
+          foreach ($path in @('./fc.ps1', './scripts/configure_gemini.ps1', './scripts/configure_service_secrets.ps1', './scripts/configure_public_proxy.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
@@ -90,6 +92,10 @@ jobs:
             exit 1
           fi
 
+      - name: Run public proxy routing regression
+        shell: bash
+        run: node --test playwright/public-proxy-router.test.mjs
+
       - name: Run crawl policy regression
         shell: bash
         run: node --test public/gateway/policy-crawl.test.mjs
@@ -121,6 +127,8 @@ jobs:
           set -euo pipefail
           node --check searxng/lang-proxy.mjs
           node --check llm/trim-proxy.mjs
+          node --check playwright/public-proxy-router.mjs
+          node --check playwright/public-proxy-router.test.mjs
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
           node --check public/gateway/gateway.mjs
@@ -132,6 +140,10 @@ jobs:
       - name: Run secret isolation tests
         shell: bash
         run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
+
+      - name: Run public proxy routing regression
+        shell: bash
+        run: node --test playwright/public-proxy-router.test.mjs
 
       - name: Run crawl policy regression
         shell: bash
