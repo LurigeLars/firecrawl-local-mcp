@@ -118,7 +118,6 @@ services:
   playwright-router:
     profiles: ["public-proxy"]
     image: node:26.10.0-alpine
-    command: ["node", "/app/public-proxy-router.mjs"]
     user: node
     cpus: 0.25
     mem_limit: 128M
