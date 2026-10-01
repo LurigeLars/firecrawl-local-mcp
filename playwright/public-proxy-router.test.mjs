@@ -33,7 +33,7 @@ function fakePlaywright(handler) {
 async function post(url, body) {
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', connection: 'close' },
     body: JSON.stringify(body),
   });
   return {
