@@ -129,6 +129,7 @@ services:
       DIRECT_UPSTREAM: http://playwright-service:3000/scrape
       PROXY_UPSTREAM: http://playwright-public-proxy-service:3000/scrape
       PUBLIC_PROXY_HOSTS: ${FIRECRAWL_PUBLIC_PROXY_HOSTS:-curemydisease.com}
+      PUBLIC_PROXY_ATTEMPTS: ${FIRECRAWL_PUBLIC_PROXY_ATTEMPTS:-3}
     volumes:
       - ../playwright:/app:ro
     networks: [backend]

@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 const DEFAULT_DIRECT_UPSTREAM = process.env.DIRECT_UPSTREAM || 'http://playwright-service:3000/scrape';
 const DEFAULT_PROXY_UPSTREAM = process.env.PROXY_UPSTREAM || 'http://playwright-public-proxy-service:3000/scrape';
 const PORT = Number(process.env.PORT || 3000);
+const DEFAULT_PROXY_ATTEMPTS = Math.min(5, Math.max(1, Number(process.env.PUBLIC_PROXY_ATTEMPTS || 3)));
 const DEFAULT_PROXY_HOSTS = new Set(
   String(process.env.PUBLIC_PROXY_HOSTS || 'curemydisease.com')
     .split(',')
@@ -110,6 +111,7 @@ export function createServer({
   directUpstream = DEFAULT_DIRECT_UPSTREAM,
   proxyUpstream = DEFAULT_PROXY_UPSTREAM,
   proxyHosts = DEFAULT_PROXY_HOSTS,
+  proxyAttempts = DEFAULT_PROXY_ATTEMPTS,
 } = {}) {
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
@@ -148,9 +150,24 @@ export function createServer({
         const status = targetStatus(direct);
 
         if (classification.eligible && (status === 403 || status === 429)) {
-          const proxied = await requestJson(proxyUpstream, body);
-          console.log(`public proxy fallback host=${classification.hostname} direct_status=${status}`);
-          return sendBuffered(res, proxied, { 'x-firecrawl-public-proxy': 'used' });
+          let proxied = null;
+          let proxiedStatus = null;
+          let attempts = 0;
+
+          for (let i = 0; i < proxyAttempts; i += 1) {
+            proxied = await requestJson(proxyUpstream, body);
+            attempts += 1;
+            proxiedStatus = targetStatus(proxied);
+            if (proxiedStatus !== 403 && proxiedStatus !== 429) break;
+          }
+
+          console.log(
+            `public proxy fallback host=${classification.hostname} direct_status=${status} attempts=${attempts} final_status=${proxiedStatus ?? 'unknown'}`
+          );
+          return sendBuffered(res, proxied, {
+            'x-firecrawl-public-proxy': 'used',
+            'x-firecrawl-public-proxy-attempts': String(attempts),
+          });
         }
 
         return sendBuffered(res, direct, { 'x-firecrawl-public-proxy': 'direct' });
@@ -166,6 +183,6 @@ export function createServer({
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invokedDirectly) {
   createServer().listen(PORT, '0.0.0.0', () => {
-    console.log(`playwright public-proxy router listening on ${PORT}; proxy hosts=${[...DEFAULT_PROXY_HOSTS].join(',')}`);
+    console.log(`playwright public-proxy router listening on ${PORT}; proxy hosts=${[...DEFAULT_PROXY_HOSTS].join(',')}; attempts=${DEFAULT_PROXY_ATTEMPTS}`);
   });
 }

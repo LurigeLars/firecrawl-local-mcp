@@ -107,6 +107,75 @@ test('allowlisted public host retries through proxy only after direct 403/429', 
   assert.equal(result.headers.get('x-firecrawl-public-proxy'), 'used');
 });
 
+test('allowlisted public host retries blocked proxy exits up to the bounded attempt count', async t => {
+  let directHits = 0;
+  let proxyHits = 0;
+  const direct = fakePlaywright(body => {
+    directHits += 1;
+    return { content: '<html>blocked-direct</html>', pageStatusCode: 429, url: body.url };
+  });
+  const proxy = fakePlaywright(body => {
+    proxyHits += 1;
+    if (proxyHits < 3) {
+      return { content: '<html>blocked-proxy</html>', pageStatusCode: 429, url: body.url };
+    }
+    return { content: '<html>rotated-ok</html>', pageStatusCode: 200, url: body.url };
+  });
+  const directUrl = await listen(direct);
+  const proxyUrl = await listen(proxy);
+  const router = createServer({
+    directUpstream: directUrl,
+    proxyUpstream: proxyUrl,
+    proxyHosts: new Set(['curemydisease.com']),
+    proxyAttempts: 3,
+  });
+  const routerUrl = await listen(router);
+  t.after(() => Promise.all([
+    new Promise(r => router.close(r)),
+    new Promise(r => direct.close(r)),
+    new Promise(r => proxy.close(r)),
+  ]));
+
+  const result = await post(routerUrl, { url: 'https://curemydisease.com/upcoming-results' });
+  assert.equal(result.body.content, '<html>rotated-ok</html>');
+  assert.equal(directHits, 1);
+  assert.equal(proxyHits, 3);
+  assert.equal(result.headers.get('x-firecrawl-public-proxy'), 'used');
+  assert.equal(result.headers.get('x-firecrawl-public-proxy-attempts'), '3');
+});
+
+test('bounded proxy fallback returns the final blocked response after max attempts', async t => {
+  let proxyHits = 0;
+  const direct = fakePlaywright(body => ({
+    content: '<html>blocked-direct</html>',
+    pageStatusCode: 429,
+    url: body.url,
+  }));
+  const proxy = fakePlaywright(body => {
+    proxyHits += 1;
+    return { content: '<html>still-blocked</html>', pageStatusCode: 429, url: body.url };
+  });
+  const directUrl = await listen(direct);
+  const proxyUrl = await listen(proxy);
+  const router = createServer({
+    directUpstream: directUrl,
+    proxyUpstream: proxyUrl,
+    proxyHosts: new Set(['curemydisease.com']),
+    proxyAttempts: 2,
+  });
+  const routerUrl = await listen(router);
+  t.after(() => Promise.all([
+    new Promise(r => router.close(r)),
+    new Promise(r => direct.close(r)),
+    new Promise(r => proxy.close(r)),
+  ]));
+
+  const result = await post(routerUrl, { url: 'https://curemydisease.com/' });
+  assert.equal(result.body.pageStatusCode, 429);
+  assert.equal(proxyHits, 2);
+  assert.equal(result.headers.get('x-firecrawl-public-proxy-attempts'), '2');
+});
+
 test('allowlisted host does not spend proxy bandwidth when direct succeeds', async t => {
   let proxyHits = 0;
   const direct = fakePlaywright(body => ({

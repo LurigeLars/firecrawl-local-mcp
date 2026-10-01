@@ -141,6 +141,43 @@ function Get-DpapiSecretValue([string]$Path, [string]$Label) {
     }
 }
 
+function Get-PublicProxyRuntimeValues {
+    if (-not $PublicProxyConfigured) {
+        throw "Public proxy DPAPI configuration is not complete."
+    }
+
+    # Webshare's Backbone connection accepts the same proxy username/password and
+    # supports a "-rotate" username parameter to select a new exit IP per request.
+    # Keep the originally selected direct proxy only as bootstrap proof/metadata;
+    # runtime traffic uses the bounded rotating Backbone endpoint.
+    $storedServer = Get-DpapiSecretValue -Path $PublicProxyServerDpapiPath -Label "Public proxy server"
+    $baseUsername = Get-DpapiSecretValue -Path $PublicProxyUsernameDpapiPath -Label "Public proxy username"
+    $password = Get-DpapiSecretValue -Path $PublicProxyPasswordDpapiPath -Label "Public proxy password"
+    try {
+        if ([string]::IsNullOrWhiteSpace($storedServer)) {
+            throw "Stored public proxy server is empty."
+        }
+        $runtimeUsername = if ($baseUsername.EndsWith("-rotate", [StringComparison]::OrdinalIgnoreCase)) {
+            $baseUsername
+        }
+        else {
+            "$baseUsername-rotate"
+        }
+
+        return [ordered]@{
+            proxy_server = "http://p.webshare.io:80"
+            proxy_username = $runtimeUsername
+            proxy_password = $password
+        }
+    }
+    finally {
+        $storedServer = $null
+        $baseUsername = $null
+        $runtimeUsername = $null
+        $password = $null
+    }
+}
+
 function Invoke-DockerWithExactStdin {
     param(
         [Parameter(Mandatory)][string]$InputText,
@@ -219,19 +256,16 @@ function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
             $searxng = $null
         }
         if ($PublicProxyConfigured) {
-            $proxyServer = Get-DpapiSecretValue -Path $PublicProxyServerDpapiPath -Label "Public proxy server"
-            $proxyUsername = Get-DpapiSecretValue -Path $PublicProxyUsernameDpapiPath -Label "Public proxy username"
-            $proxyPassword = Get-DpapiSecretValue -Path $PublicProxyPasswordDpapiPath -Label "Public proxy password"
+            $proxyValues = Get-PublicProxyRuntimeValues
             try {
-                $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET = $proxyServer
-                $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET = $proxyUsername
-                $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET = $proxyPassword
+                $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET = [string]$proxyValues.proxy_server
+                $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET = [string]$proxyValues.proxy_username
+                $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET = [string]$proxyValues.proxy_password
                 $env:PLAYWRIGHT_MICROSERVICE_URL = "http://playwright-router:3000/scrape"
             }
             finally {
-                $proxyServer = $null
-                $proxyUsername = $null
-                $proxyPassword = $null
+                foreach ($key in @($proxyValues.Keys)) { $proxyValues[$key] = $null }
+                $proxyValues = $null
             }
         }
         return
@@ -411,11 +445,7 @@ function Import-PublicProxyRuntimeSecrets {
         throw 'playwright-public-proxy-service is not running.'
     }
 
-    $values = [ordered]@{
-        proxy_server = Get-DpapiSecretValue -Path $PublicProxyServerDpapiPath -Label "Public proxy server"
-        proxy_username = Get-DpapiSecretValue -Path $PublicProxyUsernameDpapiPath -Label "Public proxy username"
-        proxy_password = Get-DpapiSecretValue -Path $PublicProxyPasswordDpapiPath -Label "Public proxy password"
-    }
+    $values = Get-PublicProxyRuntimeValues
     try {
         foreach ($entry in $values.GetEnumerator()) {
             $args = $compose + @(
