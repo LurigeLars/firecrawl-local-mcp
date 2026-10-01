@@ -96,7 +96,8 @@ test('migration removes only known legacy service-secret entries after DPAPI sto
 test('public proxy credentials are DPAPI-backed and isolated from the normal Firecrawl path', () => {
   assert.match(publicProxyBootstrap, /Read-Host .*Webshare API key.*-AsSecureString/);
   assert.match(publicProxyBootstrap, /proxy\.webshare\.io\/api\/v2\/proxy\/list\/\?mode=direct/);
-  assert.match(publicProxyBootstrap, /Authorization = "Token \$apiKey"/);
+  assert.match(publicProxyBootstrap, /Invoke-RestMethod/);
+  assert.match(publicProxyBootstrap, /-Headers \$headers/);
   assert.match(publicProxyBootstrap, /ipv4\.webshare\.io/);
   assert.match(publicProxyBootstrap, /API key.*sparas inte/);
   assert.match(publicProxyBootstrap, /public_proxy_server\.dpapi/);
