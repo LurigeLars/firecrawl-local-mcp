@@ -148,6 +148,9 @@ test('public proxy live smoke test is deployment-gated and uses only dummy sessi
   assert.match(launcher, /function Invoke-PublicProxySmokeTest/);
   assert.match(launcher, /"run", "--rm", "--no-deps"/);
   assert.match(launcher, /Invoke-PublicProxySmokeTest/);
+  assert.match(launcher, /function Remove-PublicProxyInitContainer/);
+  assert.match(launcher, /rm -f public-proxy-metrics-init/);
+  assert.match(launcher, /Invoke-PublicProxySmokeTest\s*\n\s*Remove-PublicProxyInitContainer/);
 });
 
 test('plaintext service-secret template is retired', () => {
