@@ -113,6 +113,12 @@ stores request URLs, page content, headers, cookies or proxy credentials. The in
 The counters persist across router/container restarts so proxy usefulness can be measured over weeks
 without retaining browsing history. The router itself is not published on a host/public port.
 
+Every `.\fc.ps1 up` / `.\fc.ps1 redeploy` with the public-proxy profile also runs a one-shot
+live fail-closed smoke test inside the Docker backend network. It sends a dummy Cookie header to an
+allowlisted public URL and requires the router to reject it before either direct or proxy browsing.
+The smoke also verifies that `sensitive_rejected` and `requests_total` increment while
+`proxy_attempts` does not. The one-shot container is removed after the test.
+
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
 `local-mcp/stdio-proxy.mjs` wraps the exact `firecrawl-mcp` version in `public/package.json` over stdio and applies the same rules as the public gateway
