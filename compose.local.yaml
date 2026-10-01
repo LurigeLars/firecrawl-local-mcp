@@ -118,7 +118,6 @@ services:
   playwright-router:
     profiles: ["public-proxy"]
     image: node:26.10.0-alpine
-    command: ["node", "/app/public-proxy-router.mjs"]
     user: node
     cpus: 0.25
     mem_limit: 128M
@@ -130,8 +129,19 @@ services:
       PROXY_UPSTREAM: http://playwright-public-proxy-service:3000/scrape
       PUBLIC_PROXY_HOSTS: ${FIRECRAWL_PUBLIC_PROXY_HOSTS:-curemydisease.com}
       PUBLIC_PROXY_ATTEMPTS: ${FIRECRAWL_PUBLIC_PROXY_ATTEMPTS:-3}
+      PUBLIC_PROXY_METRICS_PATH: /var/lib/firecrawl-proxy/metrics.json
+    command:
+      - sh
+      - -c
+      - >-
+        while [ ! -w /var/lib/firecrawl-proxy ]; do sleep 0.05; done;
+        exec node /app/public-proxy-router.mjs
     volumes:
       - ../playwright:/app:ro
+      - public-proxy-metrics:/var/lib/firecrawl-proxy
+    post_start:
+      - command: ["sh", "-c", "chown -R node:node /var/lib/firecrawl-proxy"]
+        user: root
     networks: [backend]
     depends_on:
       - playwright-service
@@ -257,3 +267,5 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+volumes:
+  public-proxy-metrics:

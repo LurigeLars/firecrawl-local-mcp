@@ -93,6 +93,26 @@ Global upstream `PROXY_SERVER`, `PROXY_USERNAME` and `PROXY_PASSWORD` values in 
 explicitly rejected by the launcher so the direct stack cannot accidentally start routing all traffic
 through a third party.
 
+
+### Public-proxy observability
+
+The router keeps only aggregate counters in the Docker named volume `public-proxy-metrics`. It never
+stores request URLs, page content, headers, cookies or proxy credentials. The internal-only
+`GET /metrics` response reports:
+
+- `requests_total`
+- `direct_success`
+- `direct_blocked` (target HTTP 403/429)
+- `proxy_attempts`
+- `proxy_success`
+- `proxy_exhausted`
+- `sensitive_rejected`
+- `upstream_errors`
+- `total_latency_ms` and derived `avg_latency_ms`
+
+The counters persist across router/container restarts so proxy usefulness can be measured over weeks
+without retaining browsing history. The router itself is not published on a host/public port.
+
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
 `local-mcp/stdio-proxy.mjs` wraps the exact `firecrawl-mcp` version in `public/package.json` over stdio and applies the same rules as the public gateway

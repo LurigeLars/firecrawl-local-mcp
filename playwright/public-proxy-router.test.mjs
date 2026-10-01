@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 
 import { createServer } from './public-proxy-router.mjs';
 
@@ -28,6 +31,23 @@ function fakePlaywright(handler) {
       res.end(payload);
     });
   });
+}
+
+async function get(url) {
+  const response = await fetch(url, {
+    headers: { connection: 'close' },
+  });
+  return {
+    status: response.status,
+    headers: response.headers,
+    body: await response.json(),
+  };
+}
+
+function tempMetricsPath(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'firecrawl-proxy-metrics-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return path.join(dir, 'metrics.json');
 }
 
 async function post(url, body) {
@@ -174,6 +194,76 @@ test('bounded proxy fallback returns the final blocked response after max attemp
   assert.equal(result.body.pageStatusCode, 429);
   assert.equal(proxyHits, 2);
   assert.equal(result.headers.get('x-firecrawl-public-proxy-attempts'), '2');
+});
+
+test('aggregate metrics persist across router restart without URLs or credentials', async t => {
+  const metricsPath = tempMetricsPath(t);
+  let proxyHits = 0;
+
+  const direct = fakePlaywright(body => {
+    if (body.url.includes('blocked')) {
+      return { content: '<html>blocked</html>', pageStatusCode: 429, url: body.url };
+    }
+    return { content: '<html>direct-ok</html>', pageStatusCode: 200, url: body.url };
+  });
+  const proxy = fakePlaywright(body => {
+    proxyHits += 1;
+    return { content: '<html>proxy-ok</html>', pageStatusCode: 200, url: body.url };
+  });
+
+  const directUrl = await listen(direct);
+  const proxyUrl = await listen(proxy);
+  const first = createServer({
+    directUpstream: directUrl,
+    proxyUpstream: proxyUrl,
+    proxyHosts: new Set(['curemydisease.com']),
+    metricsPath,
+  });
+  const firstUrl = await listen(first);
+
+  await post(firstUrl, { url: 'https://example.com/' });
+  await post(firstUrl, { url: 'https://curemydisease.com/blocked' });
+  await post(firstUrl, {
+    url: 'https://curemydisease.com/',
+    headers: { Cookie: 'dummy=1' },
+  });
+
+  const metricsUrl = firstUrl.replace(/\/scrape$/, '/metrics');
+  const beforeRestart = await get(metricsUrl);
+  assert.equal(beforeRestart.status, 200);
+  assert.equal(beforeRestart.body.requests_total, 3);
+  assert.equal(beforeRestart.body.direct_success, 1);
+  assert.equal(beforeRestart.body.direct_blocked, 1);
+  assert.equal(beforeRestart.body.proxy_attempts, 1);
+  assert.equal(beforeRestart.body.proxy_success, 1);
+  assert.equal(beforeRestart.body.proxy_exhausted, 0);
+  assert.equal(beforeRestart.body.sensitive_rejected, 1);
+  assert.equal(proxyHits, 1);
+  assert.ok(beforeRestart.body.total_latency_ms >= 0);
+  assert.ok(beforeRestart.body.avg_latency_ms >= 0);
+
+  const persisted = fs.readFileSync(metricsPath, 'utf8');
+  assert.doesNotMatch(persisted, /example\.com|curemydisease|dummy=1|Cookie|Authorization/i);
+
+  await new Promise(r => first.close(r));
+
+  const second = createServer({
+    directUpstream: directUrl,
+    proxyUpstream: proxyUrl,
+    proxyHosts: new Set(['curemydisease.com']),
+    metricsPath,
+  });
+  const secondUrl = await listen(second);
+  const afterRestart = await get(secondUrl.replace(/\/scrape$/, '/metrics'));
+  assert.equal(afterRestart.body.requests_total, 3);
+  assert.equal(afterRestart.body.proxy_success, 1);
+  assert.equal(afterRestart.body.sensitive_rejected, 1);
+
+  t.after(() => Promise.all([
+    new Promise(r => second.close(r)),
+    new Promise(r => direct.close(r)),
+    new Promise(r => proxy.close(r)),
+  ]));
 });
 
 test('allowlisted host does not spend proxy bandwidth when direct succeeds', async t => {

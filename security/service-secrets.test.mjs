@@ -130,6 +130,14 @@ test('public proxy credentials are DPAPI-backed and isolated from the normal Fir
   assert.match(launcher, /EndsWith\("-rotate"/);
 });
 
+test('public proxy observability stores aggregate counters only in an isolated volume', () => {
+  assert.match(compose, /PUBLIC_PROXY_METRICS_PATH:\s*\/var\/lib\/firecrawl-proxy\/metrics\.json/);
+  assert.match(compose, /public-proxy-metrics:\/var\/lib\/firecrawl-proxy/);
+  assert.match(compose, /public-proxy-metrics:/);
+  assert.match(compose, /while \[ ! -w \/var\/lib\/firecrawl-proxy \]/);
+  assert.match(compose, /chown -R node:node \/var\/lib\/firecrawl-proxy/);
+});
+
 test('plaintext service-secret template is retired', () => {
   assert.equal(existsSync(new URL('../secrets.env.example', import.meta.url)), false);
 });
