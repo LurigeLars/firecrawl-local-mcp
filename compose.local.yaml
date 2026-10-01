@@ -166,6 +166,23 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  public-proxy-smoke:
+    profiles: ["smoke"]
+    image: node:26.10.0-alpine
+    user: node
+    command: ["node", "/app/public-proxy-live-smoke.mjs"]
+    environment:
+      ROUTER_URL: http://playwright-router:3000
+    volumes:
+      - ../playwright:/app:ro
+    networks: [backend]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   redis:
     image: redis:8.10.2-alpine
     security_opt:
