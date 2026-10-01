@@ -49,7 +49,7 @@ This repo holds only the local additions. Secrets and machine-specific files are
 1. Read `upstream/firecrawl.json`, then clone the exact reviewed tag from `https://github.com/firecrawl/firecrawl.git` into `firecrawl` and verify that `HEAD` equals the recorded commit.
 2. Copy `.env.example` to `.env` and `public/gateway.env.example` to `public/gateway.env`; replace deployment placeholders locally and keep the real files out of Git.
 3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and injected into per-container tmpfs only at runtime.
-4. If the isolated public-proxy fallback is wanted, run `.\scripts\configure_public_proxy.ps1`; proxy credentials use the same DPAPI namespace and never enter the direct Firecrawl path.
+4. If the isolated public-proxy fallback is wanted, create/copy a Webshare API key and run `.\scripts\configure_public_proxy.ps1`; the API key is used once and not stored, while the selected proxy credentials use the same DPAPI namespace and never enter the direct Firecrawl path.
 5. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
 6. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
 7. Install the required local model/runtime dependencies described below.
@@ -76,9 +76,11 @@ Configure once:
 .\fc.ps1 redeploy
 ```
 
-The configuration script accepts a full proxy URL such as
-`http://user:password@proxy.example:8080/` via a secure prompt and stores server, username and
-password separately under `%LOCALAPPDATA%\FirecrawlLocal\secrets`.
+The configuration script accepts a **Webshare API key** via a secure prompt. It uses the key only
+for the bootstrap call to Webshare's direct Proxy List API, tests the returned valid proxies against
+Webshare's IP endpoint, stores only the selected proxy server/username/password under
+`%LOCALAPPDATA%\FirecrawlLocal\secrets`, and discards the API key without persisting it. This is
+intentional because Webshare API keys have full account access.
 
 The initial proxy hostname allowlist defaults to `curemydisease.com`. Extend
 `FIRECRAWL_PUBLIC_PROXY_HOSTS` locally only for other **public research sites** that need the same
