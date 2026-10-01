@@ -1,9 +1,9 @@
 import http from 'node:http';
 
-const DIRECT_UPSTREAM = process.env.DIRECT_UPSTREAM || 'http://playwright-service:3000/scrape';
-const PROXY_UPSTREAM = process.env.PROXY_UPSTREAM || 'http://playwright-public-proxy-service:3000/scrape';
+const DEFAULT_DIRECT_UPSTREAM = process.env.DIRECT_UPSTREAM || 'http://playwright-service:3000/scrape';
+const DEFAULT_PROXY_UPSTREAM = process.env.PROXY_UPSTREAM || 'http://playwright-public-proxy-service:3000/scrape';
 const PORT = Number(process.env.PORT || 3000);
-const PROXY_HOSTS = new Set(
+const DEFAULT_PROXY_HOSTS = new Set(
   String(process.env.PUBLIC_PROXY_HOSTS || 'curemydisease.com')
     .split(',')
     .map(x => x.trim().toLowerCase())
@@ -19,15 +19,15 @@ const SENSITIVE_HEADERS = new Set([
   'x-access-token',
 ]);
 
-function hostnameMatchesProxyList(hostname) {
+function hostnameMatchesProxyList(hostname, proxyHosts) {
   const host = hostname.toLowerCase().replace(/\.$/, '');
-  for (const entry of PROXY_HOSTS) {
+  for (const entry of proxyHosts) {
     if (host === entry || host.endsWith('.' + entry)) return true;
   }
   return false;
 }
 
-function classifyRequest(body) {
+function classifyRequest(body, proxyHosts) {
   if (!body || typeof body !== 'object' || typeof body.url !== 'string') {
     return { error: 'body.url is required' };
   }
@@ -46,7 +46,7 @@ function classifyRequest(body) {
     return { error: 'URL credentials are not allowed' };
   }
 
-  const eligible = hostnameMatchesProxyList(url.hostname);
+  const eligible = hostnameMatchesProxyList(url.hostname, proxyHosts);
   const headerKeys = Object.keys(body.headers || {}).map(x => x.toLowerCase());
   const hasSensitiveHeaders = headerKeys.some(x => SENSITIVE_HEADERS.has(x));
 
@@ -104,7 +104,11 @@ function sendBuffered(res, upstreamResponse, extraHeaders = {}) {
   res.end(upstreamResponse.body);
 }
 
-export function createServer() {
+export function createServer({
+  directUpstream = DEFAULT_DIRECT_UPSTREAM,
+  proxyUpstream = DEFAULT_PROXY_UPSTREAM,
+  proxyHosts = DEFAULT_PROXY_HOSTS,
+} = {}) {
   return http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'content-type': 'text/plain' });
@@ -131,18 +135,18 @@ export function createServer() {
         return res.end(JSON.stringify({ error: 'invalid JSON' }));
       }
 
-      const classification = classifyRequest(body);
+      const classification = classifyRequest(body, proxyHosts);
       if (classification.error) {
         res.writeHead(400, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ error: classification.error }));
       }
 
       try {
-        const direct = await requestJson(DIRECT_UPSTREAM, body);
+        const direct = await requestJson(directUpstream, body);
         const status = targetStatus(direct);
 
         if (classification.eligible && (status === 403 || status === 429)) {
-          const proxied = await requestJson(PROXY_UPSTREAM, body);
+          const proxied = await requestJson(proxyUpstream, body);
           console.log(`public proxy fallback host=${classification.hostname} direct_status=${status}`);
           return sendBuffered(res, proxied, { 'x-firecrawl-public-proxy': 'used' });
         }
@@ -159,6 +163,6 @@ export function createServer() {
 
 if (process.env.NODE_ENV !== 'test') {
   createServer().listen(PORT, '0.0.0.0', () => {
-    console.log(`playwright public-proxy router listening on ${PORT}; proxy hosts=${[...PROXY_HOSTS].join(',')}`);
+    console.log(`playwright public-proxy router listening on ${PORT}; proxy hosts=${[...DEFAULT_PROXY_HOSTS].join(',')}`);
   });
 }
