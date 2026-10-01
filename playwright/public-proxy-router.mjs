@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { pathToFileURL } from 'node:url';
 
 const DEFAULT_DIRECT_UPSTREAM = process.env.DIRECT_UPSTREAM || 'http://playwright-service:3000/scrape';
 const DEFAULT_PROXY_UPSTREAM = process.env.PROXY_UPSTREAM || 'http://playwright-public-proxy-service:3000/scrape';
@@ -162,7 +163,8 @@ export function createServer({
   });
 }
 
-if (process.env.NODE_ENV !== 'test') {
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
   createServer().listen(PORT, '0.0.0.0', () => {
     console.log(`playwright public-proxy router listening on ${PORT}; proxy hosts=${[...DEFAULT_PROXY_HOSTS].join(',')}`);
   });
