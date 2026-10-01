@@ -7,8 +7,19 @@ if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
 $SearxngDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\searxng_secret.dpapi"
+$PublicProxyServerDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\public_proxy_server.dpapi"
+$PublicProxyUsernameDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\public_proxy_username.dpapi"
+$PublicProxyPasswordDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\public_proxy_password.dpapi"
+$publicProxySecretPaths = @($PublicProxyServerDpapiPath, $PublicProxyUsernameDpapiPath, $PublicProxyPasswordDpapiPath)
+$publicProxySecretCount = @($publicProxySecretPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count
+if ($publicProxySecretCount -notin @(0, 3)) {
+    throw "Public proxy DPAPI configuration is incomplete. Run .\scripts\configure_public_proxy.ps1 again."
+}
+$PublicProxyConfigured = ($publicProxySecretCount -eq 3)
+
 $compose = @('compose', '--project-directory', "$root\firecrawl",
     '-f', "$root\firecrawl\docker-compose.yaml", '-f', "$root\compose.local.yaml")
+if ($PublicProxyConfigured) { $compose += @('--profile', 'public-proxy') }
 $public = Test-Path "$root\public\gateway.env"
 if ($public) { $compose += @('-f', "$root\compose.public.yaml") }
 $compose += @(
@@ -69,6 +80,20 @@ function Assert-UpstreamFirecrawlPin {
     }
     if ($statusOutput.Count -ne 0) {
         throw "Upstream Firecrawl checkout contains tracked local modifications."
+    }
+}
+
+function Assert-NoGlobalProxyConfiguration {
+    $path = "$root\.env"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+    foreach ($name in @("PROXY_SERVER", "PROXY_USERNAME", "PROXY_PASSWORD")) {
+        $pattern = "^\s*" + [regex]::Escape($name) + "="
+        $line = @(Get-Content -LiteralPath $path | Where-Object { $_ -match $pattern })[0]
+        if (-not $line) { continue }
+        $value = ($line -split "=", 2)[1].Trim()
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            throw "$name must remain empty in .env. Use the isolated public-proxy DPAPI route instead."
+        }
     }
 }
 
@@ -172,6 +197,7 @@ function Test-LegacyServiceSecrets {
 
 function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
     if ($UseRealSecrets) {
+        Assert-NoGlobalProxyConfiguration
         if (
             -not (Test-Path -LiteralPath $PostgresDpapiPath -PathType Leaf) -or
             -not (Test-Path -LiteralPath $SearxngDpapiPath -PathType Leaf)
@@ -192,11 +218,32 @@ function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
             $postgres = $null
             $searxng = $null
         }
+        if ($PublicProxyConfigured) {
+            $proxyServer = Get-DpapiSecretValue -Path $PublicProxyServerDpapiPath -Label "Public proxy server"
+            $proxyUsername = Get-DpapiSecretValue -Path $PublicProxyUsernameDpapiPath -Label "Public proxy username"
+            $proxyPassword = Get-DpapiSecretValue -Path $PublicProxyPasswordDpapiPath -Label "Public proxy password"
+            try {
+                $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET = $proxyServer
+                $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET = $proxyUsername
+                $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET = $proxyPassword
+                $env:PLAYWRIGHT_MICROSERVICE_URL = "http://playwright-router:3000/scrape"
+            }
+            finally {
+                $proxyServer = $null
+                $proxyUsername = $null
+                $proxyPassword = $null
+            }
+        }
         return
     }
 
     $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"
     $env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"
+    if ($PublicProxyConfigured) {
+        $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET = "compose-config-only"
+        $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET = "compose-config-only"
+        $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET = "compose-config-only"
+    }
 }
 
 function Restore-ComposeServiceSecrets(
