@@ -403,13 +403,50 @@ function Import-GeminiKey {
     if ($LASTEXITCODE -ne 0) { throw 'Gemini key verification failed.' }
 }
 
+function Import-PublicProxyRuntimeSecrets {
+    if (-not $PublicProxyConfigured) { return }
+
+    $serviceId = (& docker @compose ps -q playwright-public-proxy-service).Trim()
+    if (-not $serviceId) {
+        throw 'playwright-public-proxy-service is not running.'
+    }
+
+    $values = [ordered]@{
+        proxy_server = Get-DpapiSecretValue -Path $PublicProxyServerDpapiPath -Label "Public proxy server"
+        proxy_username = Get-DpapiSecretValue -Path $PublicProxyUsernameDpapiPath -Label "Public proxy username"
+        proxy_password = Get-DpapiSecretValue -Path $PublicProxyPasswordDpapiPath -Label "Public proxy password"
+    }
+    try {
+        foreach ($entry in $values.GetEnumerator()) {
+            $args = $compose + @(
+                "exec", "-T", "playwright-public-proxy-service",
+                "sh", "-c",
+                "umask 077; cat > /run/firecrawl-secrets/$($entry.Key)"
+            )
+            $exitCode = Invoke-DockerWithExactStdin -InputText ([string]$entry.Value) -Arguments $args
+            if ($exitCode -ne 0) {
+                throw "Public proxy runtime secret import failed for $($entry.Key)."
+            }
+        }
+    }
+    finally {
+        foreach ($key in @($values.Keys)) { $values[$key] = $null }
+    }
+
+    & docker @compose exec -T playwright-public-proxy-service sh -c 'test -s /run/firecrawl-secrets/proxy_server && test -s /run/firecrawl-secrets/proxy_username && test -s /run/firecrawl-secrets/proxy_password'
+    if ($LASTEXITCODE -ne 0) { throw 'Public proxy runtime secret verification failed.' }
+}
+
 function Import-AvailableRuntimeSecrets {
     if (Test-Path -LiteralPath $GeminiDpapiPath -PathType Leaf) {
         Import-GeminiKey
-        return
     }
-    if (Test-LegacyGeminiKey) {
+    elseif (Test-LegacyGeminiKey) {
         throw 'Legacy GEMINI_API_KEY found in secrets.env. Run .\scripts\configure_gemini.ps1 once to migrate it to DPAPI.'
+    }
+
+    if ($PublicProxyConfigured) {
+        Import-PublicProxyRuntimeSecrets
     }
 }
 
@@ -418,6 +455,14 @@ $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
 $searxngSecretOriginal = if ($searxngSecretWasSet) { $env:FIRECRAWL_SEARXNG_SECRET_SECRET } else { $null }
+$proxyServerWasSet = Test-Path Env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET
+$proxyServerOriginal = if ($proxyServerWasSet) { $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET } else { $null }
+$proxyUsernameWasSet = Test-Path Env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET
+$proxyUsernameOriginal = if ($proxyUsernameWasSet) { $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET } else { $null }
+$proxyPasswordWasSet = Test-Path Env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET
+$proxyPasswordOriginal = if ($proxyPasswordWasSet) { $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET } else { $null }
+$playwrightUrlWasSet = Test-Path Env:PLAYWRIGHT_MICROSERVICE_URL
+$playwrightUrlOriginal = if ($playwrightUrlWasSet) { $env:PLAYWRIGHT_MICROSERVICE_URL } else { $null }
 try {
     if ($Action -in $composeActions) {
         Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy"))
@@ -501,4 +546,17 @@ finally {
         -PostgresValue $postgresSecretOriginal `
         -SearxngWasSet $searxngSecretWasSet `
         -SearxngValue $searxngSecretOriginal
+
+    foreach ($item in @(
+        @{ Name = "FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET"; WasSet = $proxyServerWasSet; Value = $proxyServerOriginal },
+        @{ Name = "FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET"; WasSet = $proxyUsernameWasSet; Value = $proxyUsernameOriginal },
+        @{ Name = "FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET"; WasSet = $proxyPasswordWasSet; Value = $proxyPasswordOriginal },
+        @{ Name = "PLAYWRIGHT_MICROSERVICE_URL"; WasSet = $playwrightUrlWasSet; Value = $playwrightUrlOriginal }
+    )) {
+        if ($item.WasSet) {
+            Set-Item -Path ("Env:" + $item.Name) -Value $item.Value
+        } else {
+            Remove-Item -Path ("Env:" + $item.Name) -ErrorAction SilentlyContinue
+        }
+    }
 }
