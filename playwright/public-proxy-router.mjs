@@ -67,6 +67,7 @@ function requestJson(upstream, body) {
       port: target.port,
       path: target.pathname + target.search,
       method: 'POST',
+      agent: false,
       headers: {
         'content-type': 'application/json',
         'content-length': String(payload.length),
