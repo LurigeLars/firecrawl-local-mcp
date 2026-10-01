@@ -22,6 +22,8 @@ function serviceBlock(name) {
 const expected = {
   api: ["cpus: 4.0", "mem_limit: 8G", "memswap_limit: 8G", "pids_limit: 512"],
   "playwright-service": ["cpus: 2.0", "mem_limit: 4G", "memswap_limit: 4G", "pids_limit: 512"],
+  "playwright-public-proxy-service": ["cpus: 1.0", "mem_limit: 2G", "memswap_limit: 2G", "pids_limit: 256"],
+  "playwright-router": ["cpus: 0.25", "mem_limit: 128M", "memswap_limit: 128M", "pids_limit: 64"],
 };
 
 for (const [service, limits] of Object.entries(expected)) {

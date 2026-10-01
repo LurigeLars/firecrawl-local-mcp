@@ -58,6 +58,92 @@ services:
         sed -i 's/const viewport = { width: 1280, height: 800 };/const viewport = { width: 1280, height: Number(process.env.VIEWPORT_HEIGHT || 800) };/' dist/api.js;
         grep -q 'process.env.VIEWPORT_HEIGHT' dist/api.js || echo 'WARNING: viewport patch not applied (upstream changed dist/api.js)' >&2;
         exec node dist/api.js
+  # Public-only browser fallback. The router always tries the normal Playwright service first.
+  # Only allowlisted public hostnames may retry through this proxy service after target HTTP 403/429.
+  # Auth/session-bearing requests fail closed and are never sent to the third-party proxy.
+  playwright-public-proxy-service:
+    profiles: ["public-proxy"]
+    build: apps/playwright-service-ts
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 2G
+    memswap_limit: 2G
+    pids_limit: 256
+    environment:
+      PORT: 3000
+      PROXY_SERVER: ""
+      PROXY_USERNAME: ""
+      PROXY_PASSWORD: ""
+      ALLOW_LOCAL_WEBHOOKS: ${ALLOW_LOCAL_WEBHOOKS:-false}
+      BLOCK_MEDIA: ${BLOCK_MEDIA:-false}
+      MAX_CONCURRENT_PAGES: ${PUBLIC_PROXY_MAX_CONCURRENT_PAGES:-2}
+      VIEWPORT_HEIGHT: ${PLAYWRIGHT_VIEWPORT_HEIGHT:-4000}
+    tmpfs:
+      - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
+    post_start:
+      - command:
+          - sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET";
+            test -n "$FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET";
+            test -n "$FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET";
+            printf '%s' "$FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET" > /run/firecrawl-secrets/proxy_server;
+            printf '%s' "$FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET" > /run/firecrawl-secrets/proxy_username;
+            printf '%s' "$FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET" > /run/firecrawl-secrets/proxy_password
+        environment:
+          FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET: ${FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET:-}
+          FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET: ${FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET:-}
+          FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET: ${FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET:-}
+    command:
+      - sh
+      - -c
+      - >-
+        while [ ! -s /run/firecrawl-secrets/proxy_server ] ||
+              [ ! -s /run/firecrawl-secrets/proxy_username ] ||
+              [ ! -s /run/firecrawl-secrets/proxy_password ]; do sleep 0.05; done;
+        export PROXY_SERVER="$(cat /run/firecrawl-secrets/proxy_server)";
+        export PROXY_USERNAME="$(cat /run/firecrawl-secrets/proxy_username)";
+        export PROXY_PASSWORD="$(cat /run/firecrawl-secrets/proxy_password)";
+        sed -i 's/const viewport = { width: 1280, height: 800 };/const viewport = { width: 1280, height: Number(process.env.VIEWPORT_HEIGHT || 800) };/' dist/api.js;
+        grep -q 'process.env.VIEWPORT_HEIGHT' dist/api.js || echo 'WARNING: viewport patch not applied (upstream changed dist/api.js)' >&2;
+        exec node dist/api.js
+    networks: [backend]
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  playwright-router:
+    profiles: ["public-proxy"]
+    image: node:26.10.0-alpine
+    command: ["node", "/app/public-proxy-router.mjs"]
+    user: node
+    cpus: 0.25
+    mem_limit: 128M
+    memswap_limit: 128M
+    pids_limit: 64
+    environment:
+      PORT: 3000
+      DIRECT_UPSTREAM: http://playwright-service:3000/scrape
+      PROXY_UPSTREAM: http://playwright-public-proxy-service:3000/scrape
+      PUBLIC_PROXY_HOSTS: ${FIRECRAWL_PUBLIC_PROXY_HOSTS:-curemydisease.com}
+    volumes:
+      - ../playwright:/app:ro
+    networks: [backend]
+    depends_on:
+      - playwright-service
+      - playwright-public-proxy-service
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   redis:
     image: redis:8.10.2-alpine
     security_opt:

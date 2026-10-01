@@ -49,10 +49,44 @@ This repo holds only the local additions. Secrets and machine-specific files are
 1. Read `upstream/firecrawl.json`, then clone the exact reviewed tag from `https://github.com/firecrawl/firecrawl.git` into `firecrawl` and verify that `HEAD` equals the recorded commit.
 2. Copy `.env.example` to `.env` and `public/gateway.env.example` to `public/gateway.env`; replace deployment placeholders locally and keep the real files out of Git.
 3. Run `.\scripts\configure_service_secrets.ps1` once. PostgreSQL and SearXNG secrets are stored with Windows DPAPI under `%LOCALAPPDATA%\FirecrawlLocal\secrets` and injected into per-container tmpfs only at runtime.
-4. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
-5. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
-6. Install the required local model/runtime dependencies described below.
-7. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
+4. If the isolated public-proxy fallback is wanted, run `.\scripts\configure_public_proxy.ps1`; proxy credentials use the same DPAPI namespace and never enter the direct Firecrawl path.
+5. If Gemini should be enabled, run `.\scripts\configure_gemini.ps1`. The API key uses the same DPAPI namespace and is injected into the LLM proxy's tmpfs runtime secret.
+6. Configure the shared Cloudflare route and Access application with your hostname only in local deployment configuration; do not commit the real hostname.
+7. Install the required local model/runtime dependencies described below.
+8. Run `.\fc.ps1 up`, then `.\fc.ps1 test`.
+
+## Isolated public-proxy fallback
+
+The normal Firecrawl API and Playwright service stay **direct**. Optional third-party proxy credentials
+are used only by a separate `public-proxy` profile:
+
+- `playwright-router` receives browser-engine requests from the Firecrawl API.
+- Non-allowlisted hosts always use the normal direct Playwright service.
+- Allowlisted public hosts are tried direct first and retry through
+  `playwright-public-proxy-service` only when the target page returns HTTP 403 or 429.
+- Requests carrying authentication/session headers fail closed before proxy routing.
+- Proxy credentials are never stored in Git, `.env`, normal container environment, or the normal
+  Firecrawl/Playwright path. They are stored with Windows DPAPI and injected into tmpfs for the
+  isolated proxy browser only.
+
+Configure once:
+
+```powershell
+.\scripts\configure_public_proxy.ps1
+.\fc.ps1 redeploy
+```
+
+The configuration script accepts a full proxy URL such as
+`http://user:password@proxy.example:8080/` via a secure prompt and stores server, username and
+password separately under `%LOCALAPPDATA%\FirecrawlLocal\secrets`.
+
+The initial proxy hostname allowlist defaults to `curemydisease.com`. Extend
+`FIRECRAWL_PUBLIC_PROXY_HOSTS` locally only for other **public research sites** that need the same
+fallback. Never add authenticated supplier or financial-service hosts.
+
+Global upstream `PROXY_SERVER`, `PROXY_USERNAME` and `PROXY_PASSWORD` values in `.env` are
+explicitly rejected by the launcher so the direct stack cannot accidentally start routing all traffic
+through a third party.
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 

@@ -7,8 +7,19 @@ if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
 $SearxngDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\searxng_secret.dpapi"
+$PublicProxyServerDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\public_proxy_server.dpapi"
+$PublicProxyUsernameDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\public_proxy_username.dpapi"
+$PublicProxyPasswordDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\public_proxy_password.dpapi"
+$publicProxySecretPaths = @($PublicProxyServerDpapiPath, $PublicProxyUsernameDpapiPath, $PublicProxyPasswordDpapiPath)
+$publicProxySecretCount = @($publicProxySecretPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count
+if ($publicProxySecretCount -notin @(0, 3)) {
+    throw "Public proxy DPAPI configuration is incomplete. Run .\scripts\configure_public_proxy.ps1 again."
+}
+$PublicProxyConfigured = ($publicProxySecretCount -eq 3)
+
 $compose = @('compose', '--project-directory', "$root\firecrawl",
     '-f', "$root\firecrawl\docker-compose.yaml", '-f', "$root\compose.local.yaml")
+if ($PublicProxyConfigured) { $compose += @('--profile', 'public-proxy') }
 $public = Test-Path "$root\public\gateway.env"
 if ($public) { $compose += @('-f', "$root\compose.public.yaml") }
 $compose += @(
@@ -69,6 +80,20 @@ function Assert-UpstreamFirecrawlPin {
     }
     if ($statusOutput.Count -ne 0) {
         throw "Upstream Firecrawl checkout contains tracked local modifications."
+    }
+}
+
+function Assert-NoGlobalProxyConfiguration {
+    $path = "$root\.env"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+    foreach ($name in @("PROXY_SERVER", "PROXY_USERNAME", "PROXY_PASSWORD")) {
+        $pattern = "^\s*" + [regex]::Escape($name) + "="
+        $line = @(Get-Content -LiteralPath $path | Where-Object { $_ -match $pattern })[0]
+        if (-not $line) { continue }
+        $value = ($line -split "=", 2)[1].Trim()
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            throw "$name must remain empty in .env. Use the isolated public-proxy DPAPI route instead."
+        }
     }
 }
 
@@ -172,6 +197,7 @@ function Test-LegacyServiceSecrets {
 
 function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
     if ($UseRealSecrets) {
+        Assert-NoGlobalProxyConfiguration
         if (
             -not (Test-Path -LiteralPath $PostgresDpapiPath -PathType Leaf) -or
             -not (Test-Path -LiteralPath $SearxngDpapiPath -PathType Leaf)
@@ -192,11 +218,32 @@ function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
             $postgres = $null
             $searxng = $null
         }
+        if ($PublicProxyConfigured) {
+            $proxyServer = Get-DpapiSecretValue -Path $PublicProxyServerDpapiPath -Label "Public proxy server"
+            $proxyUsername = Get-DpapiSecretValue -Path $PublicProxyUsernameDpapiPath -Label "Public proxy username"
+            $proxyPassword = Get-DpapiSecretValue -Path $PublicProxyPasswordDpapiPath -Label "Public proxy password"
+            try {
+                $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET = $proxyServer
+                $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET = $proxyUsername
+                $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET = $proxyPassword
+                $env:PLAYWRIGHT_MICROSERVICE_URL = "http://playwright-router:3000/scrape"
+            }
+            finally {
+                $proxyServer = $null
+                $proxyUsername = $null
+                $proxyPassword = $null
+            }
+        }
         return
     }
 
     $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"
     $env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"
+    if ($PublicProxyConfigured) {
+        $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET = "compose-config-only"
+        $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET = "compose-config-only"
+        $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET = "compose-config-only"
+    }
 }
 
 function Restore-ComposeServiceSecrets(
@@ -356,13 +403,50 @@ function Import-GeminiKey {
     if ($LASTEXITCODE -ne 0) { throw 'Gemini key verification failed.' }
 }
 
+function Import-PublicProxyRuntimeSecrets {
+    if (-not $PublicProxyConfigured) { return }
+
+    $serviceId = (& docker @compose ps -q playwright-public-proxy-service).Trim()
+    if (-not $serviceId) {
+        throw 'playwright-public-proxy-service is not running.'
+    }
+
+    $values = [ordered]@{
+        proxy_server = Get-DpapiSecretValue -Path $PublicProxyServerDpapiPath -Label "Public proxy server"
+        proxy_username = Get-DpapiSecretValue -Path $PublicProxyUsernameDpapiPath -Label "Public proxy username"
+        proxy_password = Get-DpapiSecretValue -Path $PublicProxyPasswordDpapiPath -Label "Public proxy password"
+    }
+    try {
+        foreach ($entry in $values.GetEnumerator()) {
+            $args = $compose + @(
+                "exec", "-T", "playwright-public-proxy-service",
+                "sh", "-c",
+                "umask 077; cat > /run/firecrawl-secrets/$($entry.Key)"
+            )
+            $exitCode = Invoke-DockerWithExactStdin -InputText ([string]$entry.Value) -Arguments $args
+            if ($exitCode -ne 0) {
+                throw "Public proxy runtime secret import failed for $($entry.Key)."
+            }
+        }
+    }
+    finally {
+        foreach ($key in @($values.Keys)) { $values[$key] = $null }
+    }
+
+    & docker @compose exec -T playwright-public-proxy-service sh -c 'test -s /run/firecrawl-secrets/proxy_server && test -s /run/firecrawl-secrets/proxy_username && test -s /run/firecrawl-secrets/proxy_password'
+    if ($LASTEXITCODE -ne 0) { throw 'Public proxy runtime secret verification failed.' }
+}
+
 function Import-AvailableRuntimeSecrets {
     if (Test-Path -LiteralPath $GeminiDpapiPath -PathType Leaf) {
         Import-GeminiKey
-        return
     }
-    if (Test-LegacyGeminiKey) {
+    elseif (Test-LegacyGeminiKey) {
         throw 'Legacy GEMINI_API_KEY found in secrets.env. Run .\scripts\configure_gemini.ps1 once to migrate it to DPAPI.'
+    }
+
+    if ($PublicProxyConfigured) {
+        Import-PublicProxyRuntimeSecrets
     }
 }
 
@@ -371,6 +455,14 @@ $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
 $searxngSecretOriginal = if ($searxngSecretWasSet) { $env:FIRECRAWL_SEARXNG_SECRET_SECRET } else { $null }
+$proxyServerWasSet = Test-Path Env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET
+$proxyServerOriginal = if ($proxyServerWasSet) { $env:FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET } else { $null }
+$proxyUsernameWasSet = Test-Path Env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET
+$proxyUsernameOriginal = if ($proxyUsernameWasSet) { $env:FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET } else { $null }
+$proxyPasswordWasSet = Test-Path Env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET
+$proxyPasswordOriginal = if ($proxyPasswordWasSet) { $env:FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET } else { $null }
+$playwrightUrlWasSet = Test-Path Env:PLAYWRIGHT_MICROSERVICE_URL
+$playwrightUrlOriginal = if ($playwrightUrlWasSet) { $env:PLAYWRIGHT_MICROSERVICE_URL } else { $null }
 try {
     if ($Action -in $composeActions) {
         Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy"))
@@ -454,4 +546,17 @@ finally {
         -PostgresValue $postgresSecretOriginal `
         -SearxngWasSet $searxngSecretWasSet `
         -SearxngValue $searxngSecretOriginal
+
+    foreach ($item in @(
+        @{ Name = "FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET"; WasSet = $proxyServerWasSet; Value = $proxyServerOriginal },
+        @{ Name = "FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET"; WasSet = $proxyUsernameWasSet; Value = $proxyUsernameOriginal },
+        @{ Name = "FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET"; WasSet = $proxyPasswordWasSet; Value = $proxyPasswordOriginal },
+        @{ Name = "PLAYWRIGHT_MICROSERVICE_URL"; WasSet = $playwrightUrlWasSet; Value = $playwrightUrlOriginal }
+    )) {
+        if ($item.WasSet) {
+            Set-Item -Path ("Env:" + $item.Name) -Value $item.Value
+        } else {
+            Remove-Item -Path ("Env:" + $item.Name) -ErrorAction SilentlyContinue
+        }
+    }
 }
