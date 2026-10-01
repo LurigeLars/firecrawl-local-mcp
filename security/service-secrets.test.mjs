@@ -141,6 +141,15 @@ test('public proxy observability stores aggregate counters only in an isolated v
   assert.match(compose, /playwright-router:[\s\S]*?user:\s+node/);
 });
 
+test('public proxy live smoke test is deployment-gated and uses only dummy session data', () => {
+  assert.match(compose, /public-proxy-smoke:/);
+  assert.match(compose, /profiles:\s*\["smoke"\]/);
+  assert.match(compose, /public-proxy-live-smoke\.mjs/);
+  assert.match(launcher, /function Invoke-PublicProxySmokeTest/);
+  assert.match(launcher, /"run", "--rm", "--no-deps"/);
+  assert.match(launcher, /Invoke-PublicProxySmokeTest/);
+});
+
 test('plaintext service-secret template is retired', () => {
   assert.equal(existsSync(new URL('../secrets.env.example', import.meta.url)), false);
 });
