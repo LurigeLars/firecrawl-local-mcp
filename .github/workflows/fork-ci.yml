@@ -33,6 +33,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node --check browser/safety.mjs
+          node --check browser/service.mjs
+          node --check browser/safety.test.mjs
+          node --check browser/config.test.mjs
+          node --check public/gateway/browser-tools.mjs
+          node --check public/gateway/browser-tools.test.mjs
           node --check searxng/lang-proxy.mjs
           node --check llm/trim-proxy.mjs
           node --check llm/gemini-secret.test.mjs
@@ -93,6 +99,10 @@ jobs:
             exit 1
           fi
 
+      - name: Run browser security regression
+        shell: bash
+        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs
+
       - name: Run public proxy routing regression
         shell: bash
         run: node --test playwright/public-proxy-router.test.mjs
@@ -126,6 +136,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node --check browser/safety.mjs
+          node --check browser/service.mjs
+          node --check browser/safety.test.mjs
+          node --check browser/config.test.mjs
+          node --check public/gateway/browser-tools.mjs
+          node --check public/gateway/browser-tools.test.mjs
           node --check searxng/lang-proxy.mjs
           node --check llm/trim-proxy.mjs
           node --check playwright/public-proxy-router.mjs
@@ -142,6 +158,10 @@ jobs:
       - name: Run secret isolation tests
         shell: bash
         run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
+
+      - name: Run browser security regression
+        shell: bash
+        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs
 
       - name: Run public proxy routing regression
         shell: bash
