@@ -46,6 +46,9 @@ test('browser implementation keeps network evidence metadata-only', () => {
   assert.match(service, /redactUrl\(request\.url\(\)\)/);
   assert.match(service, /acceptDownloads:\s*false/);
   assert.match(service, /clearPermissions/);
+  assert.match(service, /MAX_URL_CHARS = 8192/);
+  assert.match(service, /MAX_SCREENSHOT_BYTES = 4 \* 1024 \* 1024/);
+  assert.match(service, /fullPage: false/);
 });
 
 test('generic browser contains no supplier-specific session policy', () => {
@@ -56,7 +59,7 @@ test('generic browser contains no supplier-specific session policy', () => {
 });
 
 test('first browser surface has no arbitrary code or form-interaction tool', () => {
-  for (const forbidden of ['firecrawl_browser_evaluate', 'firecrawl_browser_click', 'firecrawl_browser_type', 'firecrawl_browser_upload']) {
+  for (const forbidden of ['firecrawl_browser_evaluate', 'firecrawl_browser_click', 'firecrawl_browser_type', 'firecrawl_browser_upload', 'fullPage']) {
     assert.equal(tools.includes(forbidden), false);
   }
   assert.match(tools, /firecrawl_browser_snapshot/);
