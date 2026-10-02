@@ -1,6 +1,6 @@
 {
   "name": "firecrawl-mcp",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Skills for a self-hosted Firecrawl instance (the firecrawl-mcp MCP server is configured separately at user scope).",
   "author": {
     "name": "firecrawl-local contributors"
