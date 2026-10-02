@@ -58,3 +58,17 @@ test('browser adapter fails closed for malformed session IDs before network acce
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /invalid browser id/);
 });
+
+
+test('browser adapter rejects malformed tab IDs before network access', async t => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  let called = false;
+  globalThis.fetch = async () => { called = true; throw new Error('should not run'); };
+  const result = await callBrowserTool('http://browser:3010', 'firecrawl_browser_network', {
+    sessionId: 'browser_a1', tabId: '../bad',
+  });
+  assert.equal(called, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /invalid tab id/);
+});
