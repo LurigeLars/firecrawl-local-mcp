@@ -39,7 +39,7 @@ check('custom instructions served', instr.includes('self-hosted Firecrawl') && i
 
 const list = await rpc('tools/list', {}, 2);
 const names = list.json?.result?.tools?.map(t => t.name) ?? [];
-check('tools/list filtered', names.length > 0 && !names.includes('firecrawl_parse'), names.join(','));
+check('tools/list filtered', names.length > 0 && names.includes('firecrawl_browser_network') && !names.includes('firecrawl_parse'), names.join(','));
 
 const parse = await rpc('tools/call', { name: 'firecrawl_parse', arguments: { filePath: '/etc/passwd' } }, 3);
 check('firecrawl_parse blocked', !!parse.json?.error, JSON.stringify(parse.json).slice(0, 120));
