@@ -26,7 +26,12 @@ test('browser sidecar is loopback-only and isolated from Firecrawl backend', () 
   assert.match(block, /read_only:\s*true/);
   assert.match(block, /cap_drop:\s*\n\s+- ALL/);
   assert.match(block, /no-new-privileges:true/);
-  assert.match(localCompose, /browser_runtime:\s*\n\s+driver:\s+bridge/);
+  assert.match(localCompose, /browser_runtime:\s*\n\s+driver:\s+bridge\s*\n\s+enable_ipv6:\s*true/);
+});
+
+test('ordinary Firecrawl Playwright shares the hardened dual-stack browser egress network', () => {
+  const block = serviceBlock(localCompose, 'playwright-service');
+  assert.match(block, /networks:\s*\[backend, browser_runtime\]/);
 });
 
 test('public gateway reaches browser only through dedicated internal edge network', () => {
