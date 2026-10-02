@@ -122,8 +122,7 @@ The smoke also verifies that `sensitive_rejected` and `requests_total` increment
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
 `local-mcp/stdio-proxy.mjs` wraps the exact `firecrawl-mcp` version in `public/package.json` over stdio and applies the same rules as the public gateway
-(`public/gateway/policy.mjs`): only the 5 working tools are listed/callable (tool definitions ~3.9k instead of ~10.6k
-tokens), `parse` and unsupported formats are refused, the server instructions come from
+(`public/gateway/policy.mjs`). It exposes the five bounded Firecrawl tools plus nine local ephemeral-browser tools; `parse` and unsupported Firecrawl formats are refused, the server instructions come from
 `public/gateway/instructions.md`, and scrapes that only ask for `query`/`json`/`summary` drop the page metadata
 (a query answer is ~60 tokens instead of ~570). Markdown/html/links results keep their metadata.
 Test: `node local-mcp/test-proxy.mjs` (stack must be running).
@@ -137,9 +136,26 @@ MCP registration (user scope, done once):
 claude mcp add-json firecrawl-mcp -s user '{"type":"stdio","command":"node","args":["<repo-path>/local-mcp/stdio-proxy.mjs"],"env":{"FIRECRAWL_API_URL":"http://127.0.0.1:3002"}}'
 ```
 
+## Ephemeral stateful research browser
+
+`browser-session-service` is a separate local Playwright/Chromium sidecar for tasks that need page state or request-level debugging rather than one-shot scraping. It reuses the reviewed Playwright image from the pinned upstream Firecrawl checkout but does not modify or vendor upstream Firecrawl source.
+
+The browser surface is intentionally narrow: `firecrawl_browser_open`, `firecrawl_browser_list`, `firecrawl_browser_navigate`, `firecrawl_browser_tabs`, `firecrawl_browser_snapshot`, `firecrawl_browser_network`, `firecrawl_browser_console`, `firecrawl_browser_screenshot`, and `firecrawl_browser_close`. There is no arbitrary JavaScript/code-evaluation tool and no click/type/form-login API in this first version.
+
+Security boundary:
+
+- sessions are ephemeral browser contexts with no persistent profile and no imported credentials;
+- only public HTTP(S) destinations are accepted; local/private IP space and credential-bearing URLs fail closed;
+- subresource requests are checked again in the browser service, and the container is isolated from the Firecrawl backend on its own `browser_runtime` network;
+- network output never includes headers, cookies, or request/response bodies; credential-like URL query values are redacted;
+- downloads are cancelled, permissions are cleared, and session/tab counts plus TTL/inactivity limits are bounded;
+- the service publishes only a loopback host port (`127.0.0.1:3010` by default) for local stdio clients. ChatGPT reaches it only through the Access-protected gateway over an internal `browser_edge` network.
+
+This generic browser must not absorb authenticated supplier behavior. Supplier-specific sessions, URL rules, robots/pacing decisions, customer credentials and customer-price collection remain in the owning application (currently Inköpsplattformen).
+
 ## Public access for ChatGPT
 
-`compose.public.yaml` adds two containers (none publishes a host port):
+`compose.public.yaml` adds the `mcp` and `gateway` containers and attaches the existing local `browser-session-service` to a dedicated internal gateway network. The browser service's only host publication comes from `compose.local.yaml` and is loopback-only.
 `mcp` (the exact `firecrawl-mcp` version declared in `public/package.json`, in HTTP mode) → `gateway` (`public/gateway/gateway.mjs` + `instructions.md`).
 The host-level `mcp-cloudflared` container provides the shared tunnel and reaches this stack through the
 `firecrawl-gateway:8080` alias. `fc.ps1` includes the public compose overlay when `public/gateway.env` exists.
@@ -154,7 +170,7 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
 - Address: the public endpoint is supplied only through deployment-local configuration; `.\fc.ps1 url` prints the configured endpoint.
   Anything else returns 404.
 - Deployment identifiers are local-only and must stay out of Git. `fc.ps1` removes any legacy `GATEWAY_SECRET` entry from the ignored `public/gateway.env` during startup.
-- Gateway: the Firecrawl surface is limited to scrape/map/search/crawl/check_crawl_status; `firecrawl_parse` is blocked because it can read arbitrary local files in this mode. Scrape/crawl requests asking for screenshot, branding, audio, or browser `actions` are rejected immediately because this self-hosted instance cannot serve them. The gateway defaults to 120 requests/min per caller IP (`RATE_PER_MIN`) with a 256 KB request cap.
+- Gateway: the upstream Firecrawl surface is limited to scrape/map/search/crawl/check_crawl_status; `firecrawl_parse` is blocked because it can read arbitrary local files in this mode. The gateway additionally injects the bounded local `firecrawl_browser_*` tools and dispatches them only to the isolated browser sidecar. Firecrawl scrape/crawl requests asking for screenshot, branding, audio, or upstream browser `actions` are still rejected. The gateway defaults to 120 requests/min per caller IP (`RATE_PER_MIN`) with a 256 KB request cap.
 - Server instructions: the gateway replaces the MCP `initialize` instructions with `public/gateway/instructions.md`
   (read on every connect, no restart needed). ChatGPT picks them up when the connector is refreshed ("Uppdatera").
   Keep it in line with the `firecrawl-mcp` core skill.
@@ -230,7 +246,7 @@ Benchmark: `llm/run-benchmark.ps1` (switches `MODEL_NAME`, scores 4 pages agains
 ISC-licensed workflow skills. The local plugin is **skills only**; each host gets the tools separately:
 
 - Claude Code: user-scope MCP server `firecrawl-mcp` (stdio, local). Plugin: `claude plugin install firecrawl-mcp@firecrawl-local`.
-- Codex: `[mcp_servers.firecrawl_mcp]` in `~/.codex/config.toml` (stdio via `local-mcp/stdio-proxy.mjs`, 5 tools, auto-approve), added by hand
+- Codex: `[mcp_servers.firecrawl_mcp]` in `~/.codex/config.toml` (stdio via `local-mcp/stdio-proxy.mjs`, bounded Firecrawl + browser tools, auto-approve), added by hand
   (`codex mcp add` from Git Bash mangles `/d /s /c` and rewrites the file). Plugin: `codex plugin add firecrawl-mcp@firecrawl-local`.
   Neither host goes through Cloudflare or needs a login.
 - ChatGPT web: tools come from the developer app "Local-Firecrawl" (OAuth). Skills are uploaded as a zip under
@@ -255,9 +271,7 @@ Notes
 - Model variants in Ollama carry `num_ctx 16384` and `num_predict 1536` (stops runaway generations that otherwise hit
   the 300 s MCP timeout).
 - Docker Desktop must be running; containers restart automatically with it.
-- Verified not available self-hosted: agent ("Agent beta is not enabled"), interact/browser (needs a closed
-  `BROWSER_SERVICE_URL`), monitor (needs Firecrawl's account database), research/developer indexes (404), branding and
-  screenshot (need fire-engine). `firecrawl_extract` is deprecated in the MCP; use scrape with the json format.
+- Upstream Firecrawl agent/interact remains unavailable in this self-hosted stack, but the wrapper now provides its own bounded ephemeral browser sidecar for stateful navigation, snapshots, sanitized network/console inspection and screenshots. Monitor still needs Firecrawl's account database; research/developer indexes remain unavailable; Firecrawl branding/screenshot scrape formats still need fire-engine. `firecrawl_extract` is deprecated in the MCP; use scrape with the json format.
 - Upgrade: tag the current images for rollback (`docker tag firecrawl-api:latest firecrawl-api:<old>-backup`, same for
   `firecrawl-playwright-service` and `firecrawl-nuq-postgres`), then
   `git -C firecrawl fetch --depth 1 origin tag vX.Y.Z && git -C firecrawl checkout vX.Y.Z` and `.\fc.ps1 up`.
