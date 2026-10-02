@@ -13,6 +13,8 @@ const BROWSER_IDLE_MS = boundedInt(process.env.BROWSER_PROCESS_IDLE_MS, 60_000, 
 const NAVIGATION_TIMEOUT_MS = boundedInt(process.env.BROWSER_NAVIGATION_TIMEOUT_MS, 30_000, 1_000, 120_000);
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_LOG_ENTRIES = 1000;
+const MAX_URL_CHARS = 8192;
+const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
 const SAFE_WAIT_UNTIL = new Set(['load', 'domcontentloaded', 'networkidle']);
 
 const sessions = new Map();
@@ -118,6 +120,7 @@ function requireTab(session, requestedTabId) {
 }
 
 async function safeTargetReason(raw) {
+  if (typeof raw !== 'string' || raw.length < 1 || raw.length > MAX_URL_CHARS) return 'A valid public HTTP(S) URL is required.';
   let parsed;
   try { parsed = new URL(raw); } catch { return 'A valid public HTTP(S) URL is required.'; }
   const host = parsed.hostname.toLowerCase();
@@ -345,7 +348,8 @@ function boundedLog(session, collection, query) {
 async function screenshotSession(sessionId, body) {
   const session = requireSession(sessionId);
   const { tabId, page } = requireTab(session, body.tabId);
-  const data = await page.screenshot({ type: 'png', fullPage: body.fullPage === true });
+  const data = await page.screenshot({ type: 'png', fullPage: false });
+  if (data.length > MAX_SCREENSHOT_BYTES) throw Object.assign(new Error('screenshot exceeds size limit'), { statusCode: 413 });
   touch(session);
   return {
     sessionId: session.id,
