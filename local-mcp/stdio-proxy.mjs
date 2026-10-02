@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import {
   parseAllowedTools, checkRequest, urlSafetyReason, wantsCompactResult, rememberCrawlRequest, rewriteResponse, rpcError, rpcToolError,
 } from '../public/gateway/policy.mjs';
+import { BROWSER_TOOL_NAMES, appendBrowserTools, callBrowserTool, isBrowserTool } from '../public/gateway/browser-tools.mjs';
 
 const manifest = JSON.parse(readFileSync(new URL('../public/package.json', import.meta.url), 'utf8'));
 const mcpVersion = String(manifest?.dependencies?.['firecrawl-mcp'] ?? '');
@@ -17,7 +18,9 @@ if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(mcpVersion)) {
 }
 const mcpSpec = `firecrawl-mcp@${mcpVersion}`;
 
-const allowedTools = parseAllowedTools(process.env.ALLOWED_TOOLS);
+const DEFAULT_LOCAL_TOOLS = `firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,${BROWSER_TOOL_NAMES.join(',')}`;
+const allowedTools = parseAllowedTools(process.env.ALLOWED_TOOLS ?? DEFAULT_LOCAL_TOOLS);
+const browserServiceUrl = process.env.BROWSER_SERVICE_URL ?? 'http://127.0.0.1:3010';
 const compactIds = new Set();
 const crawlRequests = new Map();
 const ctx = { allowedTools, compactIds, crawlRequests };
@@ -35,7 +38,18 @@ async function handleClientLine(line) {
   if (!line.trim()) return;
   let msg;
   try { msg = JSON.parse(line); } catch { child.stdin.write(line + '\n'); return; }
-  for (const m of [msg].flat()) {
+  const messages = [msg].flat();
+  const browserCalls = messages.filter(m => m?.method === 'tools/call' && isBrowserTool(m.params?.name));
+  if (browserCalls.length) {
+    if (messages.length !== 1) return toClient(rpcError(browserCalls[0]?.id, 'Browser tools cannot be batched with other JSON-RPC messages.'));
+    const m = browserCalls[0];
+    const verdict = checkRequest(m, allowedTools);
+    if (verdict.error) return toClient(rpcError(m.id, verdict.error));
+    if (verdict.toolError) return toClient(rpcToolError(m.id, verdict.toolError));
+    const result = await callBrowserTool(browserServiceUrl, m.params?.name, m.params?.arguments ?? {});
+    return toClient({ jsonrpc: '2.0', id: m.id ?? null, result });
+  }
+  for (const m of messages) {
     const verdict = checkRequest(m, allowedTools);
     if (verdict.error) return toClient(rpcError(m.id, verdict.error));
     if (verdict.toolError) return toClient(rpcToolError(m.id, verdict.toolError));
@@ -62,7 +76,7 @@ readline.createInterface({ input: child.stdout }).on('line', line => {
   let msg;
   try { msg = JSON.parse(line); } catch { process.stdout.write(line + '\n'); return; }
   const out = [msg].flat().map(m => {
-    const rewritten = rewriteResponse(m, ctx);
+    const rewritten = appendBrowserTools(rewriteResponse(m, ctx), allowedTools);
     if (m?.id !== undefined && (m.result !== undefined || m.error !== undefined)) compactIds.delete(m.id);
     return rewritten;
   });

@@ -1,6 +1,6 @@
 {
   "name": "firecrawl-mcp",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Web search, scraping, crawling, and structured extraction through a self-hosted Firecrawl instance, with research, SEO, market, company, competitor, shopping, knowledge-base, and design-extraction workflows.",
   "author": {
     "name": "firecrawl-local contributors"

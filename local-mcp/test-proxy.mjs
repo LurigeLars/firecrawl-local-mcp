@@ -28,7 +28,10 @@ check('custom instructions', (init.result?.instructions ?? '').includes('self-ho
 
 const list = await rpc('tools/list', {});
 const names = (list.result?.tools ?? []).map(t => t.name);
-check('only 5 tools listed', names.length === 5 && !names.includes('firecrawl_parse'), `${names.length}: ~${tokens(JSON.stringify(list.result.tools))} tokens`);
+check('bounded tools listed', names.length === 14 && names.includes('firecrawl_browser_network') && !names.includes('firecrawl_parse'), `${names.length}: ~${tokens(JSON.stringify(list.result.tools))} tokens`);
+
+const browsers = await rpc('tools/call', { name: 'firecrawl_browser_list', arguments: {} });
+check('browser sidecar reachable', browsers.result && !browsers.result.isError, browsers.result?.content?.[0]?.text?.slice(0, 120));
 
 const parse = await rpc('tools/call', { name: 'firecrawl_parse', arguments: { filePath: 'C:/example/blocked.txt' } });
 check('parse blocked', !!parse.error, parse.error?.message);

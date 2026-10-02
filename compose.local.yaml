@@ -58,6 +58,42 @@ services:
         sed -i 's/const viewport = { width: 1280, height: 800 };/const viewport = { width: 1280, height: Number(process.env.VIEWPORT_HEIGHT || 800) };/' dist/api.js;
         grep -q 'process.env.VIEWPORT_HEIGHT' dist/api.js || echo 'WARNING: viewport patch not applied (upstream changed dist/api.js)' >&2;
         exec node dist/api.js
+  # Ephemeral stateful research browser. This is intentionally separate from
+  # Firecrawl's one-shot Playwright scraper and from authenticated supplier sessions.
+  # The service accepts only public HTTP(S) targets, keeps no persistent profile,
+  # redacts network output and is reachable from the host on loopback only.
+  browser-session-service:
+    build: apps/playwright-service-ts
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 2G
+    memswap_limit: 2G
+    pids_limit: 384
+    shm_size: 512m
+    environment:
+      PORT: "3010"
+      HOST: "0.0.0.0"
+      HOME: /tmp
+      BROWSER_MAX_SESSIONS: ${BROWSER_MAX_SESSIONS:-2}
+      BROWSER_MAX_TABS_PER_SESSION: ${BROWSER_MAX_TABS_PER_SESSION:-3}
+      BROWSER_SESSION_TTL_MS: ${BROWSER_SESSION_TTL_MS:-600000}
+      BROWSER_SESSION_IDLE_MS: ${BROWSER_SESSION_IDLE_MS:-300000}
+      BROWSER_PROCESS_IDLE_MS: ${BROWSER_PROCESS_IDLE_MS:-60000}
+      BROWSER_NAVIGATION_TIMEOUT_MS: ${BROWSER_NAVIGATION_TIMEOUT_MS:-30000}
+    command: ["node", "local-browser/service.mjs"]
+    volumes:
+      - ../browser:/usr/src/app/local-browser:ro
+    ports:
+      - "127.0.0.1:${BROWSER_SESSION_HOST_PORT:-3010}:3010"
+    networks: [browser_runtime]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
   # Public-only browser fallback. The router always tries the normal Playwright service first.
   # Only allowlisted public hostnames may retry through this proxy service after target HTTP 403/429.
   # Auth/session-bearing requests fail closed and are never sent to the third-party proxy.
@@ -294,6 +330,10 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+networks:
+  browser_runtime:
+    driver: bridge
 
 volumes:
   public-proxy-metrics:

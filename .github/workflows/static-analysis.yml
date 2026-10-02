@@ -10,6 +10,8 @@ on:
       - "**/*.sh"
       - "public/gateway/**"
       - "local-mcp/**"
+      - "browser/**"
+      - "compose*.yaml"
       - "**/Dockerfile"
       - "**/Dockerfile.*"
       - ".github/workflows/**"
@@ -48,8 +50,8 @@ jobs:
       - name: Lint GitHub Actions workflows
         run: /tmp/actionlint -color
 
-      - name: Run Firecrawl gateway policy tests
-        run: node --test public/gateway/policy-ssrf.test.mjs
+      - name: Run Firecrawl gateway and browser policy tests
+        run: node --test public/gateway/policy-ssrf.test.mjs browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs
 
       - name: Enforce immutable action pins
         shell: bash
