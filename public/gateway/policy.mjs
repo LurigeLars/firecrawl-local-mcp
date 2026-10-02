@@ -290,6 +290,47 @@ export function guardToolResult(result) {
   };
 }
 
+const TOOL_DESCRIPTION_OVERRIDES = Object.freeze({
+  firecrawl_search: 'Search the public web. Use small limits; optionally extract bounded query/json/summary fields from a few hits.',
+  firecrawl_scrape: 'Scrape one public URL. Prefer query/json/summary for targeted answers; use markdown/html/links only when page content is actually needed.',
+  firecrawl_map: 'Discover URLs on one public site. Use search/limit to narrow large sites before scraping.',
+  firecrawl_crawl: 'Run one explicitly bounded crawl. limit and maxConcurrency are required; prefer discovery first, then targeted scrape/query.',
+  firecrawl_check_crawl_status: 'Read one crawl job status/result page. Large results are response-budget guarded; follow bounded pagination when present.',
+});
+
+function compactSchemaText(value, maxChars = 120) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxChars) return text;
+  const sentence = text.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim();
+  if (sentence && sentence.length <= maxChars) return sentence;
+  return text.slice(0, Math.max(1, maxChars - 1)).trimEnd() + '…';
+}
+
+function compactSchemaDescriptions(value) {
+  if (Array.isArray(value)) return value.map(compactSchemaDescriptions);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if ((key === 'description' || key === 'title') && typeof item === 'string') {
+      out[key] = compactSchemaText(item, key === 'description' ? 120 : 80);
+    } else {
+      out[key] = compactSchemaDescriptions(item);
+    }
+  }
+  return out;
+}
+
+export function compactToolDefinition(tool) {
+  if (!tool || typeof tool !== 'object') return tool;
+  const out = structuredClone(tool);
+  const override = TOOL_DESCRIPTION_OVERRIDES[out.name];
+  if (override) out.description = override;
+  else if (typeof out.description === 'string') out.description = compactSchemaText(out.description, 220);
+  if (out.inputSchema) out.inputSchema = compactSchemaDescriptions(out.inputSchema);
+  if (out.outputSchema) out.outputSchema = compactSchemaDescriptions(out.outputSchema);
+  return out;
+}
+
 // Applies tool filtering, instructions and compaction to one JSON-RPC response.
 // `compactIds` holds the ids of tools/call requests whose results may be compacted.
 function constrainToolSchema(tool) {
@@ -306,7 +347,10 @@ function constrainToolSchema(tool) {
 
 export function rewriteResponse(msg, { allowedTools, compactIds, crawlRequests }) {
   if (!msg || typeof msg !== 'object') return msg;
-  if (msg.result?.tools) msg.result.tools = msg.result.tools.filter(t => allowedTools.has(t.name)).map(constrainToolSchema);
+  if (msg.result?.tools) msg.result.tools = msg.result.tools
+    .filter(t => allowedTools.has(t.name))
+    .map(constrainToolSchema)
+    .map(compactToolDefinition);
   if (msg.result?.serverInfo) {
     const instructions = loadInstructions();
     if (instructions) msg.result.instructions = instructions;
