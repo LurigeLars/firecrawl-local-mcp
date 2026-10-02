@@ -124,7 +124,7 @@ async function safeTargetReason(raw) {
   const cached = hostVerdicts.get(host);
   if (cached && cached.expiresAt > Date.now()) return cached.reason;
   const reason = await publicUrlReason(raw);
-  hostVerdicts.set(host, { reason, expiresAt: Date.now() + 60_000 });
+  hostVerdicts.set(host, { reason, expiresAt: Date.now() + (reason ? 60_000 : 5_000) });
   return reason;
 }
 
@@ -226,10 +226,13 @@ async function createSession(initialUrl) {
     const raw = request.url();
     let protocol;
     try { protocol = new URL(raw).protocol; } catch { return route.abort('blockedbyclient').catch(() => {}); }
-    if (!['http:', 'https:'].includes(protocol)) return route.continue().catch(() => {});
+    if (['data:', 'blob:'].includes(protocol)) return route.continue().catch(() => {});
+    if (!['http:', 'https:'].includes(protocol)) return route.abort('blockedbyclient').catch(() => {});
     const reason = await safeTargetReason(raw);
     if (reason) {
-      const tabId = pageTabId(session, request.frame()?.page?.() ?? null);
+      let owningPage = null;
+      try { owningPage = request.frame().page(); } catch {}
+      const tabId = pageTabId(session, owningPage);
       logEntry(session, {
         tabId,
         phase: 'blocked',
@@ -241,6 +244,30 @@ async function createSession(initialUrl) {
       return route.abort('blockedbyclient').catch(() => {});
     }
     return route.continue().catch(() => {});
+  });
+
+  await context.routeWebSocket('**/*', async ws => {
+    let target;
+    try {
+      target = new URL(ws.url());
+      if (target.protocol === 'ws:') target.protocol = 'http:';
+      else if (target.protocol === 'wss:') target.protocol = 'https:';
+      else {
+        ws.close({ code: 1008, reason: 'blocked protocol' });
+        return;
+      }
+    } catch {
+      ws.close({ code: 1008, reason: 'invalid target' });
+      return;
+    }
+    const reason = await safeTargetReason(target.toString());
+    if (reason) {
+      logEntry(session, { tabId: null, phase: 'websocket-blocked', method: 'GET', resourceType: 'websocket', url: redactUrl(target.toString()), failure: reason });
+      ws.close({ code: 1008, reason: 'blocked target' });
+      return;
+    }
+    logEntry(session, { tabId: null, phase: 'websocket', method: 'GET', resourceType: 'websocket', url: redactUrl(target.toString()) });
+    ws.connectToServer();
   });
 
   try {
