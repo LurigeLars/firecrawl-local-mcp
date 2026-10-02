@@ -2,7 +2,7 @@
 # Nothing here publishes a host port; the only way in is through the tunnel.
 services:
   browser-session-service:
-    networks: [browser_dualstack, browser_edge]
+    networks: [browser_runtime, browser_edge]
 
   mcp:
     build:
