@@ -34,6 +34,13 @@ test('ordinary Firecrawl Playwright shares the hardened dual-stack browser egres
   assert.match(block, /networks:\s*\[backend, browser_dualstack\]/);
 });
 
+test('browser services use Cloudflare Gateway resolvers for filtered dual-stack DNS', () => {
+  for (const name of ['browser-session-service', 'playwright-service']) {
+    const block = serviceBlock(localCompose, name);
+    assert.match(block, /dns:\s*\n\s+- 172\.64\.36\.1\s*\n\s+- 172\.64\.36\.2/);
+  }
+});
+
 test('public gateway reaches browser only through dedicated internal edge network', () => {
   const browser = serviceBlock(publicCompose, 'browser-session-service');
   const gateway = serviceBlock(publicCompose, 'gateway');

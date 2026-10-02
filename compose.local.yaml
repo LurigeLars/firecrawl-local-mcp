@@ -43,6 +43,9 @@ services:
     restart: unless-stopped
     # Keep Firecrawl API traffic on backend, but give browser egress a dual-stack path.
     networks: [backend, browser_dualstack]
+    dns:
+      - 172.64.36.1
+      - 172.64.36.2
     # Wrapper-owned DoS blast-radius limits. The PID cap is local hardening;
     # CPU/RAM values intentionally match the current upstream defaults.
     cpus: 2.0
@@ -67,6 +70,9 @@ services:
   browser-session-service:
     build: apps/playwright-service-ts
     restart: unless-stopped
+    dns:
+      - 172.64.36.1
+      - 172.64.36.2
     cpus: 1.0
     mem_limit: 2G
     memswap_limit: 2G
