@@ -41,6 +41,8 @@ services:
         exec node dist/src/harness.js --start-docker
   playwright-service:
     restart: unless-stopped
+    # Keep Firecrawl API traffic on backend, but give browser egress a dual-stack path.
+    networks: [backend, browser_runtime]
     # Wrapper-owned DoS blast-radius limits. The PID cap is local hardening;
     # CPU/RAM values intentionally match the current upstream defaults.
     cpus: 2.0
@@ -334,6 +336,7 @@ services:
 networks:
   browser_runtime:
     driver: bridge
+    enable_ipv6: true
 
 volumes:
   public-proxy-metrics:
