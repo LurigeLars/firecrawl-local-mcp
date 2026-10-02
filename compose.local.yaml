@@ -42,7 +42,7 @@ services:
   playwright-service:
     restart: unless-stopped
     # Keep Firecrawl API traffic on backend, but give browser egress a dual-stack path.
-    networks: [backend, browser_runtime]
+    networks: [backend, browser_dualstack]
     # Wrapper-owned DoS blast-radius limits. The PID cap is local hardening;
     # CPU/RAM values intentionally match the current upstream defaults.
     cpus: 2.0
@@ -87,7 +87,7 @@ services:
       - ../browser:/usr/src/app/local-browser:ro
     ports:
       - "127.0.0.1:${BROWSER_SESSION_HOST_PORT:-3010}:3010"
-    networks: [browser_runtime]
+    networks: [browser_dualstack]
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=1777
@@ -334,7 +334,7 @@ services:
     restart: unless-stopped
 
 networks:
-  browser_runtime:
+  browser_dualstack:
     driver: bridge
     enable_ipv6: true
 
