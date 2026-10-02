@@ -21,30 +21,31 @@ function serviceBlock(source, name) {
 test('browser sidecar is loopback-only and isolated from Firecrawl backend', () => {
   const block = serviceBlock(localCompose, 'browser-session-service');
   assert.match(block, /127\.0\.0\.1:\$\{BROWSER_SESSION_HOST_PORT:-3010\}:3010/);
-  assert.match(block, /networks:\s*\[browser_dualstack\]/);
+  assert.match(block, /networks:\s*\[browser_runtime\]/);
   assert.doesNotMatch(block, /networks:\s*\[backend\]/);
   assert.match(block, /read_only:\s*true/);
   assert.match(block, /cap_drop:\s*\n\s+- ALL/);
   assert.match(block, /no-new-privileges:true/);
-  assert.match(localCompose, /browser_dualstack:\s*\n\s+driver:\s+bridge\s*\n\s+enable_ipv6:\s*true/);
+  assert.match(localCompose, /browser_runtime:\s*\n\s+driver:\s+bridge/);
+  assert.doesNotMatch(localCompose, /browser_runtime:[\s\S]*?enable_ipv6:\s*true/);
 });
 
-test('ordinary Firecrawl Playwright shares the hardened dual-stack browser egress network', () => {
+test('ordinary Firecrawl Playwright stays on the upstream IPv4 backend path', () => {
   const block = serviceBlock(localCompose, 'playwright-service');
-  assert.match(block, /networks:\s*\[backend, browser_dualstack\]/);
+  assert.doesNotMatch(block, /browser_runtime/);
+  assert.doesNotMatch(block, /172\.64\.36\.[12]/);
 });
 
-test('browser services use Cloudflare Gateway resolvers for filtered dual-stack DNS', () => {
-  for (const name of ['browser-session-service', 'playwright-service']) {
-    const block = serviceBlock(localCompose, name);
-    assert.match(block, /dns:\s*\n\s+- 172\.64\.36\.1\s*\n\s+- 172\.64\.36\.2/);
-  }
+test('browser sidecar does not force a custom resolver on IPv4-only hosts', () => {
+  const block = serviceBlock(localCompose, 'browser-session-service');
+  assert.doesNotMatch(block, /\bdns:/);
+  assert.doesNotMatch(block, /172\.64\.36\.[12]/);
 });
 
 test('public gateway reaches browser only through dedicated internal edge network', () => {
   const browser = serviceBlock(publicCompose, 'browser-session-service');
   const gateway = serviceBlock(publicCompose, 'gateway');
-  assert.match(browser, /networks:\s*\[browser_dualstack, browser_edge\]/);
+  assert.match(browser, /networks:\s*\[browser_runtime, browser_edge\]/);
   assert.match(gateway, /browser_edge:\s*\{\}/);
   assert.match(gateway, /BROWSER_SERVICE_URL:\s*http:\/\/browser-session-service:3010/);
   assert.match(gateway, /firecrawl_browser_network/);
