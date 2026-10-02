@@ -31,4 +31,4 @@ For live web work during a session, use the `firecrawl-mcp` skill instead. This 
 
 - Treat missing fields as missing (`null`), not empty strings or guesses.
 - Handle `success: false`, timeouts, and 429 with bounded retries and backoff.
-- Unsupported here: agent, interact/browser, monitor, research/developer indexes, branding, screenshot. Fail clearly if code depends on them.
+- Upstream Firecrawl agent/interact, monitor, research/developer indexes, branding and screenshot remain unavailable. The deployment has a separate wrapper-owned ephemeral browser MCP surface for live session debugging; it is not part of the official Firecrawl SDK/REST contract and must not be treated as a portable hosted-Firecrawl feature.
