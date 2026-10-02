@@ -22,6 +22,7 @@ const LOCAL_MODEL_FORMATS = new Set(['query', 'json', 'summary']);
 const MAX_SEARCH_MODEL_RESULTS = 5;
 export const MAX_CRAWL_LIMIT = 100;
 export const MAX_CRAWL_CONCURRENCY = 4;
+export const MAX_INLINE_TOOL_RESULT_BYTES = 128 * 1024;
 const URL_FETCH_TOOLS = new Set(['firecrawl_scrape', 'firecrawl_map', 'firecrawl_crawl']);
 const BLOCKED_DESTINATIONS = new BlockList();
 
@@ -229,7 +230,64 @@ export function compactToolResult(result) {
     compact.source = source;
   }
   if (!('answer' in compact || 'json' in compact || 'summary' in compact)) return result;
-  return { ...result, content: [{ ...item, text: JSON.stringify(compact) }, ...result.content.slice(1)] };
+  const { structuredContent: _structuredContent, ...rest } = result;
+  return { ...rest, content: [{ ...item, text: JSON.stringify(compact) }, ...result.content.slice(1)] };
+}
+
+function compactOversizedPayload(data, originalBytes) {
+  const compact = {
+    truncated: true,
+    warning: 'RESULT_EXCEEDS_INLINE_BUDGET',
+    original_bytes: originalBytes,
+    max_inline_bytes: MAX_INLINE_TOOL_RESULT_BYTES,
+    retry_hint: 'Retry with query/json/summary, tighter limits, targeted URLs, or another bounded extraction.',
+  };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return compact;
+
+  for (const key of ['id', 'success', 'status', 'completed', 'total', 'next', 'warning']) {
+    const value = data[key];
+    if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) compact[key] = value;
+  }
+  if (data.localCrawlEvidence && typeof data.localCrawlEvidence === 'object') {
+    compact.localCrawlEvidence = data.localCrawlEvidence;
+  }
+  if (data.metadata && typeof data.metadata === 'object') {
+    compact.source = {};
+    for (const key of KEEP_METADATA) if (data.metadata[key] !== undefined) compact.source[key] = data.metadata[key];
+  }
+  if (Array.isArray(data.data)) {
+    compact.returned_items = data.data.length;
+    compact.items = data.data.slice(0, 25).map((entry, index) => {
+      const meta = entry?.metadata && typeof entry.metadata === 'object' ? entry.metadata : {};
+      return {
+        index,
+        title: meta.title ?? null,
+        url: meta.url ?? meta.sourceURL ?? entry?.url ?? null,
+        statusCode: meta.statusCode ?? null,
+      };
+    });
+  }
+  compact.omitted_fields = Object.keys(data).filter(key => ![
+    'id', 'success', 'status', 'completed', 'total', 'next', 'warning',
+    'localCrawlEvidence', 'metadata', 'data',
+  ].includes(key));
+  return compact;
+}
+
+export function guardToolResult(result) {
+  const item = result?.content?.[0];
+  if (result?.isError || item?.type !== 'text' || typeof item.text !== 'string') return result;
+  const originalBytes = Buffer.byteLength(item.text, 'utf8');
+  if (originalBytes <= MAX_INLINE_TOOL_RESULT_BYTES) return result;
+
+  let data = null;
+  try { data = JSON.parse(item.text); } catch {}
+  const payload = compactOversizedPayload(data, originalBytes);
+  const { structuredContent: _structuredContent, ...rest } = result;
+  return {
+    ...rest,
+    content: [{ ...item, text: JSON.stringify(payload) }, ...result.content.slice(1)],
+  };
 }
 
 // Applies tool filtering, instructions and compaction to one JSON-RPC response.
@@ -259,6 +317,7 @@ export function rewriteResponse(msg, { allowedTools, compactIds, crawlRequests }
     if (msg.result) msg.result = annotateCrawlResult(msg.result, crawlRequest);
     crawlRequests.delete(msg.id);
   }
+  if (msg.result) msg.result = guardToolResult(msg.result);
   return msg;
 }
 
