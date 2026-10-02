@@ -21,23 +21,23 @@ function serviceBlock(source, name) {
 test('browser sidecar is loopback-only and isolated from Firecrawl backend', () => {
   const block = serviceBlock(localCompose, 'browser-session-service');
   assert.match(block, /127\.0\.0\.1:\$\{BROWSER_SESSION_HOST_PORT:-3010\}:3010/);
-  assert.match(block, /networks:\s*\[browser_runtime\]/);
+  assert.match(block, /networks:\s*\[browser_dualstack\]/);
   assert.doesNotMatch(block, /networks:\s*\[backend\]/);
   assert.match(block, /read_only:\s*true/);
   assert.match(block, /cap_drop:\s*\n\s+- ALL/);
   assert.match(block, /no-new-privileges:true/);
-  assert.match(localCompose, /browser_runtime:\s*\n\s+driver:\s+bridge\s*\n\s+enable_ipv6:\s*true/);
+  assert.match(localCompose, /browser_dualstack:\s*\n\s+driver:\s+bridge\s*\n\s+enable_ipv6:\s*true/);
 });
 
 test('ordinary Firecrawl Playwright shares the hardened dual-stack browser egress network', () => {
   const block = serviceBlock(localCompose, 'playwright-service');
-  assert.match(block, /networks:\s*\[backend, browser_runtime\]/);
+  assert.match(block, /networks:\s*\[backend, browser_dualstack\]/);
 });
 
 test('public gateway reaches browser only through dedicated internal edge network', () => {
   const browser = serviceBlock(publicCompose, 'browser-session-service');
   const gateway = serviceBlock(publicCompose, 'gateway');
-  assert.match(browser, /networks:\s*\[browser_runtime, browser_edge\]/);
+  assert.match(browser, /networks:\s*\[browser_dualstack, browser_edge\]/);
   assert.match(gateway, /browser_edge:\s*\{\}/);
   assert.match(gateway, /BROWSER_SERVICE_URL:\s*http:\/\/browser-session-service:3010/);
   assert.match(gateway, /firecrawl_browser_network/);
