@@ -32,3 +32,52 @@ test('sanitizeText redacts common bearer and JWT-shaped secrets', () => {
   assert.doesNotMatch(out, /eyJabcdefghij\.abcdefghij\.abcdefghij/);
   assert.match(out, /REDACTED/);
 });
+
+
+test('public URL safety retries one transient DNS failure before allowing a public target', async () => {
+  let calls = 0;
+  const flakyLookup = async () => {
+    calls += 1;
+    if (calls === 1) {
+      const error = new Error('temporary resolver failure');
+      error.code = 'EAI_AGAIN';
+      throw error;
+    }
+    return [{ address: '93.184.216.34', family: 4 }];
+  };
+  assert.equal(
+    await publicUrlReason('https://example.com/', { lookupFn: flakyLookup, dnsRetryDelayMs: 0 }),
+    null,
+  );
+  assert.equal(calls, 2);
+});
+
+test('public URL safety still fails closed after repeated transient DNS failures', async () => {
+  let calls = 0;
+  const failingLookup = async () => {
+    calls += 1;
+    const error = new Error('temporary resolver failure');
+    error.code = 'EAI_AGAIN';
+    throw error;
+  };
+  assert.match(
+    await publicUrlReason('https://example.com/', { lookupFn: failingLookup, dnsRetryDelayMs: 0 }),
+    /could not be safely resolved/,
+  );
+  assert.equal(calls, 2);
+});
+
+test('public URL safety does not retry permanent DNS failures', async () => {
+  let calls = 0;
+  const missingLookup = async () => {
+    calls += 1;
+    const error = new Error('not found');
+    error.code = 'ENOTFOUND';
+    throw error;
+  };
+  assert.match(
+    await publicUrlReason('https://example.com/', { lookupFn: missingLookup, dnsRetryDelayMs: 0 }),
+    /could not be safely resolved/,
+  );
+  assert.equal(calls, 1);
+});

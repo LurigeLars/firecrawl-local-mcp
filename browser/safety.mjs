@@ -79,10 +79,16 @@ export async function publicUrlReason(raw, options = {}) {
   if (literalFamily) return blockedAddress(hostname) ? 'Private or local network destinations are not allowed.' : null;
 
   let resolved;
-  try {
-    resolved = await lookupFn(hostname, { all: true, verbatim: true });
-  } catch {
-    return 'Destination could not be safely resolved.';
+  const retryDelayMs = Math.max(0, Math.min(250, Number(options.dnsRetryDelayMs ?? 50) || 0));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      resolved = await lookupFn(hostname, { all: true, verbatim: true });
+      break;
+    } catch (error) {
+      const transient = String(error?.code || '') === 'EAI_AGAIN';
+      if (!transient || attempt === 1) return 'Destination could not be safely resolved.';
+      if (retryDelayMs) await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+    }
   }
   if (!Array.isArray(resolved) || !resolved.length || resolved.some(item => blockedAddress(item.address))) {
     return 'Private or local network destinations are not allowed.';
