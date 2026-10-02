@@ -12,12 +12,12 @@
 
 ## Repository-specific context
 
-- This fork combines a local/public Firecrawl MCP gateway, Node.js proxies, Docker and a narrowly scoped local browser bridge.
-- The browser bridge is not general browser automation. Only the repository's approved supplier/session allowlist may be opened.
-- Users enter supplier credentials manually in the visible local Chrome session. Never request, capture, log, replay or automate those credentials.
-- Browser/network output must continue to omit sensitive headers, cookies and request bodies.
-- Chrome executable discovery must remain anchored to trusted/system-derived install roots. Do not reintroduce environment-controlled executable overrides such as arbitrary `BROWSER_CHROME_EXE`, `PROGRAMFILES` or `LOCALAPPDATA` trust roots.
-- Browser profile paths must derive from static allowlisted session metadata, not arbitrary request strings.
+- This wrapper combines a local/public Firecrawl MCP gateway, Node.js proxies, Docker, and a generic ephemeral research-browser sidecar.
+- The generic browser sidecar is public-web-only: no persistent browser profile, no credential entry, no authenticated supplier/account sessions, no arbitrary code-evaluation tool, and no access to private/local network destinations.
+- Supplier-specific authenticated browser/session behavior belongs in the owning application (currently Inköpsplattformen), not in this generic Firecrawl wrapper. Never copy supplier names, URL rules, credentials, cookies or session state into this repository.
+- Browser/network output must continue to omit sensitive headers, cookies and request/response bodies, and credential-like URL query values must be redacted.
+- Keep the browser sidecar on its dedicated Docker network rather than the Firecrawl backend network; public ChatGPT access may reach it only through the Access-protected MCP gateway over the isolated browser edge network.
+- If a future visible/manual-login browser bridge is added, Chrome executable discovery must be anchored to trusted/system-derived install roots and profile paths must derive from static allowlisted metadata, not arbitrary request strings.
 - `public/selftest.mjs` is an operator-run diagnostic that intentionally sends requests to its explicitly supplied gateway URL, including negative-path/SSRF-style probes. Treat those flows as test-only unless they become reachable from production request handling.
 - Preserve Cloudflare Access/gateway authentication, tool allowlists and server-side SSRF restrictions.
 
