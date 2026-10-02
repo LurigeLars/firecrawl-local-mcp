@@ -85,7 +85,7 @@ services:
       - ../browser:/usr/src/app/local-browser:ro
     ports:
       - "127.0.0.1:${BROWSER_SESSION_HOST_PORT:-3010}:3010"
-    networks: [backend]
+    networks: [browser_runtime]
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=1777
@@ -330,6 +330,10 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+networks:
+  browser_runtime:
+    driver: bridge
 
 volumes:
   public-proxy-metrics:
