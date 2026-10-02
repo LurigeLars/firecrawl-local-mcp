@@ -84,7 +84,6 @@ export const BROWSER_TOOL_DEFINITIONS = Object.freeze([
       properties: {
         sessionId: SESSION_ID,
         tabId: TAB_ID,
-        fullPage: { type: 'boolean', default: false },
       },
       required: ['sessionId'],
     },
@@ -127,7 +126,7 @@ function safeId(value, prefix) {
 
 function query(params = {}) {
   const out = new URLSearchParams();
-  if (params.tabId) out.set('tabId', String(params.tabId));
+  if (params.tabId) out.set('tabId', safeId(params.tabId, 'tab'));
   if (params.limit !== undefined) out.set('limit', String(boundedInt(params.limit, 100, 1, 200)));
   if (params.maxChars !== undefined) out.set('maxChars', String(boundedInt(params.maxChars, 20000, 1000, 30000)));
   const value = out.toString();
@@ -179,7 +178,7 @@ export async function callBrowserTool(baseUrl, name, args = {}) {
         path = `/sessions/${safeId(args.sessionId, 'browser')}/console${query(args)}`; break;
       case 'firecrawl_browser_screenshot':
         path = `/sessions/${safeId(args.sessionId, 'browser')}/screenshot`; method = 'POST';
-        body = { ...(args.tabId ? { tabId: String(args.tabId) } : {}), fullPage: args.fullPage === true };
+        body = { ...(args.tabId ? { tabId: String(args.tabId) } : {}) };
         break;
       case 'firecrawl_browser_close':
         path = `/sessions/${safeId(args.sessionId, 'browser')}`; method = 'DELETE'; break;
