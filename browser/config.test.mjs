@@ -66,3 +66,10 @@ test('first browser surface has no arbitrary code or form-interaction tool', () 
   assert.match(tools, /firecrawl_browser_network/);
   assert.match(tools, /firecrawl_browser_screenshot/);
 });
+
+
+test('positive DNS safety verdicts are never cached', () => {
+  assert.match(service, /if \(reason\) hostVerdicts\.set\(host,/);
+  assert.match(service, /else hostVerdicts\.delete\(host\)/);
+  assert.doesNotMatch(service, /reason \? 60_000 : 5_000/);
+});

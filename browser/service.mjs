@@ -127,7 +127,8 @@ async function safeTargetReason(raw) {
   const cached = hostVerdicts.get(host);
   if (cached && cached.expiresAt > Date.now()) return cached.reason;
   const reason = await publicUrlReason(raw);
-  hostVerdicts.set(host, { reason, expiresAt: Date.now() + (reason ? 60_000 : 5_000) });
+  if (reason) hostVerdicts.set(host, { reason, expiresAt: Date.now() + 60_000 });
+  else hostVerdicts.delete(host);
   return reason;
 }
 
