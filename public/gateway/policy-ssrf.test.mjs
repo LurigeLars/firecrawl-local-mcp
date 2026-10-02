@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { urlSafetyReason, unsupportedReason, rewriteResponse, MAX_CRAWL_LIMIT, MAX_CRAWL_CONCURRENCY, MAX_INLINE_TOOL_RESULT_BYTES } from './policy.mjs';
+import { urlSafetyReason, unsupportedReason, rewriteResponse, compactToolDefinition, MAX_CRAWL_LIMIT, MAX_CRAWL_CONCURRENCY, MAX_INLINE_TOOL_RESULT_BYTES } from './policy.mjs';
 
 const params = url => ({ name: 'firecrawl_scrape', arguments: { url } });
 
@@ -109,4 +109,39 @@ test('small tool text remains unchanged by the response-budget guard', () => {
     crawlRequests: new Map(),
   });
   assert.equal(result.result.content[0].text, text);
+});
+
+
+test('tools/list compacts descriptions without changing schema semantics', () => {
+  const original = {
+    name: 'firecrawl_scrape',
+    description: 'Very long upstream description '.repeat(100),
+    inputSchema: {
+      type: 'object',
+      required: ['url'],
+      properties: {
+        url: {
+          type: 'string',
+          format: 'uri',
+          description: 'A very long URL field description '.repeat(20),
+        },
+        formats: {
+          type: 'array',
+          items: { type: 'string', enum: ['markdown', 'html', 'query', 'json'] },
+          description: 'A very long format field description '.repeat(20),
+        },
+      },
+    },
+  };
+  const compact = compactToolDefinition(original);
+
+  assert.ok(compact.description.length < 300);
+  assert.ok(compact.inputSchema.properties.url.description.length <= 120);
+  assert.deepEqual(compact.inputSchema.required, ['url']);
+  assert.equal(compact.inputSchema.properties.url.format, 'uri');
+  assert.deepEqual(
+    compact.inputSchema.properties.formats.items.enum,
+    ['markdown', 'html', 'query', 'json'],
+  );
+  assert.equal(original.description.startsWith('Very long upstream'), true);
 });
