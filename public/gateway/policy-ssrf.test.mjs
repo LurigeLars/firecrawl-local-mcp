@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { urlSafetyReason, unsupportedReason, rewriteResponse, MAX_CRAWL_LIMIT, MAX_CRAWL_CONCURRENCY } from './policy.mjs';
+import { urlSafetyReason, unsupportedReason, rewriteResponse, MAX_CRAWL_LIMIT, MAX_CRAWL_CONCURRENCY, MAX_INLINE_TOOL_RESULT_BYTES } from './policy.mjs';
 
 const params = url => ({ name: 'firecrawl_scrape', arguments: { url } });
 
@@ -69,4 +69,44 @@ test('advertises the local crawl ceilings in tools/list', () => {
   assert.equal(schema.properties.maxConcurrency.maximum, MAX_CRAWL_CONCURRENCY);
   assert.ok(schema.required.includes('limit'));
   assert.ok(schema.required.includes('maxConcurrency'));
+});
+
+
+test('oversized tool text is replaced by a structured response-budget descriptor', () => {
+  const huge = {
+    markdown: 'x'.repeat(MAX_INLINE_TOOL_RESULT_BYTES + 1024),
+    metadata: { title: 'Large page', url: 'https://example.com/large', statusCode: 200 },
+  };
+  const message = {
+    id: 77,
+    result: {
+      content: [{ type: 'text', text: JSON.stringify(huge) }],
+      structuredContent: structuredClone(huge),
+    },
+  };
+  const result = rewriteResponse(message, {
+    allowedTools: new Set(),
+    compactIds: new Set(),
+    crawlRequests: new Map(),
+  });
+  const payload = JSON.parse(result.result.content[0].text);
+
+  assert.equal(payload.truncated, true);
+  assert.equal(payload.warning, 'RESULT_EXCEEDS_INLINE_BUDGET');
+  assert.ok(payload.original_bytes > MAX_INLINE_TOOL_RESULT_BYTES);
+  assert.equal(payload.max_inline_bytes, MAX_INLINE_TOOL_RESULT_BYTES);
+  assert.equal(payload.source.url, 'https://example.com/large');
+  assert.ok(payload.omitted_fields.includes('markdown'));
+  assert.equal(result.result.structuredContent, undefined);
+});
+
+test('small tool text remains unchanged by the response-budget guard', () => {
+  const text = JSON.stringify({ answer: 'small' });
+  const message = { id: 78, result: { content: [{ type: 'text', text }] } };
+  const result = rewriteResponse(message, {
+    allowedTools: new Set(),
+    compactIds: new Set(),
+    crawlRequests: new Map(),
+  });
+  assert.equal(result.result.content[0].text, text);
 });
