@@ -1,6 +1,9 @@
 # Public ChatGPT access: firecrawl-mcp (HTTP) -> gateway -> shared Cloudflare Tunnel.
 # Nothing here publishes a host port; the only way in is through the tunnel.
 services:
+  browser-session-service:
+    networks: [backend, browser_edge]
+
   mcp:
     build:
       context: ../public
@@ -30,14 +33,16 @@ services:
       ACCESS_TEAM_DOMAIN: ${ACCESS_TEAM_DOMAIN:-}
       ACCESS_AUD: ${ACCESS_AUD:-}
       ACCESS_ALLOWED_EMAILS: ${ACCESS_ALLOWED_EMAILS:-}
-      ALLOWED_TOOLS: firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status
+      BROWSER_SERVICE_URL: http://browser-session-service:3010
+      ALLOWED_TOOLS: firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,firecrawl_browser_open,firecrawl_browser_list,firecrawl_browser_navigate,firecrawl_browser_tabs,firecrawl_browser_snapshot,firecrawl_browser_network,firecrawl_browser_console,firecrawl_browser_screenshot,firecrawl_browser_close
     volumes:
       - ../public/gateway:/app:ro
     networks:
       edge:
         aliases:
           - firecrawl-gateway
-    depends_on: [mcp]
+      browser_edge: {}
+    depends_on: [mcp, browser-session-service]
     read_only: true
     cap_drop:
       - ALL
@@ -49,3 +54,6 @@ services:
 networks:
   edge:
     driver: bridge
+  browser_edge:
+    driver: bridge
+    internal: true
