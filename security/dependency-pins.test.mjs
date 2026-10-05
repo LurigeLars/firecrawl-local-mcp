@@ -42,4 +42,10 @@ test('upstream Firecrawl pin is machine-readable and enforced before builds', ()
   assert.match(launcher, /Get-Command git\.exe/);
   assert.match(launcher, /\$originExit = \$LASTEXITCODE/);
   assert.match(launcher, /\$statusExit = \$LASTEXITCODE/);
+  assert.match(launcher, /sync-upstream/);
+  assert.match(launcher, /Assert-UpstreamFirecrawlPin -AllowHeadMismatch/);
+  assert.match(launcher, /fetch --force origin "refs\/tags\/\$\(\$pin\.tag\):refs\/tags\/\$\(\$pin\.tag\)"/);
+  assert.match(launcher, /rev-parse "\$\(\$pin\.tag\)\^\{\}"/);
+  assert.match(launcher, /checkout --detach \(\[string\]\$pin\.commit\)/);
+  assert.doesNotMatch(launcher, /reset --hard/);
 });
