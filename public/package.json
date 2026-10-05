@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "dependencies": {
-    "firecrawl-mcp": "3.27.2"
+    "firecrawl-mcp": "3.27.3"
   },
   "overrides": {
     "axios": "1.20.0"
