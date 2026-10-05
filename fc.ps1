@@ -1,6 +1,6 @@
-# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
+# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'redeploy', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
+param([ValidateSet('up', 'redeploy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
 
 $root = $PSScriptRoot
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
@@ -27,7 +27,7 @@ $compose += @(
     '--env-file', "$root\.env"
 )
 
-function Assert-UpstreamFirecrawlPin {
+function Assert-UpstreamFirecrawlPin([switch]$AllowHeadMismatch) {
     $pinPath = Join-Path $root "upstream\firecrawl.json"
     $checkout = Join-Path $root "firecrawl"
     $safeCheckout = $checkout.Replace('\', '/')
@@ -69,7 +69,10 @@ function Assert-UpstreamFirecrawlPin {
     $headOutput = @(& $gitExe -c "safe.directory=$safeCheckout" -C $checkout rev-parse HEAD 2>&1)
     $headExit = $LASTEXITCODE
     $head = if ($headOutput.Count -ge 1) { [string]$headOutput[0] } else { "" }
-    if ($headExit -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or $head.Trim() -ne [string]$pin.commit) {
+    if ($headExit -ne 0 -or [string]::IsNullOrWhiteSpace($head)) {
+        throw "Unable to read upstream Firecrawl HEAD (git exit $headExit)."
+    }
+    if (-not $AllowHeadMismatch -and $head.Trim() -ne [string]$pin.commit) {
         throw "Upstream Firecrawl checkout does not match the reviewed pin $($pin.tag) / $($pin.commit)."
     }
 
@@ -81,6 +84,47 @@ function Assert-UpstreamFirecrawlPin {
     if ($statusOutput.Count -ne 0) {
         throw "Upstream Firecrawl checkout contains tracked local modifications."
     }
+}
+
+function Sync-UpstreamFirecrawlPin {
+    # First verify the existing checkout is the expected repository and has no
+    # tracked local changes. HEAD is allowed to differ because this action's
+    # only purpose is to move it to the already-reviewed pin.
+    Assert-UpstreamFirecrawlPin -AllowHeadMismatch
+
+    $pinPath = Join-Path $root "upstream\firecrawl.json"
+    $checkout = Join-Path $root "firecrawl"
+    $safeCheckout = $checkout.Replace('\', '/')
+    $pin = Get-Content -LiteralPath $pinPath -Raw | ConvertFrom-Json
+
+    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        $gitCommand = Get-Command git -ErrorAction Stop
+    }
+    $gitExe = $gitCommand.Source
+
+    # Fetch only the reviewed tag. Verify that the tag resolves to the exact
+    # reviewed commit before changing HEAD; a moved/replaced upstream tag fails
+    # closed instead of silently changing what was approved.
+    & $gitExe -c "safe.directory=$safeCheckout" -C $checkout fetch --force origin "refs/tags/$($pin.tag):refs/tags/$($pin.tag)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to fetch reviewed upstream Firecrawl tag $($pin.tag)."
+    }
+
+    $tagOutput = @(& $gitExe -c "safe.directory=$safeCheckout" -C $checkout rev-parse "$($pin.tag)^{}" 2>&1)
+    $tagExit = $LASTEXITCODE
+    $tagCommit = if ($tagOutput.Count -ge 1) { [string]$tagOutput[0] } else { "" }
+    if ($tagExit -ne 0 -or [string]::IsNullOrWhiteSpace($tagCommit) -or $tagCommit.Trim() -ne [string]$pin.commit) {
+        throw "Reviewed Firecrawl tag $($pin.tag) does not resolve to pinned commit $($pin.commit)."
+    }
+
+    & $gitExe -c "safe.directory=$safeCheckout" -C $checkout checkout --detach ([string]$pin.commit)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to check out reviewed upstream Firecrawl commit $($pin.commit)."
+    }
+
+    Assert-UpstreamFirecrawlPin
+    "upstream Firecrawl synced to $($pin.tag) / $($pin.commit)"
 }
 
 function Assert-NoGlobalProxyConfiguration {
@@ -538,6 +582,9 @@ switch ($Action) {
         Import-AvailableRuntimeSecrets
         Invoke-PublicProxySmokeTest
         Remove-PublicProxyInitContainer
+    }
+    'sync-upstream' {
+        Sync-UpstreamFirecrawlPin
     }
     'down' {
         docker @compose down
