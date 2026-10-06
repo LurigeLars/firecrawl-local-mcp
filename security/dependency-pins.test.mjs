@@ -83,5 +83,8 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /--mount=type=cache,target=\/app\/native\/target[\s\S]*pnpm install --no-frozen-lockfile/);
   assert.match(firecrawlApiHotfix, /CVE-2026-59873 is fixed in tar >= 7\.5\.19/);
   assert.match(firecrawlApiHotfix, /vulnerable node-tar/);
+  assert.match(firecrawlApiHotfix, /TypeScript 7 is only used by development\/watch commands/);
+  assert.match(firecrawlApiHotfix, /node_modules\/\.pnpm\/@typescript\+typescript-linux-x64@7\.0\.2/);
+  assert.match(firecrawlApiHotfix, /test ! -e node_modules\/typescript-7/);
   assert.doesNotMatch(firecrawlApiHotfix, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
 });
