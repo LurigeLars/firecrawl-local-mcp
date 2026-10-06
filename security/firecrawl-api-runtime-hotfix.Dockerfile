@@ -69,15 +69,17 @@ COPY . .
 # TEMPORARY LOCAL SECURITY HOTFIX.
 # Firecrawl's pinned lock resolves Express -> proxy-addr 2.0.7. Force all
 # transitive consumers to patched 2.0.8 inside this image build only.
-RUN node - <<'NODE'
-const fs = require("fs");
-const path = "package.json";
-const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
-pkg.pnpm = pkg.pnpm || {};
-pkg.pnpm.overrides = pkg.pnpm.overrides || {};
-pkg.pnpm.overrides["proxy-addr"] = "2.0.8";
-fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
-NODE
+RUN python3 - <<'PY'
+from pathlib import Path
+
+path = Path("pnpm-workspace.yaml")
+text = path.read_text(encoding="utf-8")
+needle = "overrides:\n"
+if needle not in text:
+    raise SystemExit("pnpm-workspace.yaml has no overrides block")
+text = text.replace(needle, 'overrides:\n  proxy-addr: "2.0.8"\n', 1)
+path.write_text(text, encoding="utf-8")
+PY
 RUN pnpm install --no-frozen-lockfile && \
     grep -q '^  proxy-addr@2\.0\.8:' pnpm-lock.yaml && \
     ! grep -q '^  proxy-addr@2\.0\.7:' pnpm-lock.yaml
