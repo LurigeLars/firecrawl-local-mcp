@@ -168,7 +168,31 @@ RUN set -eu; \
     if printf '%s\n' "$xnet" | grep -v -F 'v0.58.0'; then \
       echo "unexpected golang.org/x/net version in runtime" >&2; \
       exit 1; \
-    fi
+    fi; \
+    node - <<'NODE'
+const fs = require("fs");
+const text = fs.readFileSync("/tmp/go-runtime-modules.txt", "utf8");
+const lines = text.split(/\r?\n/);
+const vulnerable = [];
+for (const line of lines) {
+  const match = line.match(/^(.*): go1\.(\d+)\.(\d+)(?:\D|$)/);
+  if (!match) continue;
+  const [, file, minorText, patchText] = match;
+  const minor = Number(minorText);
+  const patch = Number(patchText);
+  const safe =
+    minor > 26 ||
+    (minor === 26 && patch >= 6) ||
+    (minor === 25 && patch >= 13);
+  if (!safe) vulnerable.push({ file, version: `go1.${minor}.${patch}` });
+}
+if (vulnerable.length) {
+  throw new Error(
+    "runtime contains Go binaries built with toolchains vulnerable to CVE-2026-39821: " +
+    JSON.stringify(vulnerable)
+  );
+}
+NODE
 
 FROM runtime AS final
 COPY --from=verify-go-runtime /tmp/go-runtime-modules.txt ./GO_RUNTIME_MODULES.txt
