@@ -6,6 +6,12 @@ services:
   foundationdb-init:
     profiles: ["fdb"]
   api:
+    # Temporary issue #66 security build: same pinned upstream apps/api context,
+    # wrapper-owned Dockerfile upgrades the Go toolchain/x/net without dirtying
+    # the upstream checkout. Remove when upstream meets the promotion gate.
+    build:
+      context: apps/api
+      dockerfile: ../../../security/firecrawl-api-runtime-hotfix.Dockerfile
     user: node
     restart: unless-stopped
     # Wrapper-owned DoS blast-radius limits. Keep these explicit even while
