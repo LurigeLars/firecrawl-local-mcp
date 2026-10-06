@@ -1,46 +1,172 @@
 # firecrawl-local-mcp
 
-## Current deployment and security posture
+[![CI](https://github.com/LurigeLars/firecrawl-local-mcp/actions/workflows/fork-ci.yml/badge.svg)](https://github.com/LurigeLars/firecrawl-local-mcp/actions/workflows/fork-ci.yml)
+[![CodeQL](https://github.com/LurigeLars/firecrawl-local-mcp/actions/workflows/codeql.yml/badge.svg)](https://github.com/LurigeLars/firecrawl-local-mcp/actions/workflows/codeql.yml)
+[![Static analysis](https://github.com/LurigeLars/firecrawl-local-mcp/actions/workflows/static-analysis.yml/badge.svg)](https://github.com/LurigeLars/firecrawl-local-mcp/actions/workflows/static-analysis.yml)
+![License](https://img.shields.io/badge/wrapper%20license-MIT-green)
 
-This repository wraps a self-hosted Firecrawl stack with local policy, secret isolation, search routing, and a bounded MCP surface.
+A local-first deployment and MCP policy layer around a **self-hosted Firecrawl stack**.
 
-- Firecrawl API, MCP, Playwright, gateway, SearXNG proxy, and LLM proxy run non-root; SearXNG runs under its dedicated UID/GID.
-- Node-facing services use dropped Linux capabilities and `no-new-privileges` where compatible.
-- Redis, RabbitMQ, and PostgreSQL retain their official root-entrypoint-to-service-user startup model; `no-new-privileges` is applied where compatible instead of forcing an unsafe `user:` override.
-- PostgreSQL, SearXNG, and Gemini secrets are host-protected with DPAPI and injected through local runtime boundaries; service-secret tmpfs directories use service-owned or root-owned mode `0700`.
-- SearXNG is internal-only, has explicit pinned configuration, and the local proxy forwards internal client identity without enabling public rate limiting.
-- Public MCP access is mediated by Cloudflare Access and explicit tool/request policy. Application-specific browser adapters are out of scope for this repository.
-- Machine-specific paths, IPs, identities, Cloudflare values, application sessions, and credentials must remain outside Git.
+This repository exists to run Firecrawl as infrastructure you control locally, while
+presenting a smaller, reviewed MCP surface to AI clients. It combines the upstream
+Firecrawl runtime with local search routing, optional LLM adapters, an ephemeral research
+browser, secret isolation and a protected remote gateway.
 
-## Repository status
+It is **not a fork of Firecrawl** and does not vendor the Firecrawl source tree.
 
-This is an original deployment-wrapper project, **not a fork of Firecrawl**. It layers a self-hosted MCP deployment around an upstream Firecrawl checkout without vendoring or rewriting the Firecrawl source tree.
+## Why this project exists
 
-The repository-specific layer includes:
+Upstream Firecrawl is a general-purpose web crawling/scraping system. In a local agent
+stack, simply exposing the whole service directly creates several practical problems:
 
-- Local and public MCP proxies/gateways with explicit tool allowlists and model-context compaction.
-- Cloudflare Access integration using a shared-tunnel deployment model.
-- SearXNG routing, search normalization, and optional local/Gemini LLM adapters.
-- DPAPI-backed host secrets, Docker/network isolation, and hardened runtime configuration.
-- Deployment scripts, tests, benchmarks, and adapted workflow skills.
+- the upstream MCP surface is broader than many agent workflows need;
+- some operations are unsafe or unnecessarily expensive to expose remotely;
+- self-hosted search needs reliable routing when public engines block a residential IP;
+- local browser state needs stronger SSRF and credential boundaries than a generic browser;
+- secrets for databases, search, proxies and optional LLM providers should not live in Git;
+- remote MCP clients need authentication and request policy without publishing the raw
+  Firecrawl API.
 
-Upstream Firecrawl remains a separate checkout and retains its own license and release lifecycle.
+This repository is the integration layer that solves those deployment problems while
+leaving the upstream Firecrawl checkout independently updateable.
 
-This public reference snapshot contains the deployment overrides, MCP gateway/proxy code, search/LLM adapters, tests, and adapted workflow skills used with that upstream checkout.
+## What is in the stack
 
-Upstream projects:
-- Firecrawl: https://github.com/firecrawl/firecrawl — AGPL-3.0
-- Firecrawl MCP server: https://github.com/firecrawl/firecrawl-mcp-server — MIT
-- Firecrawl workflow skills: adapted portions are ISC-licensed; see `marketplace/plugins/firecrawl-mcp/THIRD_PARTY_NOTICES.md`.
+| Component | Purpose |
+|---|---|
+| Upstream Firecrawl checkout | Crawl, scrape, map and search engine |
+| Local MCP proxy | Bounded stdio surface for local MCP clients |
+| Public MCP gateway | Reviewed Cloudflare Access-protected remote surface |
+| SearXNG + routing proxy | Search backend and language/engine routing |
+| Playwright services | Firecrawl rendering plus isolated browser paths |
+| Ephemeral browser sidecar | Stateful public-web research without persistent credentials |
+| Optional LLM proxy | Bounded local Ollama / optional Gemini-compatible extraction path |
+| Secret bootstrap | DPAPI-backed host secret storage and runtime injection |
+| `fc.ps1` | Local lifecycle, status, logs, tests and redeploy operations |
 
-Original wrapper code in this repository is licensed under the MIT License; see `LICENSE`. Third-party components and adapted material retain their upstream licenses; see `NOTICE.md` and `LICENSES/`.
+Normal Firecrawl and Playwright traffic stays direct. Optional public-proxy fallback is
+isolated to explicitly allowlisted public research hosts.
 
-> **Public-snapshot note:** hostnames, identities, app IDs, tunnel IDs, local paths, and LAN details are examples/placeholders. Real deployment secrets and machine-specific configuration are intentionally excluded.
+## High-level architecture
 
-- `firecrawl/` — untouched upstream checkout. The reviewed tag/commit is machine-readable in `upstream/firecrawl.json`; `fc.ps1 up/redeploy` verifies origin, commit and tracked cleanliness before building.
-- `compose.local.yaml` — local overrides (FoundationDB off, auto-restart).
-- `.env` — settings. API bound to `127.0.0.1:3002` only; it has **no authentication**, never expose it.
-- `fc.ps1` — `up` / `down` / `status` / `logs` / `test` / `import-gemini`.
+```text
+Local MCP client
+      |
+      v
+local stdio policy proxy
+      |
+      v
+self-hosted Firecrawl MCP/API
+      |
+      +--> Firecrawl workers / Playwright
+      |
+      +--> SearXNG routing
+      |
+      +--> optional LLM adapter
+      |
+      +--> isolated ephemeral browser
+```
+
+For a remote client:
+
+```text
+ChatGPT / remote MCP client
+      |
+      v
+Cloudflare Access
+      |
+      v
+reviewed MCP gateway
+      |
+      +--> bounded Firecrawl MCP surface
+      |
+      +--> isolated ephemeral browser tools
+```
+
+The raw Firecrawl API remains loopback-only in the maintained deployment and has no
+authentication of its own. Do not expose it directly to a LAN or the Internet.
+
+## MCP scope
+
+The local/public policy layer intentionally exposes a bounded set of Firecrawl
+capabilities rather than every upstream feature.
+
+Core Firecrawl operations include:
+
+- scrape;
+- map;
+- search;
+- crawl;
+- crawl-status checks.
+
+Unsupported/high-risk formats and operations are rejected by policy. In particular,
+local-file parse behavior and unrestricted upstream browser actions are not part of the
+reviewed surface.
+
+The repository also provides a narrow ephemeral-browser tool family for public-web
+research. It supports opening/navigating pages, tabs, snapshots, network/console
+inspection, screenshots and cleanup, but deliberately omits arbitrary JavaScript
+execution and interactive credential entry.
+
+## Security model
+
+The deployment assumes that scraped web content is untrusted and that remote MCP access
+must not imply access to the host or private network.
+
+Key boundaries:
+
+- Firecrawl API, MCP, Playwright, gateway and proxies run with reduced container
+  privileges where compatible.
+- PostgreSQL, RabbitMQ and Redis keep their official service-user startup model rather
+  than unsafe forced user overrides.
+- PostgreSQL, SearXNG, optional proxy and Gemini secrets are protected on the Windows
+  host with DPAPI and injected only into runtime boundaries.
+- SearXNG remains internal-only.
+- The ephemeral browser accepts public HTTP(S) destinations and rejects local/private
+  address space and credential-bearing URLs.
+- Browser network output excludes headers, cookies and bodies; credential-like query
+  parameters are redacted.
+- Authenticated supplier/browser behavior does **not** belong in this generic browser
+  layer.
+- Public MCP access is authenticated through Cloudflare Access and an explicit tool /
+  request policy.
+- Machine paths, identities, LAN addresses, tunnel identifiers and credentials must
+  remain outside Git.
+
+## Upstream relationship and licensing
+
+This repository is an original deployment-wrapper project.
+
+The upstream runtime is a separate checkout described by the machine-readable metadata
+under `upstream/`; lifecycle commands verify the reviewed origin/commit before building.
+
+Relevant upstream projects:
+
+- [Firecrawl](https://github.com/firecrawl/firecrawl) — AGPL-3.0
+- [Firecrawl MCP server](https://github.com/firecrawl/firecrawl-mcp-server) — MIT
+- Firecrawl workflow skills — adapted portions retain their ISC notices
+
+Original wrapper code in this repository is MIT-licensed. Third-party material retains
+its upstream license. See [NOTICE.md](NOTICE.md) and [LICENSES/](LICENSES/) for provenance.
+
+> **Public repository:** committed configuration contains placeholders/examples only.
+> Real hostnames, identities, app/tunnel IDs, machine paths and secrets belong in ignored
+> local configuration.
+
+## Quick start
+
+This repository contains the local additions, not the upstream Firecrawl source itself.
+
+The basic lifecycle on an already configured machine is:
+
+```powershell
+.\fc.ps1 up
+.\fc.ps1 status
+.\fc.ps1 test
+```
+
+For a clean-machine restore, follow the next section in order; it pins the reviewed
+upstream checkout and recreates local secret/configuration boundaries.
 
 ## Restore on a new machine
 
