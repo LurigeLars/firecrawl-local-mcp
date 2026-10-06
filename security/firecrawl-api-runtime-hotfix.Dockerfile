@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:22-slim AS base
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS base
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
@@ -66,6 +66,22 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 
 COPY . .
 
+# TEMPORARY LOCAL SECURITY HOTFIX.
+# Firecrawl's pinned lock resolves Express -> proxy-addr 2.0.7. Force all
+# transitive consumers to patched 2.0.8 inside this image build only.
+RUN node - <<'NODE'
+const fs = require("fs");
+const path = "package.json";
+const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+pkg.pnpm = pkg.pnpm || {};
+pkg.pnpm.overrides = pkg.pnpm.overrides || {};
+pkg.pnpm.overrides["proxy-addr"] = "2.0.8";
+fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+NODE
+RUN pnpm install --no-frozen-lockfile && \
+    grep -q '^  proxy-addr@2\.0\.8:' pnpm-lock.yaml && \
+    ! grep -q '^  proxy-addr@2\.0\.7:' pnpm-lock.yaml
+
 # Build the application from a clean output directory.
 RUN rm -rf dist && pnpm run build
 ARG GIT_SHA=unknown
@@ -78,6 +94,12 @@ RUN pnpm prune --prod --ignore-scripts
 
 # Runtime stage
 FROM base AS runtime
+
+# Runtime only needs node. Removing npm/corepack/pnpm eliminates their unused
+# package trees (including vulnerable node-tar) from the final image.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /pnpm && \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+          /usr/local/bin/pnpm /usr/local/bin/pnpx /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
