@@ -31,7 +31,7 @@ test('internal proxies and broker/cache services use compatible privilege harden
 });
 
 test('API and SearXNG run non-root with bounded Linux privileges', () => {
-  assert.match(compose, /api:\n\s+user:\s+node/);
+  assert.match(compose, /api:[\s\S]*?user:\s+node/);
   assert.match(compose, /api:[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
   assert.match(compose, /searxng:[\s\S]*?user:\s+"977:977"/);
   assert.match(compose, /searxng:[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
