@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-FROM node:22.23.3-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS base
+FROM node:22.23.3-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS runtime-base
 
+FROM runtime-base AS build-base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 ENV CI=true
-
 RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 
 # Build Go shared library
@@ -21,9 +21,10 @@ RUN cd sharedLibs/go-html-to-md && \
     go mod download && \
     go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.58.0' && \
     go version | grep -F 'go1.25.14' && \
-    go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go
+    go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go && \
+    go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.58.0'
 
-FROM base AS build
+FROM build-base AS build
 WORKDIR /app
 
 # Install system dependencies
@@ -114,7 +115,7 @@ for (const file of files) {
 NODE
 
 # Runtime stage
-FROM base AS runtime
+FROM runtime-base AS runtime
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
