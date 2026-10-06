@@ -151,10 +151,10 @@ RUN node -e 'const fs = require("fs"); for (const p of ["dist/src/harness.js", "
 # Verify every Go binary/module visible in the assembled runtime filesystem.
 # This catches hidden/prebuilt dependencies that might embed an older x/net.
 FROM runtime AS verify-go-runtime
-COPY --from=go-build /usr/local/go/bin/go /usr/local/bin/go
+COPY --from=go-build /usr/local/go /usr/local/go
 RUN set -eu; \
     find /app /usr/bin /usr/local/bin -xdev -type f -size +64k \
-      -exec sh -c 'for f do /usr/local/bin/go version -m "$f" 2>/dev/null || true; done' sh {} + \
+      -exec sh -c 'for f do /usr/local/go/bin/go version -m "$f" 2>/dev/null || true; done' sh {} + \
       > /tmp/go-runtime-modules.txt; \
     xnet="$(grep -F 'golang.org/x/net' /tmp/go-runtime-modules.txt || true)"; \
     test -n "$xnet"; \
