@@ -58,8 +58,8 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
   assert.match(firecrawlApiHotfix, /FROM golang:1\.25\.14@sha256:[0-9a-f]{64} AS go-build/);
   assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
-  assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.59\.0/);
-  assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.59\.0'/);
+  assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.58\.0/);
+  assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.58\.0'/);
   assert.match(firecrawlApiHotfix, /go version \| grep -F 'go1\.25\.14'/);
   assert.match(firecrawlApiHotfix, /FROM node:22\.23\.3-slim@sha256:[0-9a-f]{64} AS base/);
   assert.match(firecrawlApiHotfix, /pnpm-workspace\.yaml/);

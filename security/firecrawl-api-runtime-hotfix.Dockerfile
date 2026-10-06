@@ -17,9 +17,9 @@ WORKDIR /app
 COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
 
 RUN cd sharedLibs/go-html-to-md && \
-    go get golang.org/x/net@v0.59.0 && \
+    go get golang.org/x/net@v0.58.0 && \
     go mod download && \
-    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.59.0' && \
+    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.58.0' && \
     go version | grep -F 'go1.25.14' && \
     go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go
 
