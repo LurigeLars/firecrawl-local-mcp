@@ -65,6 +65,11 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /FROM runtime-base AS build-base/);
   assert.match(firecrawlApiHotfix, /FROM build-base AS build/);
   assert.match(firecrawlApiHotfix, /FROM runtime-base AS runtime/);
+  assert.match(firecrawlApiHotfix, /FROM runtime AS verify-go-runtime/);
+  assert.match(firecrawlApiHotfix, /go version -m "\$f"/);
+  assert.match(firecrawlApiHotfix, /grep -v -F 'v0\.58\.0'/);
+  assert.match(firecrawlApiHotfix, /FROM runtime AS final/);
+  assert.match(firecrawlApiHotfix, /GO_RUNTIME_MODULES\.txt/);
   assert.match(firecrawlApiHotfix, /FROM node:22\.23\.3-slim@sha256:[0-9a-f]{64} AS runtime-base/);
   assert.match(firecrawlApiHotfix, /pnpm-workspace\.yaml/);
   assert.match(firecrawlApiHotfix, /proxy-addr: \"2\.0\.8\"/);
