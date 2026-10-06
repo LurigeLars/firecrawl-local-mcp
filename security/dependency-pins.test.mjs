@@ -61,4 +61,9 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.55\.0/);
   assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.55\.0'/);
   assert.match(firecrawlApiHotfix, /go version \| grep -F 'go1\.25\.13'/);
+  assert.match(firecrawlApiHotfix, /FROM node:22-slim@sha256:[0-9a-f]{64} AS base/);
+  assert.match(firecrawlApiHotfix, /pkg\.pnpm\.overrides\["proxy-addr"\] = "2\.0\.8"/);
+  assert.match(firecrawlApiHotfix, /! grep -q '\^  proxy-addr@2\\\.0\\\.7:' pnpm-lock\.yaml/);
+  assert.match(firecrawlApiHotfix, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(firecrawlApiHotfix, /rm -rf[\s\S]*\/pnpm/);
 });
