@@ -104,6 +104,17 @@ RUN test -s dist/src/harness.js && \
 # Remove dev dependencies
 RUN pnpm prune --prod --ignore-scripts
 
+# TypeScript 7 is only used by development/watch commands. The Docker runtime
+# executes prebuilt dist/*.js via --start-docker, so keep its native Go-built
+# compiler out of the production image.
+RUN rm -rf \
+      node_modules/typescript-7 \
+      node_modules/.pnpm/typescript@7.0.2 \
+      node_modules/.pnpm/@typescript+typescript-linux-x64@7.0.2 && \
+    test ! -e node_modules/typescript-7 && \
+    test ! -e node_modules/.pnpm/typescript@7.0.2 && \
+    test ! -e node_modules/.pnpm/@typescript+typescript-linux-x64@7.0.2
+
 # Fail the build if the production app tree contains a vulnerable node-tar.
 # CVE-2026-59873 is fixed in tar >= 7.5.19.
 RUN find node_modules -type f -path '*/tar/package.json' -print > /tmp/tar-package-jsons && \
