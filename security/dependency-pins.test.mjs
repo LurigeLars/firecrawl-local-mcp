@@ -56,7 +56,7 @@ test('upstream Firecrawl pin is machine-readable and enforced before builds', ()
 test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(composeLocal, /context:\s+apps\/api/);
   assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
-  assert.match(firecrawlApiHotfix, /FROM golang:1\.25\.13 AS go-build/);
+  assert.match(firecrawlApiHotfix, /FROM golang:1\.25\.13@sha256:[0-9a-f]{64} AS go-build/);
   assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
   assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.55\.0/);
   assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.55\.0'/);
