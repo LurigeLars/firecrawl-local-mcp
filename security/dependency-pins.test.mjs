@@ -10,6 +10,8 @@ const dockerfile = read('public/Dockerfile.mcp');
 const proxy = read('local-mcp/stdio-proxy.mjs');
 const pin = JSON.parse(read('upstream/firecrawl.json'));
 const launcher = read('fc.ps1');
+const composeLocal = read('compose.local.yaml');
+const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfile');
 
 test('firecrawl-mcp has one exact manifest version source and reproducible public install', () => {
   const version = manifest?.dependencies?.['firecrawl-mcp'];
@@ -48,4 +50,15 @@ test('upstream Firecrawl pin is machine-readable and enforced before builds', ()
   assert.match(launcher, /rev-parse "\$\(\$pin\.tag\)\^\{\}"/);
   assert.match(launcher, /checkout --detach \(\[string\]\$pin\.commit\)/);
   assert.doesNotMatch(launcher, /reset --hard/);
+});
+
+
+test('temporary Firecrawl API security build is narrow and pinned', () => {
+  assert.match(composeLocal, /context:\s+apps\/api/);
+  assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
+  assert.match(firecrawlApiHotfix, /FROM golang:1\.25\.13 AS go-build/);
+  assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
+  assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.55\.0/);
+  assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.55\.0'/);
+  assert.match(firecrawlApiHotfix, /go version \| grep -F 'go1\.25\.13'/);
 });
