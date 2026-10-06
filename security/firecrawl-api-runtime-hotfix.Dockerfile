@@ -78,7 +78,11 @@ text = path.read_text(encoding="utf-8")
 needle = "overrides:\n"
 if needle not in text:
     raise SystemExit("pnpm-workspace.yaml has no overrides block")
-text = text.replace(needle, 'overrides:\n  proxy-addr: "2.0.8"\n', 1)
+text = text.replace(
+    needle,
+    'overrides:\n  proxy-addr: "2.0.8"\n  source-map-js: "1.2.2"\n',
+    1,
+)
 path.write_text(text, encoding="utf-8")
 PY
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
@@ -86,7 +90,9 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     --mount=type=cache,target=/app/native/target \
     pnpm install --no-frozen-lockfile && \
     grep -q '^  proxy-addr@2\.0\.8:' pnpm-lock.yaml && \
-    ! grep -q '^  proxy-addr@2\.0\.7:' pnpm-lock.yaml
+    ! grep -q '^  proxy-addr@2\.0\.7:' pnpm-lock.yaml && \
+    grep -q '^  source-map-js@1\.2\.2:' pnpm-lock.yaml && \
+    ! grep -q '^  source-map-js@1\.2\.1:' pnpm-lock.yaml
 
 # Build the application from a clean output directory.
 RUN rm -rf dist && pnpm run build
