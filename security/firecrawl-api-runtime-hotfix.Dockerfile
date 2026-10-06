@@ -83,7 +83,24 @@ text = text.replace(
     'overrides:\n  proxy-addr: "2.0.8"\n  source-map-js: "1.2.2"\n',
     1,
 )
+replacements = {
+    '  undici: "7.30.0"\n': '  undici: "7.29.1"\n',
+    '  "smol-toml@<1.7.1": "1.8.0"\n': '  "smol-toml@>=1.0.0 <1.9.0": "1.9.0"\n',
+    '  "shell-quote@<=1.8.4": "1.10.0"\n': '  "shell-quote@<1.11.0": "1.11.0"\n',
+}
+for old, new in replacements.items():
+    if old not in text:
+        raise SystemExit(f"expected upstream dependency pin not found: {old.strip()}")
+    text = text.replace(old, new, 1)
 path.write_text(text, encoding="utf-8")
+
+package = Path("package.json")
+package_text = package.read_text(encoding="utf-8")
+old_undici = '"undici": "7.30.0"'
+new_undici = '"undici": "7.29.1"'
+if old_undici not in package_text:
+    raise SystemExit("expected direct undici 7.30.0 pin not found")
+package.write_text(package_text.replace(old_undici, new_undici, 1), encoding="utf-8")
 PY
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     --mount=type=cache,target=/usr/local/cargo/registry \
@@ -92,7 +109,13 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     grep -q '^  proxy-addr@2\.0\.8:' pnpm-lock.yaml && \
     ! grep -q '^  proxy-addr@2\.0\.7:' pnpm-lock.yaml && \
     grep -q '^  source-map-js@1\.2\.2:' pnpm-lock.yaml && \
-    ! grep -q '^  source-map-js@1\.2\.1:' pnpm-lock.yaml
+    ! grep -q '^  source-map-js@1\.2\.1:' pnpm-lock.yaml && \
+    grep -q '^  smol-toml@1\.9\.0:' pnpm-lock.yaml && \
+    ! grep -q '^  smol-toml@1\.8\.0:' pnpm-lock.yaml && \
+    grep -q '^  shell-quote@1\.11\.0:' pnpm-lock.yaml && \
+    ! grep -q '^  shell-quote@1\.10\.0:' pnpm-lock.yaml && \
+    grep -q '^  undici@7\.29\.1:' pnpm-lock.yaml && \
+    ! grep -q '^  undici@7\.30\.0:' pnpm-lock.yaml
 
 # Build the application from a clean output directory.
 RUN rm -rf dist && pnpm run build
