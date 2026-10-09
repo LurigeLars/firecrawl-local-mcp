@@ -19,11 +19,11 @@ It is **not a fork of Firecrawl** and does not vendor the Firecrawl source tree.
 Upstream Firecrawl is a general-purpose web crawling/scraping system. In a local agent
 stack, simply exposing the whole service directly creates several practical problems:
 
-- the upstream MCP surface is broader than many agent workflows need;
-- some operations are unsafe or unnecessarily expensive to expose remotely;
-- self-hosted search needs reliable routing when public engines block a residential IP;
-- local browser state needs stronger SSRF and credential boundaries than a generic browser;
-- secrets for databases, search, proxies and optional LLM providers should not live in Git;
+- the upstream MCP surface is broader than many agent workflows need.
+- some operations are unsafe or unnecessarily expensive to expose remotely.
+- self-hosted search needs reliable routing when public engines block a residential IP.
+- local browser state needs stronger SSRF and credential boundaries than a generic browser.
+- secrets for databases, search, proxies and optional LLM providers should not live in Git.
 - remote MCP clients need authentication and request policy without publishing the raw
   Firecrawl API.
 
@@ -93,10 +93,10 @@ capabilities rather than every upstream feature.
 
 Core Firecrawl operations include:
 
-- scrape;
-- map;
-- search;
-- crawl;
+- scrape.
+- map.
+- search.
+- crawl.
 - crawl-status checks.
 
 Unsupported/high-risk formats and operations are rejected by policy. In particular,
@@ -270,11 +270,11 @@ The browser surface is intentionally narrow: `firecrawl_browser_open`, `firecraw
 
 Security boundary:
 
-- sessions are ephemeral browser contexts with no persistent profile and no imported credentials;
-- only public HTTP(S) destinations are accepted; local/private IP space and credential-bearing URLs fail closed;
-- subresource requests are checked again in the browser service, and the container is isolated from the Firecrawl backend on its own `browser_runtime` network;
-- network output never includes headers, cookies, or request/response bodies; credential-like URL query values are redacted;
-- downloads are cancelled, permissions are cleared, and session/tab counts plus TTL/inactivity limits are bounded;
+- sessions are ephemeral browser contexts with no persistent profile and no imported credentials.
+- only public HTTP(S) destinations are accepted; local/private IP space and credential-bearing URLs fail closed.
+- subresource requests are checked again in the browser service, and the container is isolated from the Firecrawl backend on its own `browser_runtime` network.
+- network output never includes headers, cookies, or request/response bodies; credential-like URL query values are redacted.
+- downloads are cancelled, permissions are cleared, and session/tab counts plus TTL/inactivity limits are bounded.
 - the service publishes only a loopback host port (`127.0.0.1:3010` by default) for local stdio clients. ChatGPT reaches it only through the Access-protected gateway over an internal `browser_edge` network.
 
 This generic browser must not absorb authenticated supplier behavior. Supplier-specific sessions, URL rules, robots/pacing decisions, customer credentials and customer-price collection remain in the owning application (currently Inköpsplattformen).
