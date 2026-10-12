@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
 
   gateway:
-    image: node:26.10.0-alpine
+    image: node:26.11.1-alpine
     command: ["node", "/app/gateway.mjs"]
     user: node
     env_file:
