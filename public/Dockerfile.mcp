@@ -1,7 +1,15 @@
-FROM node:26.10.0-alpine
+FROM node:26.12.0-alpine@sha256:45eaed5f3cf2ff1151b09eca776078cceb1df505370a34d3e7b7f4cd9bb46364
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund && npm cache clean --force
+# Patch OS packages and keep npm only in the build phase. The packaged
+# Firecrawl MCP CLI runs with node directly; npm and its bundled vulnerable
+# npm dependencies are not needed in the exposed runtime container.
+RUN apk upgrade --no-cache \
+    && npm ci --ignore-scripts --omit=dev --no-audit --no-fund \
+    && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+    && test ! -e /usr/local/lib/node_modules/npm \
+    && test -x /usr/local/bin/node
 ENV PATH="/app/node_modules/.bin:$PATH" \
     HTTP_STREAMABLE_SERVER=true \
     HOST=0.0.0.0 \

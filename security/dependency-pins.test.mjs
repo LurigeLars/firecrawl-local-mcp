@@ -7,11 +7,23 @@ const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8'
 const manifest = JSON.parse(read('public/package.json'));
 const lock = JSON.parse(read('public/package-lock.json'));
 const dockerfile = read('public/Dockerfile.mcp');
+const gatewayDockerfile = read('public/Dockerfile.gateway');
+const publicCompose = read('compose.public.yaml');
 const proxy = read('local-mcp/stdio-proxy.mjs');
 const pin = JSON.parse(read('upstream/firecrawl.json'));
 const launcher = read('fc.ps1');
 const composeLocal = read('compose.local.yaml');
 const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfile');
+
+test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin patched Alpine image', () => {
+  for (const source of [dockerfile, gatewayDockerfile]) {
+    assert.match(source, /^FROM node:26\.12\.0-alpine@sha256:[0-9a-f]{64}$/m);
+    assert.match(source, /apk upgrade --no-cache/);
+    assert.match(source, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+    assert.match(source, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);
+  }
+  assert.match(publicCompose, /gateway:[\s\S]*image: firecrawl-gateway:local\n\s+build:[\s\S]*dockerfile: Dockerfile\.gateway/);
+});
 
 test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isolation CVEs', () => {
   const fixed = {
