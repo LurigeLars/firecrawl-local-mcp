@@ -13,11 +13,14 @@ const launcher = read('fc.ps1');
 const composeLocal = read('compose.local.yaml');
 const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfile');
 
-test('MCP HTTP and OAuth clients are locked above cross-origin redirect CVE-2026-111769', () => {
+test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isolation CVEs', () => {
   const fixed = {
     '@modelcontextprotocol/client': '2.3.0',
     '@modelcontextprotocol/core': '2.3.0',
     '@modelcontextprotocol/sdk': '1.32.0',
+    '@modelcontextprotocol/server': '2.3.0',
+    'follow-redirects': '1.16.1',
+    'axios': '1.20.0',
   };
   for (const [name, version] of Object.entries(fixed)) {
     assert.equal(manifest.overrides?.[name], version, `${name} must be constrained in the manifest`);
