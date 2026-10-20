@@ -1,0 +1,38 @@
+name: Refresh patched MCP lockfile (temporary)
+on:
+  push:
+    branches:
+      - security/mcp-redirect-cve-2026-111769-20261021
+permissions:
+  contents: write
+jobs:
+  update-lock:
+    if: github.repository == 'LurigeLars/firecrawl-local-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24.21.0'
+      - name: Resolve patched dependencies and verify lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd public
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+          cd ..
+          node --test security/dependency-pins.test.mjs
+          git diff --exit-code -- public/package.json
+          git add public/package-lock.json
+          if git diff --cached --quiet; then
+            echo 'Expected lockfile change not generated' >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "security: resolve patched MCP client and SDK lockfile"
+          git push origin HEAD:refs/heads/security/mcp-redirect-cve-2026-111769-20261021
