@@ -21,7 +21,10 @@ services:
     restart: unless-stopped
 
   gateway:
-    image: node:26.10.0-alpine
+    image: firecrawl-gateway:local
+    build:
+      context: ../public
+      dockerfile: Dockerfile.gateway
     command: ["node", "/app/gateway.mjs"]
     user: node
     env_file:
