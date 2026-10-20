@@ -13,6 +13,7 @@ const proxy = read('local-mcp/stdio-proxy.mjs');
 const pin = JSON.parse(read('upstream/firecrawl.json'));
 const launcher = read('fc.ps1');
 const composeLocal = read('compose.local.yaml');
+const redisDockerfile = read('security/Dockerfile.redis-security');
 const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfile');
 
 test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin patched Alpine image', () => {
@@ -23,6 +24,13 @@ test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin pat
     assert.match(source, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);
   }
   assert.match(publicCompose, /gateway:[\s\S]*image: firecrawl-gateway:local\n\s+build:[\s\S]*dockerfile: Dockerfile\.gateway/);
+});
+
+test('Redis runtime uses patched zlib without exposing wrapper secrets to Docker build', () => {
+  assert.match(redisDockerfile, /^FROM redis:8\.10\.2-alpine@sha256:[0-9a-f]{64}$/m);
+  assert.match(redisDockerfile, /apk upgrade --no-cache zlib/);
+  assert.match(redisDockerfile, /grep -qvFx 'zlib-1\.3\.2-r0'/);
+  assert.match(composeLocal, /redis:[\s\S]*image: firecrawl-redis:patched\n\s+build:[\s\S]*context: \.\.\/security/);
 });
 
 test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isolation CVEs', () => {
