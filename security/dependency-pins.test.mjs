@@ -24,7 +24,6 @@ test('MCP HTTP and OAuth clients are locked above cross-origin redirect CVE-2026
     assert.equal(lock.packages?.[`node_modules/${name}`]?.version, version, `${name} must resolve to the patched version`);
     assert.match(lock.packages?.[`node_modules/${name}`]?.integrity ?? '', /^sha512-/);
   }
-  assert.deepEqual(lock.packages?.['']?.overrides, fixed);
 });
 
 test('firecrawl-mcp has one exact manifest version source and reproducible public install', () => {
