@@ -13,6 +13,20 @@ const launcher = read('fc.ps1');
 const composeLocal = read('compose.local.yaml');
 const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfile');
 
+test('MCP HTTP and OAuth clients are locked above cross-origin redirect CVE-2026-111769', () => {
+  const fixed = {
+    '@modelcontextprotocol/client': '2.3.0',
+    '@modelcontextprotocol/core': '2.3.0',
+    '@modelcontextprotocol/sdk': '1.32.0',
+  };
+  for (const [name, version] of Object.entries(fixed)) {
+    assert.equal(manifest.overrides?.[name], version, `${name} must be constrained in the manifest`);
+    assert.equal(lock.packages?.[`node_modules/${name}`]?.version, version, `${name} must resolve to the patched version`);
+    assert.match(lock.packages?.[`node_modules/${name}`]?.integrity ?? '', /^sha512-/);
+  }
+  assert.deepEqual(lock.packages?.['']?.overrides, fixed);
+});
+
 test('firecrawl-mcp has one exact manifest version source and reproducible public install', () => {
   const version = manifest?.dependencies?.['firecrawl-mcp'];
   assert.match(version, /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
