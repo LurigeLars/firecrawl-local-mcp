@@ -226,7 +226,10 @@ services:
     restart: "no"
 
   redis:
-    image: redis:8.10.2-alpine
+    image: firecrawl-redis:patched
+    build:
+      context: ../security
+      dockerfile: Dockerfile.redis-security
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
