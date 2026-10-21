@@ -12,17 +12,33 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 # Keep this file byte-aligned with pinned upstream except for this Go build stage.
 # Remove once upstream satisfies firecrawl-local-mcp issue #66 promotion gates.
 FROM golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS go-build
+# The pinned builder is build-time only; install the patched Go compiler from
+# the official signed-distribution SHA256 values before compiling the shared library.
+# This avoids leaving an unverified/floating builder digest in the release path.
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) suffix=amd64; digest=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d ;; \
+      arm64) suffix=arm64; digest=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052 ;; \
+      *) echo "Unsupported Go builder architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.google.com/go/go1.26.9.linux-${suffix}.tar.gz" -o /tmp/go1269.tar.gz; \
+    echo "$digest  /tmp/go1269.tar.gz" | sha256sum -c -; \
+    rm -rf /usr/local/go; \
+    tar -C /usr/local -xzf /tmp/go1269.tar.gz; \
+    rm -f /tmp/go1269.tar.gz
 ENV GOTOOLCHAIN=local
+RUN go version | grep -F 'go1.26.9'
 WORKDIR /app
 COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
 
 RUN cd sharedLibs/go-html-to-md && \
-    go get golang.org/x/net@v0.58.0 && \
+    go get golang.org/x/net@v0.60.0 && \
     go mod download && \
-    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.58.0' && \
-    go version | grep -F 'go1.25.14' && \
+    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.60.0' && \
+    go version | grep -F 'go1.26.9' && \
     go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go && \
-    go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.58.0'
+    go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.60.0'
 
 FROM build-base AS build
 WORKDIR /app
@@ -199,7 +215,7 @@ RUN set -eu; \
     xnet="$(grep -F 'golang.org/x/net' /tmp/go-runtime-modules.txt || true)"; \
     test -n "$xnet"; \
     printf '%s\n' "$xnet"; \
-    if printf '%s\n' "$xnet" | grep -v -F 'v0.58.0'; then \
+    if printf '%s\n' "$xnet" | grep -v -F 'v0.60.0'; then \
       echo "unexpected golang.org/x/net version in runtime" >&2; \
       exit 1; \
     fi; \
@@ -214,10 +230,9 @@ for (const line of lines) {
   const [, file, minorText, patchText] = match;
   const minor = Number(minorText);
   const patch = Number(patchText);
-  const safe =
-    minor > 26 ||
-    (minor === 26 && patch >= 6) ||
-    (minor === 25 && patch >= 13);
+  // Fail for older binaries even if they passed last month's Go advisory:
+  // new Go standard library issues require at least go1.26.9.
+  const safe = minor > 26 || (minor === 26 && patch >= 9);
   if (!safe) vulnerable.push({ file, version: `go1.${minor}.${patch}` });
 }
 if (vulnerable.length) {
