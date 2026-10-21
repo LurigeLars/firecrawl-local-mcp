@@ -1,0 +1,12 @@
+# Purpose-built public Node gateway image; npm is not used at runtime.
+# Version and exact upstream image digest pinned for reproducible review.
+FROM node:26.12.0-alpine@sha256:45eaed5f3cf2ff1151b09eca776078cceb1df505370a34d3e7b7f4cd9bb46364
+
+RUN apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+    && test ! -e /usr/local/lib/node_modules/npm \
+    && test -x /usr/local/bin/node
+
+USER node
+WORKDIR /app
+CMD ["node", "/app/gateway.mjs"]

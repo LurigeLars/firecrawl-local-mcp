@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24.21.0"
 
@@ -115,8 +115,25 @@ jobs:
         shell: bash
         run: node public/access-test.mjs "file://$GITHUB_WORKSPACE/public/gateway/gateway.mjs"
 
-      - name: Build public MCP image
-        run: docker build --pull -f public/Dockerfile.mcp public
+      - name: Build and inspect patched Redis zlib runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull -t firecrawl-redis:review -f security/Dockerfile.redis-security security
+          docker run --rm --entrypoint sh firecrawl-redis:review -c "apk info -v zlib | grep -qvFx 'zlib-1.3.2-r0'"
+          docker run --rm --entrypoint redis-server firecrawl-redis:review --version
+
+      - name: Build and verify npm-free public MCP and gateway images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull -t firecrawl-mcp-runtime:review -f public/Dockerfile.mcp public
+          docker build --pull -t firecrawl-gateway-runtime:review -f public/Dockerfile.gateway public
+          for image in firecrawl-mcp-runtime:review firecrawl-gateway-runtime:review; do
+            docker run --rm --entrypoint sh "$image" -c 'test ! -e /usr/local/lib/node_modules/npm && test -x /usr/local/bin/node && node --version'
+          done
+          docker run --rm --entrypoint sh firecrawl-mcp-runtime:review -c 'test -e /app/node_modules/.bin/firecrawl-mcp'
+
 
   node26-compat:
     name: node26-compat
@@ -128,7 +145,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "26.9.0"
 
@@ -175,5 +192,13 @@ jobs:
         shell: bash
         run: node public/access-test.mjs "file://$GITHUB_WORKSPACE/public/gateway/gateway.mjs"
 
-      - name: Build public MCP image
-        run: docker build --pull -f public/Dockerfile.mcp public
+      - name: Build and verify npm-free public MCP and gateway images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull -t firecrawl-mcp-runtime:review -f public/Dockerfile.mcp public
+          docker build --pull -t firecrawl-gateway-runtime:review -f public/Dockerfile.gateway public
+          for image in firecrawl-mcp-runtime:review firecrawl-gateway-runtime:review; do
+            docker run --rm --entrypoint sh "$image" -c 'test ! -e /usr/local/lib/node_modules/npm && test -x /usr/local/bin/node && node --version'
+          done
+          docker run --rm --entrypoint sh firecrawl-mcp-runtime:review -c 'test -e /app/node_modules/.bin/firecrawl-mcp'
