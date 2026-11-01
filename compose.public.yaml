@@ -10,6 +10,9 @@ services:
       dockerfile: Dockerfile.mcp
     environment:
       FIRECRAWL_API_URL: http://api:3002
+      # Upstream MCP HTTP host validation requires the reverse-proxy's
+      # internal Docker DNS name. Never use wildcard '*' here.
+      FIRECRAWL_MCP_ALLOWED_HOSTS: mcp
     networks: [backend, edge]
     depends_on: [api]
     read_only: true
