@@ -88,13 +88,30 @@ function Invoke-McpStageSecurityCheck {
         if (Test-Path -LiteralPath $ReceiptPath) {
             Remove-Item -LiteralPath $ReceiptPath -Force -ErrorAction Stop
         }
-        # Preserve the exact running MCP image BEFORE replacing the latest tag.
+        # Retain a fast rollback when Docker still has the old image.
+        # The running container may outlive its image store entry. In that case
+        # Git history is the recovery source and build must still be possible.
         $PreviousId = Invoke-McpDocker -Arguments @('inspect','--format','{{.Image}}','firecrawl-mcp-1')
         if ($PreviousId -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Running MCP image identity unavailable.' }
         $RollbackTag = 'firecrawl-mcp:rollback-' + $PreviousId.Substring(7,12)
-        $null = Invoke-McpDocker -Arguments @('image','tag',$PreviousId,$RollbackTag)
-        $PreservedId = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$RollbackTag)
-        if ($PreservedId -cne $PreviousId) { throw 'Rollback image preservation failed before build.' }
+        $RollbackAvailable = $false
+        $OldImagePresent = $false
+        try {
+            $OldImage = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$PreviousId)
+            if ($OldImage -cne $PreviousId) { throw 'Old MCP image ID does not match running container.' }
+            $OldImagePresent = $true
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'Reviewed Docker operation inspect-image failed with exit code') {
+                throw
+            }
+        }
+        if ($OldImagePresent) {
+            $null = Invoke-McpDocker -Arguments @('image','tag',$PreviousId,$RollbackTag)
+            $PreservedId = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$RollbackTag)
+            if ($PreservedId -cne $PreviousId) { throw 'Rollback image preservation failed before build.' }
+            $RollbackAvailable = $true
+        }
         $null = Invoke-McpDocker -Arguments (@($ComposeArguments) + @('build', 'mcp'))
         $Id = Get-McpImageId
         # Require 0 high/critical CVEs, including ones without a patch.
@@ -104,6 +121,7 @@ function Invoke-McpStageSecurityCheck {
             schema_version = 1
             image_id = $Id
             rollback_image_id = $PreviousId
+            rollback_available = $RollbackAvailable
             scan = 'scout_cves_critical_high_zero'
             created_utc = [DateTimeOffset]::UtcNow.ToString('o')
             source_hashes = Get-McpSourceHashes -ProjectRoot $ProjectRoot
@@ -127,7 +145,8 @@ function Invoke-McpStageSecurityCheck {
     if ($Receipt.schema_version -ne 1 -or
         $Receipt.scan -cne 'scout_cves_critical_high_zero' -or
         [string]$Receipt.image_id -cnotmatch '^sha256:[0-9a-f]{64}$' -or
-        [string]$Receipt.rollback_image_id -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        [string]$Receipt.rollback_image_id -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+        $Receipt.rollback_available -isnot [bool]) {
         throw 'Staged MCP image receipt is invalid.'
     }
     $Age = [DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$Receipt.created_utc)
@@ -159,8 +178,10 @@ function Invoke-McpStageSecurityCheck {
         throw 'Running MCP image changed since staging.'
     }
     $RollbackTag = 'firecrawl-mcp:rollback-' + $PreviousId.Substring(7,12)
-    $StoredId = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$RollbackTag)
-    if ($StoredId -cne $PreviousId) { throw 'Preserved rollback image is missing or changed.' }
+    if ($Receipt.rollback_available) {
+        $StoredId = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$RollbackTag)
+        if ($StoredId -cne $PreviousId) { throw 'Preserved rollback image is missing or changed.' }
+    }
     $Changed = $false
     try {
         $Changed = $true
@@ -172,14 +193,32 @@ function Invoke-McpStageSecurityCheck {
             throw 'MCP candidate failed post-deployment verification.'
         }
         Remove-Item -LiteralPath $ReceiptPath -Force -ErrorAction Stop
-        "MCP deployed $Id; previous image retained as $RollbackTag."
+        if ($Receipt.rollback_available) {
+            "MCP deployed $Id; original image retained as $RollbackTag."
+        }
+        else {
+            "MCP deployed $Id; original image unavailable, Git history is the recovery source."
+        }
     }
     catch {
         if ($Changed) {
             $FailureMessage = $_.Exception.Message
-            $null = Invoke-McpDocker -Arguments @('image','tag',$PreviousId,'firecrawl-mcp:latest')
-            $null = Invoke-McpDocker -Arguments (@($ComposeArguments) + @('up','-d','--no-deps','--no-build','--force-recreate','mcp'))
-            throw "MCP deploy failed and rollback was attempted: $FailureMessage"
+            if (-not $Receipt.rollback_available) {
+                throw "MCP deploy failed; original image unavailable. Rebuild from pinned Git source for recovery. Cause: $FailureMessage"
+            }
+            try {
+                $null = Invoke-McpDocker -Arguments @('image','tag',$PreviousId,'firecrawl-mcp:latest')
+                $null = Invoke-McpDocker -Arguments (@($ComposeArguments) + @('up','-d','--no-deps','--no-build','--force-recreate','mcp'))
+                $Running = Invoke-McpDocker -Arguments @('inspect','--format','{{.State.Running}}','firecrawl-mcp-1')
+                $ActiveId = Invoke-McpDocker -Arguments @('inspect','--format','{{.Image}}','firecrawl-mcp-1')
+                if ($Running -cne 'true' -or $ActiveId -cne $PreviousId) {
+                    throw 'Rollback verification failed.'
+                }
+            }
+            catch {
+                throw "MCP deploy failed and rollback also failed. Original cause: $FailureMessage"
+            }
+            throw "MCP deploy failed; previous MCP image restored. Cause: $FailureMessage"
         }
         throw
     }
