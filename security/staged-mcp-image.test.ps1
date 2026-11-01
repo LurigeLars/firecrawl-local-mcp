@@ -47,6 +47,13 @@ try {
             return ''
         }
         if ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'inspect') {
+            $Target = [string]$Arguments[-1]
+            if ($Target -ceq $script:PreviousId) {
+                if (-not $script:RollbackAvailable) {
+                    throw 'Reviewed Docker operation inspect-image failed with exit code 1.'
+                }
+                return $script:PreviousId
+            }
             if (-not $script:RollbackPinned) { throw 'Simulated missing rollback tag' }
             return $script:PreviousId
         }
@@ -72,20 +79,17 @@ try {
     catch {
         if ($_.Exception.Message -notmatch 'Missing successful') { throw }
     }
-    try {
-        Invoke-McpStageSecurityCheck -Action build -ComposeArguments $Args -ProjectRoot $TempRoot
-        throw 'Build unexpectedly accepted an unavailable rollback image'
-    }
-    catch { if ($_.Exception.Message -notmatch 'Simulated missing previous image') { throw } }
-    if ($script:BuildCount -ne 0) { throw 'No image build may start without a usable rollback' }
-    $script:RollbackAvailable = $true
-
+    # Missing old Docker image must no longer prevent a scanned build.
     Invoke-McpStageSecurityCheck -Action build -ComposeArguments $Args -ProjectRoot $TempRoot
-    if ($script:BuildCount -ne 1 -or -not $script:RollbackPinned) {
-        throw 'Expected exactly one build after rollback was preserved'
+    if ($script:BuildCount -ne 1 -or $script:RollbackPinned) {
+        throw 'Expected a build without preserved rollback image'
     }
     if (-not (Test-Path -LiteralPath $Receipt)) { throw 'Successful scan receipt not recorded' }
     if ($script:DeployCount -ne 0) { throw 'Build restarted the service' }
+    $InitialReceipt = Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json
+    if ($InitialReceipt.rollback_available -ne $false) {
+        throw 'Missing Docker image was incorrectly reported as recoverable'
+    }
 
     # Changed source, image mismatch, stale evidence or scanner failure must
     # independently block release without attempting container changes.
@@ -130,7 +134,23 @@ try {
     Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments $Args -ProjectRoot $TempRoot
     if ($script:DeployCount -ne 1) { throw 'Expected exactly one scoped redeploy' }
     if (Test-Path -LiteralPath $Receipt) { throw 'Successful deploy did not consume scan receipt' }
-    Write-Output 'Staged MCP security gate: PASS'
+
+    # Exercise original image retention when Docker still has it.
+    $script:ActiveId = $script:PreviousId
+    $script:DeployCount = 0
+    $script:RollbackAvailable = $true
+    $script:RollbackPinned = $false
+    Invoke-McpStageSecurityCheck -Action build -ComposeArguments $Args -ProjectRoot $TempRoot
+    if ($script:BuildCount -ne 2 -or -not $script:RollbackPinned) {
+        throw 'Build did not retain existing original image'
+    }
+    $SecondReceipt = Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json
+    if ($SecondReceipt.rollback_available -ne $true) {
+        throw 'Existing rollback image is not recorded in receipt'
+    }
+    Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments $Args -ProjectRoot $TempRoot
+    if ($script:DeployCount -ne 1) { throw 'Expected one scoped rollout with backup present' }
+    Write-Output 'Staged MCP security gate (with and without old image): PASS'
 }
 finally {
     $env:LOCALAPPDATA = $OldLocal
