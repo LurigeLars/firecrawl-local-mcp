@@ -32,12 +32,25 @@ try {
     $script:Running = 'true'
     $script:ScanFails = $false
     $script:DeployCount = 0
+    $script:BuildCount = 0
+    $script:RollbackAvailable = $false
+    $script:RollbackPinned = $false
     function Get-McpImageId { return $script:ImageId }
     function Invoke-McpDocker {
         param([string[]]$Arguments, [int]$TimeoutSeconds = 1800)
         if ($Arguments[0] -eq 'scout' -and $script:ScanFails) {
             throw 'Simulated CVE or scanner failure'
         }
+        if ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'tag') {
+            if (-not $script:RollbackAvailable) { throw 'Simulated missing previous image' }
+            $script:RollbackPinned = $true
+            return ''
+        }
+        if ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'inspect') {
+            if (-not $script:RollbackPinned) { throw 'Simulated missing rollback tag' }
+            return $script:PreviousId
+        }
+        if ($Arguments -contains 'build') { $script:BuildCount += 1 }
         if ($Arguments[0] -eq 'inspect') {
             if ($Arguments -contains '{{.State.Running}}') { return $script:Running }
             if ($Arguments -contains '{{.Image}}') { return $script:ActiveId }
@@ -59,7 +72,18 @@ try {
     catch {
         if ($_.Exception.Message -notmatch 'Missing successful') { throw }
     }
+    try {
+        Invoke-McpStageSecurityCheck -Action build -ComposeArguments $Args -ProjectRoot $TempRoot
+        throw 'Build unexpectedly accepted an unavailable rollback image'
+    }
+    catch { if ($_.Exception.Message -notmatch 'Simulated missing previous image') { throw } }
+    if ($script:BuildCount -ne 0) { throw 'No image build may start without a usable rollback' }
+    $script:RollbackAvailable = $true
+
     Invoke-McpStageSecurityCheck -Action build -ComposeArguments $Args -ProjectRoot $TempRoot
+    if ($script:BuildCount -ne 1 -or -not $script:RollbackPinned) {
+        throw 'Expected exactly one build after rollback was preserved'
+    }
     if (-not (Test-Path -LiteralPath $Receipt)) { throw 'Successful scan receipt not recorded' }
     if ($script:DeployCount -ne 0) { throw 'Build restarted the service' }
 
