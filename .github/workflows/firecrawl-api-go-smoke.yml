@@ -53,7 +53,7 @@ jobs:
           set -euo pipefail
           docker run --rm --entrypoint /usr/local/go/bin/go firecrawl-go-security-review:local version -m \
             /app/sharedLibs/go-html-to-md/libhtml-to-markdown.so | tee go-build-info.txt
-          grep -F 'go1.26.9' go-build-info.txt
+          grep -F 'go1.26.10' go-build-info.txt
           grep -F 'golang.org/x/net' go-build-info.txt | grep -F 'v0.60.0'
           test "$(grep -Fc 'golang.org/x/net' go-build-info.txt)" -ge 1
       - name: Build full temporary Firecrawl API runtime and inspect evidence
@@ -76,5 +76,5 @@ jobs:
             test -s /app/GO_RUNTIME_MODULES.txt &&
             test -s /app/dist/src/harness.js &&
             grep -F "golang.org/x/net" /app/GO_RUNTIME_MODULES.txt | grep -F "v0.60.0" &&
-            ! grep -E "go1\\.(2[0-5]|26\\.[0-8])" /app/GO_RUNTIME_MODULES.txt
+            grep -F "go1.26.10" /app/GO_RUNTIME_MODULES.txt
           '
