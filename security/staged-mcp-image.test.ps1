@@ -41,6 +41,10 @@ try {
         if ($Arguments[0] -eq 'scout' -and $script:ScanFails) {
             throw 'Simulated CVE or scanner failure'
         }
+        if ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'ls') {
+            if ($script:RollbackAvailable) { return $script:PreviousId }
+            return ''
+        }
         if ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'tag') {
             if (-not $script:RollbackAvailable) { throw 'Simulated missing previous image' }
             $script:RollbackPinned = $true
