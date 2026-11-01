@@ -103,12 +103,12 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
   assert.match(firecrawlApiHotfix, /FROM golang:1\.25\.14@sha256:[0-9a-f]{64} AS go-build/);
   assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
-  assert.match(firecrawlApiHotfix, /go1\.26\.9\.linux-/);
+  assert.match(firecrawlApiHotfix, /go1\.26\.10\.linux-/);
   assert.match(firecrawlApiHotfix, /ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5/);
   assert.match(firecrawlApiHotfix, /sha256sum -c -/);
   assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.60\.0/);
   assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.60\.0'/);
-  assert.match(firecrawlApiHotfix, /go version \| grep -F 'go1\.26\.9'/);
+  assert.match(firecrawlApiHotfix, /go version \| grep -F 'go1\.26\.10'/);
   assert.match(firecrawlApiHotfix, /go version -m libhtml-to-markdown\.so[\s\S]*golang\.org\/x\/net[\s\S]*v0\.60\.0/);
   assert.match(firecrawlApiHotfix, /FROM runtime-base AS build-base/);
   assert.match(firecrawlApiHotfix, /FROM build-base AS build/);
