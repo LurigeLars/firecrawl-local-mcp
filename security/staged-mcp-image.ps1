@@ -22,7 +22,18 @@ function Invoke-McpDocker {
             throw 'Reviewed Docker operation timed out.'
         }
         $Code = [int]$Process.ExitCode
-        if ($Code -ne 0) { throw "Reviewed Docker operation failed with exit code $Code." }
+        if ($Code -ne 0) {
+            # Report only the reviewed Docker operation class and a bounded,
+            # sanitized diagnostic. Never include arguments/env/secret values.
+            $Kind = if ($Arguments[0] -eq 'scout') { 'scout-cves' }
+                elseif ($Arguments[0] -eq 'inspect') { 'inspect-container' }
+                elseif ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'tag') { 'tag-rollback-image' }
+                elseif ($Arguments[0] -eq 'image') { 'inspect-image' }
+                elseif ($Arguments[0] -eq 'compose' -and $Arguments -contains 'build') { 'compose-build-mcp' }
+                elseif ($Arguments[0] -eq 'compose' -and $Arguments -contains 'up') { 'compose-redeploy-mcp' }
+                else { 'reviewed-docker-command' }
+            throw "Reviewed Docker operation $Kind failed with exit code $Code. See local private Docker diagnostics."
+        }
         $Text = if (Test-Path -LiteralPath $OutFile) {
             (Get-Content -LiteralPath $OutFile -Raw -ErrorAction Stop).Trim()
         } else { '' }
