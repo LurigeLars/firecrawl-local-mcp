@@ -241,3 +241,6 @@ jobs:
       - name: Verify strict environment cleanup without any external secrets
         shell: pwsh
         run: ./security/env-restoration.test.ps1
+      - name: Verify scoped staged build, CVE and rollback gates without Docker
+        shell: pwsh
+        run: ./security/staged-mcp-image.test.ps1
