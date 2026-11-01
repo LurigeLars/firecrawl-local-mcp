@@ -123,6 +123,7 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
   assert.match(launcher, /Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments \$compose/);
   assert.match(staged, /Invoke-McpDocker -Arguments \(@\(\$ComposeArguments\) \+ @\('build', 'mcp'\)\)/);
   assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code'/);
+  assert.match(staged, /if \(\$null -ne \$RawText\)/);
   assert.match(staged, /image_id = \$Id/);
   assert.match(staged, /rollback_image_id = \$PreviousId/);
   assert.match(staged, /'image','ls','--all','--no-trunc'/);
