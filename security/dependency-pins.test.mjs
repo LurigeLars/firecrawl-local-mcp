@@ -33,6 +33,16 @@ test('Redis runtime uses patched zlib without exposing wrapper secrets to Docker
   assert.match(composeLocal, /redis:[\s\S]*image: firecrawl-redis:patched\n\s+build:[\s\S]*context: \.\.\/security/);
 });
 
+
+test('public MCP installs only patched Zod 4 without a vulnerable nested v3 copy', () => {
+  assert.equal(manifest.overrides?.zod, '4.6.7');
+  const zodPackages = Object.entries(lock.packages ?? {}).filter(([path]) => /(?:^|\/)node_modules\/zod$/.test(path));
+  assert.ok(zodPackages.length > 0, 'Zod must exist in installed public MCP dependencies');
+  for (const [path, metadata] of zodPackages) {
+    assert.equal(metadata.version, '4.6.7', `vulnerable Zod package at ${path}`);
+  }
+});
+
 test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isolation CVEs', () => {
   const fixed = {
     '@modelcontextprotocol/client': '2.3.0',
