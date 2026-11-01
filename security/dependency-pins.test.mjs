@@ -39,7 +39,7 @@ test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isol
     '@modelcontextprotocol/core': '2.3.0',
     '@modelcontextprotocol/sdk': '1.32.0',
     '@modelcontextprotocol/server': '2.3.0',
-    'follow-redirects': '1.16.1',
+    'follow-redirects': '1.16.2',
     'axios': '1.20.0',
   };
   for (const [name, version] of Object.entries(fixed)) {
