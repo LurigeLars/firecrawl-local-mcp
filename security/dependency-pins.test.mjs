@@ -104,7 +104,7 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /FROM golang:1\.25\.14@sha256:[0-9a-f]{64} AS go-build/);
   assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
   assert.match(firecrawlApiHotfix, /go1\.26\.9\.linux-/);
-  assert.match(firecrawlApiHotfix, /42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d/);
+  assert.match(firecrawlApiHotfix, /ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5/);
   assert.match(firecrawlApiHotfix, /sha256sum -c -/);
   assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.60\.0/);
   assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.60\.0'/);
@@ -117,7 +117,7 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /\/usr\/local\/go\/bin\/go version -m "\$f"/);
   assert.match(firecrawlApiHotfix, /grep -v -F 'v0\.60\.0'/);
   assert.match(firecrawlApiHotfix, /runtime contains Go binaries built with toolchains vulnerable to CVE-2026-39821/);
-  assert.match(firecrawlApiHotfix, /minor === 26 && patch >= 9/);
+  assert.match(firecrawlApiHotfix, /minor === 26 && patch >= 10/);
   assert.match(firecrawlApiHotfix, /FROM runtime AS final/);
   assert.match(firecrawlApiHotfix, /GO_RUNTIME_MODULES\.txt/);
   assert.match(firecrawlApiHotfix, /FROM node:22\.23\.3-slim@sha256:[0-9a-f]{64} AS runtime-base/);
