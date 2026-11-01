@@ -40,6 +40,22 @@ updates:
           - "patch"
 
 
+  # Reviewed Redis security image uses a dedicated Dockerfile under /security.
+  # Dependabot proposals must pass image security checks before promotion.
+  - package-ecosystem: "docker"
+    directory: "/security"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:15"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 2
+    groups:
+      security-redis-minor-patch:
+        applies-to: "version-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
   # firecrawl-mcp runtime dependency shared by the public image and local stdio proxy.
   - package-ecosystem: "npm"
     directory: "/public"
