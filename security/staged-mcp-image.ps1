@@ -34,9 +34,14 @@ function Invoke-McpDocker {
                 else { 'reviewed-docker-command' }
             throw "Reviewed Docker operation $Kind failed with exit code $Code. See local private Docker diagnostics."
         }
-        $Text = if (Test-Path -LiteralPath $OutFile) {
-            (Get-Content -LiteralPath $OutFile -Raw -ErrorAction Stop).Trim()
-        } else { '' }
+        # Successful Docker Compose commands may write nothing to stdout.
+        # Get-Content -Raw returns $null for an empty file, so never call
+        # .Trim() before checking for a value.
+        $Text = ''
+        if (Test-Path -LiteralPath $OutFile) {
+            $RawText = Get-Content -LiteralPath $OutFile -Raw -ErrorAction Stop
+            if ($null -ne $RawText) { $Text = ([string]$RawText).Trim() }
+        }
         return $Text
     }
     finally {

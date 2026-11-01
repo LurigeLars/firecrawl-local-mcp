@@ -16,6 +16,12 @@ const composeLocal = read('compose.local.yaml');
 const redisDockerfile = read('security/Dockerfile.redis-security');
 const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfile');
 
+test('public MCP allows only the Docker internal gateway hostname (no wildcard)', () => {
+  const block = publicCompose.split('  mcp:')[1]?.split('\n  gateway:')[0] ?? '';
+  assert.match(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\s*mcp(?:\s|$)/);
+  assert.doesNotMatch(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\s*["']?\*/);
+});
+
 test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin patched Alpine image', () => {
   for (const source of [dockerfile, gatewayDockerfile]) {
     assert.match(source, /^FROM node:26\.13\.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94$/m);
@@ -117,6 +123,7 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
   assert.match(launcher, /Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments \$compose/);
   assert.match(staged, /Invoke-McpDocker -Arguments \(@\(\$ComposeArguments\) \+ @\('build', 'mcp'\)\)/);
   assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code'/);
+  assert.match(staged, /if \(\$null -ne \$RawText\)/);
   assert.match(staged, /image_id = \$Id/);
   assert.match(staged, /rollback_image_id = \$PreviousId/);
   assert.match(staged, /'image','ls','--all','--no-trunc'/);
