@@ -324,24 +324,30 @@ function Set-RuntimeHookSecrets([bool]$UseRealSecrets) {
     }
 }
 
+function Restore-OptionalEnvironmentVariable(
+    [Parameter(Mandatory)][string]$Name,
+    [bool]$WasSet,
+    [AllowNull()][string]$Value
+) {
+    $Path = "Env:$Name"
+    if ($WasSet) {
+        Set-Item -LiteralPath $Path -Value $Value -ErrorAction Stop
+    }
+    elseif (Test-Path -LiteralPath $Path) {
+        # A missing environment variable is normal. Do not add a suppressed
+        # ItemNotFound ErrorRecord to the host runner's strict $Error gate.
+        Remove-Item -LiteralPath $Path -ErrorAction Stop
+    }
+}
+
 function Restore-ComposeServiceSecrets(
     [bool]$PostgresWasSet,
     [AllowNull()][string]$PostgresValue,
     [bool]$SearxngWasSet,
     [AllowNull()][string]$SearxngValue
 ) {
-    if ($PostgresWasSet) {
-        $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = $PostgresValue
-    } else {
-        Remove-Item Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET -ErrorAction SilentlyContinue
-    }
-
-    if ($SearxngWasSet) {
-        $env:FIRECRAWL_SEARXNG_SECRET_SECRET = $SearxngValue
-    } else {
-        Remove-Item Env:FIRECRAWL_SEARXNG_SECRET_SECRET -ErrorAction SilentlyContinue
-    }
-
+    Restore-OptionalEnvironmentVariable -Name "FIRECRAWL_POSTGRES_PASSWORD_SECRET" -WasSet $PostgresWasSet -Value $PostgresValue
+    Restore-OptionalEnvironmentVariable -Name "FIRECRAWL_SEARXNG_SECRET_SECRET" -WasSet $SearxngWasSet -Value $SearxngValue
 }
 function Test-LegacyGeminiKey {
     $path = "$root\secrets.env"
@@ -657,10 +663,6 @@ finally {
         @{ Name = "FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET"; WasSet = $proxyPasswordWasSet; Value = $proxyPasswordOriginal },
         @{ Name = "PLAYWRIGHT_MICROSERVICE_URL"; WasSet = $playwrightUrlWasSet; Value = $playwrightUrlOriginal }
     )) {
-        if ($item.WasSet) {
-            Set-Item -Path ("Env:" + $item.Name) -Value $item.Value
-        } else {
-            Remove-Item -Path ("Env:" + $item.Name) -ErrorAction SilentlyContinue
-        }
+        Restore-OptionalEnvironmentVariable -Name ([string]$item.Name) -WasSet ([bool]$item.WasSet) -Value $item.Value
     }
 }
