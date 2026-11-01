@@ -18,7 +18,7 @@ const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfil
 
 test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin patched Alpine image', () => {
   for (const source of [dockerfile, gatewayDockerfile]) {
-    assert.match(source, /^FROM node:26\.12\.0-alpine@sha256:[0-9a-f]{64}$/m);
+    assert.match(source, /^FROM node:26\.12\.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797$/m);
     assert.match(source, /apk upgrade --no-cache/);
     assert.match(source, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
     assert.match(source, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);
@@ -44,8 +44,17 @@ test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isol
   };
   for (const [name, version] of Object.entries(fixed)) {
     assert.equal(manifest.overrides?.[name], version, `${name} must be constrained in the manifest`);
-    assert.equal(lock.packages?.[`node_modules/${name}`]?.version, version, `${name} must resolve to the patched version`);
-    assert.match(lock.packages?.[`node_modules/${name}`]?.integrity ?? '', /^sha512-/);
+    const resolved = lock.packages?.[`node_modules/${name}`];
+    if (!resolved) {
+      // firecrawl-mcp 3.36.x no longer brings in these optional MCP packages.
+      // Keep the patched override for any future reintroduction, while requiring
+      // core/server and all HTTP transport packages to be installed and checked.
+      assert.ok(['@modelcontextprotocol/client', '@modelcontextprotocol/sdk'].includes(name),
+        `${name} must resolve to the patched version if used`);
+      continue;
+    }
+    assert.equal(resolved.version, version, `${name} must resolve to the patched version`);
+    assert.match(resolved.integrity ?? '', /^sha512-/);
   }
 });
 
