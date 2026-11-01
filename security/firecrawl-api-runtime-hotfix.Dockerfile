@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:22.23.3-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS runtime-base
+FROM node:22.23.4-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS runtime-base
 
 FROM runtime-base AS build-base
 ENV PNPM_HOME="/pnpm"
