@@ -3,6 +3,7 @@
 param([ValidateSet('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
 
 $root = $PSScriptRoot
+. (Join-Path $root "security\staged-mcp-image.ps1")
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
@@ -593,19 +594,13 @@ switch ($Action) {
         # Stage only the reviewed public MCP image. No container is recreated,
         # and no unrelated Firecrawl build contexts or images are touched.
         Assert-UpstreamFirecrawlPin
-        docker @compose build mcp
-        if ($LASTEXITCODE -ne 0) { throw "docker compose build mcp failed with exit code $LASTEXITCODE" }
-        'Firecrawl MCP candidate image built; no containers redeployed.'
+        Invoke-McpStageSecurityCheck -Action build -ComposeArguments $compose -ProjectRoot $root
     }
     'redeploy-mcp' {
         # Recreate only the MCP service from the image already staged and scanned.
         # Never rebuild here: the caller must inspect the candidate first.
         Assert-UpstreamFirecrawlPin
-        docker @compose up -d --no-deps --no-build --force-recreate mcp
-        if ($LASTEXITCODE -ne 0) { throw "docker compose redeploy-mcp failed with exit code $LASTEXITCODE" }
-        docker @compose ps mcp
-        if ($LASTEXITCODE -ne 0) { throw "docker compose ps mcp failed with exit code $LASTEXITCODE" }
-        'Firecrawl MCP service recreated; other services were not targeted.'
+        Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments $compose -ProjectRoot $root
     }
     'sync-upstream' {
         Sync-UpstreamFirecrawlPin
