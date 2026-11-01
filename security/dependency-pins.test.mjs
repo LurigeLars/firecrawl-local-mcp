@@ -44,8 +44,17 @@ test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isol
   };
   for (const [name, version] of Object.entries(fixed)) {
     assert.equal(manifest.overrides?.[name], version, `${name} must be constrained in the manifest`);
-    assert.equal(lock.packages?.[`node_modules/${name}`]?.version, version, `${name} must resolve to the patched version`);
-    assert.match(lock.packages?.[`node_modules/${name}`]?.integrity ?? '', /^sha512-/);
+    const resolved = lock.packages?.[`node_modules/${name}`];
+    if (!resolved) {
+      // firecrawl-mcp 3.36.x no longer brings in these optional MCP packages.
+      // Keep the patched override for any future reintroduction, while requiring
+      // core/server and all HTTP transport packages to be installed and checked.
+      assert.ok(['@modelcontextprotocol/client', '@modelcontextprotocol/sdk'].includes(name),
+        `${name} must resolve to the patched version if used`);
+      continue;
+    }
+    assert.equal(resolved.version, version, `${name} must resolve to the patched version`);
+    assert.match(resolved.integrity ?? '', /^sha512-/);
   }
 });
 

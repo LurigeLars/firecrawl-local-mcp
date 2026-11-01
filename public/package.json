@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "dependencies": {
-    "firecrawl-mcp": "3.30.3"
+    "firecrawl-mcp": "3.36.0"
   },
   "overrides": {
     "@modelcontextprotocol/client": "2.3.0",
