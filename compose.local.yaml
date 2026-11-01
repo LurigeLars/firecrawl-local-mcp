@@ -159,7 +159,7 @@ services:
 
   public-proxy-metrics-init:
     profiles: ["public-proxy"]
-    image: node:26.12.0-alpine
+    image: node:26.12.1-alpine
     user: root
     command: ["sh", "-c", "chown 1000:1000 /var/lib/firecrawl-proxy"]
     volumes:
@@ -174,7 +174,7 @@ services:
 
   playwright-router:
     profiles: ["public-proxy"]
-    image: node:26.12.0-alpine
+    image: node:26.12.1-alpine
     user: node
     cpus: 0.25
     mem_limit: 128M
@@ -210,7 +210,7 @@ services:
 
   public-proxy-smoke:
     profiles: ["smoke"]
-    image: node:26.12.0-alpine
+    image: node:26.12.1-alpine
     user: node
     command: ["node", "/app/public-proxy-live-smoke.mjs"]
     environment:
@@ -234,7 +234,7 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
   rabbitmq:
-    image: rabbitmq:4.3.6-management-alpine
+    image: rabbitmq:4.4.0-management-alpine
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
@@ -301,7 +301,7 @@ services:
 
   # Routes Firecrawl searches: Google+Startpage (language all) first, Bing (en-GB) as fallback; handles site: filters.
   searxng-proxy:
-    image: node:26.12.0-alpine
+    image: node:26.12.1-alpine
     command: ["node", "/app/lang-proxy.mjs"]
     user: node
     environment:
@@ -319,7 +319,7 @@ services:
 
   # Sends LLM calls to Gemini when the runtime secret is present, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
   llm-proxy:
-    image: node:26.12.0-alpine
+    image: node:26.12.1-alpine
     command: ["node", "/app/trim-proxy.mjs"]
     user: node
     environment:
