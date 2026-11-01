@@ -138,11 +138,14 @@ jobs:
             import assert from "node:assert/strict";
             import * as sdk from "firecrawl";
             import { z } from "zod";
+            import { z as z3 } from "zod/v3";
             import { zodToJsonSchema } from "zod-to-json-schema";
             assert.ok(Object.keys(sdk).length > 0, "Firecrawl SDK must load");
-            const converted = zodToJsonSchema(z.object({ url: z.string() }));
-            assert.equal(converted.properties?.url?.type, "string", "Zod to JSON Schema compatibility");
-            console.log("Firecrawl SDK / Zod compatibility: PASS");
+            const convertedV4 = z.toJSONSchema(z.object({ url: z.string() }), { target: "draft-07" });
+            assert.equal(convertedV4.properties?.url?.type, "string", "Firecrawl SDK Zod v4 conversion path");
+            const convertedV3 = zodToJsonSchema(z3.object({ url: z3.string() }));
+            assert.equal(convertedV3.properties?.url?.type, "string", "Legacy v3 schema compatibility");
+            console.log("Firecrawl SDK / Zod v4 and v3 conversion: PASS");
           '
 
 
@@ -218,11 +221,14 @@ jobs:
             import assert from "node:assert/strict";
             import * as sdk from "firecrawl";
             import { z } from "zod";
+            import { z as z3 } from "zod/v3";
             import { zodToJsonSchema } from "zod-to-json-schema";
             assert.ok(Object.keys(sdk).length > 0, "Firecrawl SDK must load");
-            const converted = zodToJsonSchema(z.object({ url: z.string() }));
-            assert.equal(converted.properties?.url?.type, "string", "Zod to JSON Schema compatibility");
-            console.log("Firecrawl SDK / Zod compatibility: PASS");
+            const convertedV4 = z.toJSONSchema(z.object({ url: z.string() }), { target: "draft-07" });
+            assert.equal(convertedV4.properties?.url?.type, "string", "Firecrawl SDK Zod v4 conversion path");
+            const convertedV3 = zodToJsonSchema(z3.object({ url: z3.string() }));
+            assert.equal(convertedV3.properties?.url?.type, "string", "Legacy v3 schema compatibility");
+            console.log("Firecrawl SDK / Zod v4 and v3 conversion: PASS");
           '
 
   env-restore-windows:
