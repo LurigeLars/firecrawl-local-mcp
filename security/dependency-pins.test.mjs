@@ -27,7 +27,7 @@ test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin pat
 });
 
 test('Redis runtime uses patched zlib without exposing wrapper secrets to Docker build', () => {
-  assert.match(redisDockerfile, /^FROM redis:8\.10\.2-alpine@sha256:[0-9a-f]{64}$/m);
+  assert.match(redisDockerfile, /^FROM redis:8\.10\.3-alpine@sha256:21090af93f8324db2f0f0f4f38a7c60369d47d917e000c3423d89d2ae2883537$/m);
   assert.match(redisDockerfile, /apk upgrade --no-cache zlib/);
   assert.match(redisDockerfile, /grep -qvFx 'zlib-1\.3\.2-r0'/);
   assert.match(composeLocal, /redis:[\s\S]*image: firecrawl-redis:patched\n\s+build:[\s\S]*context: \.\.\/security/);
