@@ -9,20 +9,36 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 
 # Build Go shared library
 # TEMPORARY LOCAL SECURITY HOTFIX.
-# Keep this file byte-aligned with pinned upstream except for this Go build stage.
+# Based on reviewed upstream API v2.11.642, preserving current fork's pinned runtime base.
 # Remove once upstream satisfies firecrawl-local-mcp issue #66 promotion gates.
 FROM golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS go-build
+# The pinned builder is build-time only; install the patched Go compiler from
+# the official signed-distribution SHA256 values before compiling the shared library.
+# This avoids leaving an unverified/floating builder digest in the release path.
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) suffix=amd64; digest=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5 ;; \
+      arm64) suffix=arm64; digest=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797 ;; \
+      *) echo "Unsupported Go builder architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.google.com/go/go1.26.10.linux-${suffix}.tar.gz" -o /tmp/go12610.tar.gz; \
+    echo "$digest  /tmp/go12610.tar.gz" | sha256sum -c -; \
+    rm -rf /usr/local/go; \
+    tar -C /usr/local -xzf /tmp/go12610.tar.gz; \
+    rm -f /tmp/go12610.tar.gz
 ENV GOTOOLCHAIN=local
+RUN go version | grep -F 'go1.26.10'
 WORKDIR /app
 COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
 
 RUN cd sharedLibs/go-html-to-md && \
-    go get golang.org/x/net@v0.58.0 && \
+    go get golang.org/x/net@v0.60.0 && \
     go mod download && \
-    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.58.0' && \
-    go version | grep -F 'go1.25.14' && \
+    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.60.0' && \
+    go version | grep -F 'go1.26.10' && \
     go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go && \
-    go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.58.0'
+    go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.60.0'
 
 FROM build-base AS build
 WORKDIR /app
@@ -67,55 +83,16 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 
 COPY . .
 
-# TEMPORARY LOCAL SECURITY HOTFIX.
-# Firecrawl's pinned lock resolves Express -> proxy-addr 2.0.7. Force all
-# transitive consumers to patched 2.0.8 inside this image build only.
-RUN python3 - <<'PY'
-from pathlib import Path
-
-path = Path("pnpm-workspace.yaml")
-text = path.read_text(encoding="utf-8")
-needle = "overrides:\n"
-if needle not in text:
-    raise SystemExit("pnpm-workspace.yaml has no overrides block")
-text = text.replace(
-    needle,
-    'overrides:\n  proxy-addr: "2.0.8"\n  source-map-js: "1.2.2"\n',
-    1,
-)
-replacements = {
-    '  undici: "7.30.0"\n': '  undici: "7.29.1"\n',
-    '  "smol-toml@<1.7.1": "1.8.0"\n': '  "smol-toml@>=1.0.0 <1.9.0": "1.9.0"\n',
-    '  "shell-quote@<=1.8.4": "1.10.0"\n': '  "shell-quote@<1.11.0": "1.11.0"\n',
-}
-for old, new in replacements.items():
-    if old not in text:
-        raise SystemExit(f"expected upstream dependency pin not found: {old.strip()}")
-    text = text.replace(old, new, 1)
-path.write_text(text, encoding="utf-8")
-
-package = Path("package.json")
-package_text = package.read_text(encoding="utf-8")
-old_undici = '"undici": "7.30.0"'
-new_undici = '"undici": "7.29.1"'
-if old_undici not in package_text:
-    raise SystemExit("expected direct undici 7.30.0 pin not found")
-package.write_text(package_text.replace(old_undici, new_undici, 1), encoding="utf-8")
-PY
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/native/target \
-    pnpm install --no-frozen-lockfile && \
-    grep -q '^  proxy-addr@2\.0\.8:' pnpm-lock.yaml && \
-    ! grep -q '^  proxy-addr@2\.0\.7:' pnpm-lock.yaml && \
-    grep -q '^  source-map-js@1\.2\.2:' pnpm-lock.yaml && \
-    ! grep -q '^  source-map-js@1\.2\.1:' pnpm-lock.yaml && \
-    grep -q '^  smol-toml@1\.9\.0:' pnpm-lock.yaml && \
-    ! grep -q '^  smol-toml@1\.8\.0:' pnpm-lock.yaml && \
-    grep -q '^  shell-quote@1\.11\.0:' pnpm-lock.yaml && \
-    ! grep -q '^  shell-quote@1\.10\.0:' pnpm-lock.yaml && \
-    grep -q '^  undici@7\.29\.1:' pnpm-lock.yaml && \
-    ! grep -q '^  undici@7\.30\.0:' pnpm-lock.yaml
+# Pin enforcement: upstream v2.11.642 already carries the patched Node
+# overrides. Do not re-insert obsolete dependency overrides or downgrade undici.
+# The frozen lock install above must resolve exactly the reviewed upstream set.
+RUN set -eu; \
+    grep -F '"proxy-addr@>=2.0.0 <2.0.8": "2.0.8"' pnpm-workspace.yaml; \
+    grep -F '"source-map-js@>=1.0.0 <1.2.2": "1.2.2"' pnpm-workspace.yaml; \
+    grep -F '"smol-toml@>=1.0.0 <1.9.0": "1.9.0"' pnpm-workspace.yaml; \
+    grep -F '"shell-quote@<1.11.0": "1.11.0"' pnpm-workspace.yaml; \
+    grep -F 'undici: "7.30.1"' pnpm-workspace.yaml; \
+    grep -F '"undici": "7.30.1"' package.json
 
 # Build the application from a clean output directory.
 RUN rm -rf dist && pnpm run build
@@ -199,7 +176,7 @@ RUN set -eu; \
     xnet="$(grep -F 'golang.org/x/net' /tmp/go-runtime-modules.txt || true)"; \
     test -n "$xnet"; \
     printf '%s\n' "$xnet"; \
-    if printf '%s\n' "$xnet" | grep -v -F 'v0.58.0'; then \
+    if printf '%s\n' "$xnet" | grep -v -F 'v0.60.0'; then \
       echo "unexpected golang.org/x/net version in runtime" >&2; \
       exit 1; \
     fi; \
@@ -214,10 +191,9 @@ for (const line of lines) {
   const [, file, minorText, patchText] = match;
   const minor = Number(minorText);
   const patch = Number(patchText);
-  const safe =
-    minor > 26 ||
-    (minor === 26 && patch >= 6) ||
-    (minor === 25 && patch >= 13);
+  // Fail for older binaries even if they passed last month's Go advisory:
+  // new Go standard library issues require at least go1.26.10.
+  const safe = minor > 26 || (minor === 26 && patch >= 10);
   if (!safe) vulnerable.push({ file, version: `go1.${minor}.${patch}` });
 }
 if (vulnerable.length) {
