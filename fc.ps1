@@ -106,7 +106,7 @@ function Sync-UpstreamFirecrawlPin {
     # Fetch only the reviewed tag. Verify that the tag resolves to the exact
     # reviewed commit before changing HEAD; a moved/replaced upstream tag fails
     # closed instead of silently changing what was approved.
-    & $gitExe -c "safe.directory=$safeCheckout" -C $checkout fetch --force origin "refs/tags/$($pin.tag):refs/tags/$($pin.tag)"
+    & $gitExe -c "safe.directory=$safeCheckout" -C $checkout fetch --quiet --force origin "refs/tags/$($pin.tag):refs/tags/$($pin.tag)"
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to fetch reviewed upstream Firecrawl tag $($pin.tag)."
     }
@@ -118,7 +118,7 @@ function Sync-UpstreamFirecrawlPin {
         throw "Reviewed Firecrawl tag $($pin.tag) does not resolve to pinned commit $($pin.commit)."
     }
 
-    & $gitExe -c "safe.directory=$safeCheckout" -C $checkout checkout --detach ([string]$pin.commit)
+    & $gitExe -c "safe.directory=$safeCheckout" -C $checkout checkout --quiet --detach ([string]$pin.commit)
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to check out reviewed upstream Firecrawl commit $($pin.commit)."
     }
