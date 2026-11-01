@@ -133,6 +133,17 @@ jobs:
             docker run --rm --entrypoint sh "$image" -c 'test ! -e /usr/local/lib/node_modules/npm && test -x /usr/local/bin/node && node --version'
           done
           docker run --rm --entrypoint sh firecrawl-mcp-runtime:review -c 'test -e /app/node_modules/.bin/firecrawl-mcp'
+          # Ensure Firecrawl SDK remains functional with the overridden, patched Zod 4.
+          docker run --rm --entrypoint node firecrawl-mcp-runtime:review --input-type=module -e '
+            import assert from "node:assert/strict";
+            import * as sdk from "firecrawl";
+            import { z } from "zod";
+            import { zodToJsonSchema } from "zod-to-json-schema";
+            assert.ok(Object.keys(sdk).length > 0, "Firecrawl SDK must load");
+            const converted = zodToJsonSchema(z.object({ url: z.string() }));
+            assert.equal(converted.properties?.url?.type, "string", "Zod to JSON Schema compatibility");
+            console.log("Firecrawl SDK / Zod compatibility: PASS");
+          '
 
 
   node26-compat:
@@ -202,6 +213,17 @@ jobs:
             docker run --rm --entrypoint sh "$image" -c 'test ! -e /usr/local/lib/node_modules/npm && test -x /usr/local/bin/node && node --version'
           done
           docker run --rm --entrypoint sh firecrawl-mcp-runtime:review -c 'test -e /app/node_modules/.bin/firecrawl-mcp'
+          # Ensure Firecrawl SDK remains functional with the overridden, patched Zod 4.
+          docker run --rm --entrypoint node firecrawl-mcp-runtime:review --input-type=module -e '
+            import assert from "node:assert/strict";
+            import * as sdk from "firecrawl";
+            import { z } from "zod";
+            import { zodToJsonSchema } from "zod-to-json-schema";
+            assert.ok(Object.keys(sdk).length > 0, "Firecrawl SDK must load");
+            const converted = zodToJsonSchema(z.object({ url: z.string() }));
+            assert.equal(converted.properties?.url?.type, "string", "Zod to JSON Schema compatibility");
+            console.log("Firecrawl SDK / Zod compatibility: PASS");
+          '
 
   env-restore-windows:
     name: Windows / environment restoration
