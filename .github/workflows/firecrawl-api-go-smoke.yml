@@ -1,0 +1,58 @@
+name: Review pinned Firecrawl Go security stage
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'security/firecrawl-api-runtime-hotfix.Dockerfile'
+      - 'upstream/firecrawl.json'
+      - '.github/workflows/firecrawl-api-go-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-library:
+    name: Pinned upstream Go c-shared build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout wrapper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout only reviewed upstream Go library
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          p = json.load(open('upstream/firecrawl.json', encoding='utf-8'))
+          assert p['repository'] == 'firecrawl/firecrawl'
+          assert p['tag'] == 'v2.11.456'
+          assert p['commit'] == '3fcbf8da97a1a23ba1341077f77cd8e77d8a95c5'
+          PY
+          git clone --filter=blob:none --no-checkout --depth 1 --branch v2.11.456 \
+            https://github.com/firecrawl/firecrawl.git "$RUNNER_TEMP/firecrawl"
+          git -C "$RUNNER_TEMP/firecrawl" sparse-checkout init --cone
+          git -C "$RUNNER_TEMP/firecrawl" sparse-checkout set apps/api/sharedLibs/go-html-to-md
+          git -C "$RUNNER_TEMP/firecrawl" checkout --detach 3fcbf8da97a1a23ba1341077f77cd8e77d8a95c5
+          test "$(git -C "$RUNNER_TEMP/firecrawl" rev-parse HEAD)" = 3fcbf8da97a1a23ba1341077f77cd8e77d8a95c5
+          test -s "$RUNNER_TEMP/firecrawl/apps/api/sharedLibs/go-html-to-md/go.mod"
+      - name: Build pinned Go shared library (no deployment)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            --target go-build \
+            -f "$GITHUB_WORKSPACE/security/firecrawl-api-runtime-hotfix.Dockerfile" \
+            -t firecrawl-go-security-review:local \
+            "$RUNNER_TEMP/firecrawl/apps/api"
+      - name: Verify patched compiler and module in compiled shared library
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/local/go/bin/go firecrawl-go-security-review:local version -m \
+            /app/sharedLibs/go-html-to-md/libhtml-to-markdown.so | tee go-build-info.txt
+          grep -F 'go1.26.9' go-build-info.txt
+          grep -F 'golang.org/x/net' go-build-info.txt | grep -F 'v0.60.0'
+          test "$(grep -Fc 'golang.org/x/net' go-build-info.txt)" -ge 1
