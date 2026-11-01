@@ -95,16 +95,15 @@ function Invoke-McpStageSecurityCheck {
         if ($PreviousId -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Running MCP image identity unavailable.' }
         $RollbackTag = 'firecrawl-mcp:rollback-' + $PreviousId.Substring(7,12)
         $RollbackAvailable = $false
-        $OldImagePresent = $false
-        try {
+        # An expected "image not found" exception leaves an ErrorRecord in
+        # PowerShell's $Error history, triggering the host runner's strict gate.
+        # Query available IDs instead; missing images cause no errors.
+        $ImageIdsText = Invoke-McpDocker -Arguments @('image','ls','--all','--no-trunc','--format','{{.ID}}')
+        $AvailableIds = @($ImageIdsText -split '[\r\n]+' | Where-Object { $_ })
+        $OldImagePresent = $AvailableIds -ccontains $PreviousId
+        if ($OldImagePresent) {
             $OldImage = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$PreviousId)
             if ($OldImage -cne $PreviousId) { throw 'Old MCP image ID does not match running container.' }
-            $OldImagePresent = $true
-        }
-        catch {
-            if ($_.Exception.Message -notmatch 'Reviewed Docker operation inspect-image failed with exit code') {
-                throw
-            }
         }
         if ($OldImagePresent) {
             $null = Invoke-McpDocker -Arguments @('image','tag',$PreviousId,$RollbackTag)
