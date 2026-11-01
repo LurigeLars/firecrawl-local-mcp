@@ -41,6 +41,10 @@ try {
         if ($Arguments[0] -eq 'scout' -and $script:ScanFails) {
             throw 'Simulated CVE or scanner failure'
         }
+        if ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'ls') {
+            if ($script:RollbackAvailable) { return $script:PreviousId }
+            return ''
+        }
         if ($Arguments[0] -eq 'image' -and $Arguments[1] -eq 'tag') {
             if (-not $script:RollbackAvailable) { throw 'Simulated missing previous image' }
             $script:RollbackPinned = $true
@@ -79,8 +83,11 @@ try {
     catch {
         if ($_.Exception.Message -notmatch 'Missing successful') { throw }
     }
-    # Missing old Docker image must no longer prevent a scanned build.
+    # Missing old Docker image must neither block build nor pollute the
+    # host maintenance runner's strict PowerShell ErrorRecord history.
+    $Error.Clear()
     Invoke-McpStageSecurityCheck -Action build -ComposeArguments $Args -ProjectRoot $TempRoot
+    if ($Error.Count -ne 0) { throw 'Successful build left handled errors in PowerShell $Error.' }
     if ($script:BuildCount -ne 1 -or $script:RollbackPinned) {
         throw 'Expected a build without preserved rollback image'
     }

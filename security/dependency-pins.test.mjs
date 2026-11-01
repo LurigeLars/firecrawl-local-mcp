@@ -119,6 +119,8 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
   assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code'/);
   assert.match(staged, /image_id = \$Id/);
   assert.match(staged, /rollback_image_id = \$PreviousId/);
+  assert.match(staged, /'image','ls','--all','--no-trunc'/);
+  assert.doesNotMatch(staged, /catch\s*\{[\s\S]*?inspect-image failed with exit code/);
   assert.match(staged, /Rollback image preservation failed before build/);
   assert.match(staged, /Running MCP image changed since staging/);
   assert.match(staged, /TotalHours -gt 24/);
