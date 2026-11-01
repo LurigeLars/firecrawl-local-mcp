@@ -60,6 +60,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The first stage uses sparse Go sources. Full API assembly also
+          # needs reviewed upstream native/ and patches/ paths.
+          git -C "$RUNNER_TEMP/firecrawl" sparse-checkout set apps/api
+          test -d "$RUNNER_TEMP/firecrawl/apps/api/native"
+          test -d "$RUNNER_TEMP/firecrawl/apps/api/patches"
           docker build \
             --target final \
             --build-arg GIT_SHA=3fcbf8da97a1a23ba1341077f77cd8e77d8a95c5 \
