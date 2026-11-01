@@ -111,14 +111,18 @@ test('upstream Firecrawl pin is machine-readable and enforced before builds', ()
 
 
 
-test('MCP rollout is explicitly two-stage and never recreates dependency services', () => {
-  assert.match(launcher, /'build-mcp'\s*\{[\s\S]*?Assert-UpstreamFirecrawlPin[\s\S]*?docker @compose build mcp/);
-  assert.match(launcher, /'redeploy-mcp'\s*\{[\s\S]*?Assert-UpstreamFirecrawlPin[\s\S]*?docker @compose up -d --no-deps --no-build --force-recreate mcp/);
-  const buildAction = launcher.split("'build-mcp' {")[1]?.split("'redeploy-mcp' {")[0] ?? '';
-  const deployAction = launcher.split("'redeploy-mcp' {")[1]?.split("'sync-upstream' {")[0] ?? '';
-  assert.ok(buildAction.length > 0 && deployAction.length > 0, 'isolated actions must be present');
-  assert.doesNotMatch(buildAction, /docker @compose up|docker @compose down|--force-recreate/);
-  assert.doesNotMatch(deployAction, /docker @compose build|docker @compose down|docker @compose up -d --build/);
+test('MCP rollout requires a verified image ID, recent zero-high Scout scan and safe rollback', () => {
+  const staged = read('security/staged-mcp-image.ps1');
+  assert.match(launcher, /Invoke-McpStageSecurityCheck -Action build -ComposeArguments \$compose/);
+  assert.match(launcher, /Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments \$compose/);
+  assert.match(staged, /Invoke-McpDocker -Arguments \(@\(\$ComposeArguments\) \+ @\('build', 'mcp'\)\)/);
+  assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code'/);
+  assert.match(staged, /image_id = \$Id/);
+  assert.match(staged, /TotalHours -gt 24/);
+  assert.match(staged, /MCP source changed after scan/);
+  assert.match(staged, /'up','-d','--no-deps','--no-build','--force-recreate','mcp'/);
+  assert.match(staged, /rollback-/);
+  assert.doesNotMatch(staged, /docker compose down|--remove-orphans|\bdocker run\b/);
   assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
 });
 
