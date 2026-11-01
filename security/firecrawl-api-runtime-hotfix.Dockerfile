@@ -18,17 +18,17 @@ FROM golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a9
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) suffix=amd64; digest=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d ;; \
-      arm64) suffix=arm64; digest=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052 ;; \
+      amd64) suffix=amd64; digest=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5 ;; \
+      arm64) suffix=arm64; digest=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797 ;; \
       *) echo "Unsupported Go builder architecture: $arch" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://dl.google.com/go/go1.26.9.linux-${suffix}.tar.gz" -o /tmp/go1269.tar.gz; \
-    echo "$digest  /tmp/go1269.tar.gz" | sha256sum -c -; \
+    curl -fsSL "https://dl.google.com/go/go1.26.10.linux-${suffix}.tar.gz" -o /tmp/go12610.tar.gz; \
+    echo "$digest  /tmp/go12610.tar.gz" | sha256sum -c -; \
     rm -rf /usr/local/go; \
-    tar -C /usr/local -xzf /tmp/go1269.tar.gz; \
-    rm -f /tmp/go1269.tar.gz
+    tar -C /usr/local -xzf /tmp/go12610.tar.gz; \
+    rm -f /tmp/go12610.tar.gz
 ENV GOTOOLCHAIN=local
-RUN go version | grep -F 'go1.26.9'
+RUN go version | grep -F 'go1.26.10'
 WORKDIR /app
 COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
 
@@ -36,7 +36,7 @@ RUN cd sharedLibs/go-html-to-md && \
     go get golang.org/x/net@v0.60.0 && \
     go mod download && \
     go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.60.0' && \
-    go version | grep -F 'go1.26.9' && \
+    go version | grep -F 'go1.26.10' && \
     go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go && \
     go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.60.0'
 
@@ -231,8 +231,8 @@ for (const line of lines) {
   const minor = Number(minorText);
   const patch = Number(patchText);
   // Fail for older binaries even if they passed last month's Go advisory:
-  // new Go standard library issues require at least go1.26.9.
-  const safe = minor > 26 || (minor === 26 && patch >= 9);
+  // new Go standard library issues require at least go1.26.10.
+  const safe = minor > 26 || (minor === 26 && patch >= 10);
   if (!safe) vulnerable.push({ file, version: `go1.${minor}.${patch}` });
 }
 if (vulnerable.length) {
