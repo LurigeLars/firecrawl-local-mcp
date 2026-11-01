@@ -110,6 +110,18 @@ test('upstream Firecrawl pin is machine-readable and enforced before builds', ()
 });
 
 
+
+test('MCP rollout is explicitly two-stage and never recreates dependency services', () => {
+  assert.match(launcher, /'build-mcp'\s*\{[\s\S]*?Assert-UpstreamFirecrawlPin[\s\S]*?docker @compose build mcp/);
+  assert.match(launcher, /'redeploy-mcp'\s*\{[\s\S]*?Assert-UpstreamFirecrawlPin[\s\S]*?docker @compose up -d --no-deps --no-build --force-recreate mcp/);
+  const buildAction = launcher.split("'build-mcp' {")[1]?.split("'redeploy-mcp' {")[0] ?? '';
+  const deployAction = launcher.split("'redeploy-mcp' {")[1]?.split("'sync-upstream' {")[0] ?? '';
+  assert.ok(buildAction.length > 0 && deployAction.length > 0, 'isolated actions must be present');
+  assert.doesNotMatch(buildAction, /docker @compose up|docker @compose down|--force-recreate/);
+  assert.doesNotMatch(deployAction, /docker @compose build|docker @compose down|docker @compose up -d --build/);
+  assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
+});
+
 test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(composeLocal, /context:\s+apps\/api/);
   assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
