@@ -18,8 +18,8 @@ const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfil
 
 test('public MCP allows only the Docker internal gateway hostname (no wildcard)', () => {
   const block = publicCompose.split('  mcp:')[1]?.split('\n  gateway:')[0] ?? '';
-  assert.match(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\\s*mcp(?:\\s|$)/);
-  assert.doesNotMatch(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\\s*["']?\\*/);
+  assert.match(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\s*mcp(?:\s|$)/);
+  assert.doesNotMatch(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\s*["']?\*/);
 });
 
 test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin patched Alpine image', () => {
