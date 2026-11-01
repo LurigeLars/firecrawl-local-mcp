@@ -44,6 +44,12 @@ updates:
   # Dependabot proposals must pass image security checks before promotion.
   - package-ecosystem: "docker"
     directory: "/security"
+    # Node 22 -> 26 changes the Firecrawl API build/runtime toolchain and
+    # requires a separate compatibility and complete image security review.
+    # Continue taking Node 22 security patches and Redis/Go package updates.
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
     schedule:
       interval: "weekly"
       day: "monday"
