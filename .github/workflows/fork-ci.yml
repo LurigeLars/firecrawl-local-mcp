@@ -202,3 +202,14 @@ jobs:
             docker run --rm --entrypoint sh "$image" -c 'test ! -e /usr/local/lib/node_modules/npm && test -x /usr/local/bin/node && node --version'
           done
           docker run --rm --entrypoint sh firecrawl-mcp-runtime:review -c 'test -e /app/node_modules/.bin/firecrawl-mcp'
+
+  env-restore-windows:
+    name: Windows / environment restoration
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify strict environment cleanup without any external secrets
+        shell: pwsh
+        run: ./security/env-restoration.test.ps1
