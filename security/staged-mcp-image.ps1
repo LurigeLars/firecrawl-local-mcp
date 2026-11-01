@@ -88,6 +88,13 @@ function Invoke-McpStageSecurityCheck {
         if (Test-Path -LiteralPath $ReceiptPath) {
             Remove-Item -LiteralPath $ReceiptPath -Force -ErrorAction Stop
         }
+        # Preserve the exact running MCP image BEFORE replacing the latest tag.
+        $PreviousId = Invoke-McpDocker -Arguments @('inspect','--format','{{.Image}}','firecrawl-mcp-1')
+        if ($PreviousId -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Running MCP image identity unavailable.' }
+        $RollbackTag = 'firecrawl-mcp:rollback-' + $PreviousId.Substring(7,12)
+        $null = Invoke-McpDocker -Arguments @('image','tag',$PreviousId,$RollbackTag)
+        $PreservedId = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$RollbackTag)
+        if ($PreservedId -cne $PreviousId) { throw 'Rollback image preservation failed before build.' }
         $null = Invoke-McpDocker -Arguments (@($ComposeArguments) + @('build', 'mcp'))
         $Id = Get-McpImageId
         # Require 0 high/critical CVEs, including ones without a patch.
@@ -96,6 +103,7 @@ function Invoke-McpStageSecurityCheck {
         $Receipt = [ordered]@{
             schema_version = 1
             image_id = $Id
+            rollback_image_id = $PreviousId
             scan = 'scout_cves_critical_high_zero'
             created_utc = [DateTimeOffset]::UtcNow.ToString('o')
             source_hashes = Get-McpSourceHashes -ProjectRoot $ProjectRoot
@@ -118,7 +126,8 @@ function Invoke-McpStageSecurityCheck {
     $Receipt = Get-Content -LiteralPath $ReceiptPath -Raw -ErrorAction Stop | ConvertFrom-Json
     if ($Receipt.schema_version -ne 1 -or
         $Receipt.scan -cne 'scout_cves_critical_high_zero' -or
-        [string]$Receipt.image_id -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        [string]$Receipt.image_id -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+        [string]$Receipt.rollback_image_id -cnotmatch '^sha256:[0-9a-f]{64}$') {
         throw 'Staged MCP image receipt is invalid.'
     }
     $Age = [DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$Receipt.created_utc)
@@ -146,8 +155,12 @@ function Invoke-McpStageSecurityCheck {
         "MCP already runs scanned image $Id. No deploy needed."
         return
     }
+    if ($PreviousId -cne [string]$Receipt.rollback_image_id) {
+        throw 'Running MCP image changed since staging.'
+    }
     $RollbackTag = 'firecrawl-mcp:rollback-' + $PreviousId.Substring(7,12)
-    $null = Invoke-McpDocker -Arguments @('image','tag',$PreviousId,$RollbackTag)
+    $StoredId = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$RollbackTag)
+    if ($StoredId -cne $PreviousId) { throw 'Preserved rollback image is missing or changed.' }
     $Changed = $false
     try {
         $Changed = $true

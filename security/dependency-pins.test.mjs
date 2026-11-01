@@ -118,6 +118,9 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
   assert.match(staged, /Invoke-McpDocker -Arguments \(@\(\$ComposeArguments\) \+ @\('build', 'mcp'\)\)/);
   assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code'/);
   assert.match(staged, /image_id = \$Id/);
+  assert.match(staged, /rollback_image_id = \$PreviousId/);
+  assert.match(staged, /Rollback image preservation failed before build/);
+  assert.match(staged, /Running MCP image changed since staging/);
   assert.match(staged, /TotalHours -gt 24/);
   assert.match(staged, /MCP source changed after scan/);
   assert.match(staged, /'up','-d','--no-deps','--no-build','--force-recreate','mcp'/);
