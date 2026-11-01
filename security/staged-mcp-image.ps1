@@ -173,11 +173,10 @@ function Invoke-McpStageSecurityCheck {
     if ($PreviousId -cnotmatch '^sha256:[0-9a-f]{64}$') {
         throw 'Current MCP container image identity missing.'
     }
-    if ($PreviousId -ceq $Id) {
-        Remove-Item -LiteralPath $ReceiptPath -Force -ErrorAction Stop
-        "MCP already runs scanned image $Id. No deploy needed."
-        return
-    }
+    # An unchanged image can still need a fresh container to apply reviewed
+    # Compose environment changes (e.g. allowed internal MCP proxy hosts).
+    # The stage receipt binds both exact image ID and Compose source hashes.
+    # Therefore always recreate this one service when deploy_staged is requested.
     if ($PreviousId -cne [string]$Receipt.rollback_image_id) {
         throw 'Running MCP image changed since staging.'
     }

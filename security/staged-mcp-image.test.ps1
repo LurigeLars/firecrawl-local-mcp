@@ -157,6 +157,12 @@ try {
     }
     Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments $Args -ProjectRoot $TempRoot
     if ($script:DeployCount -ne 1) { throw 'Expected one scoped rollout with backup present' }
+    # Re-apply reviewed configuration even when the image ID has not changed.
+    $script:ActiveId = $script:ImageId
+    $script:DeployCount = 0
+    Invoke-McpStageSecurityCheck -Action build -ComposeArguments $Args -ProjectRoot $TempRoot
+    Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments $Args -ProjectRoot $TempRoot
+    if ($script:DeployCount -ne 1) { throw 'Config-only stage was incorrectly skipped' }
     Write-Output 'Staged MCP security gate (with and without old image): PASS'
 }
 finally {
