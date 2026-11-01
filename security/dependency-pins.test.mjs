@@ -118,7 +118,7 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /minor === 26 && patch >= 6/);
   assert.match(firecrawlApiHotfix, /FROM runtime AS final/);
   assert.match(firecrawlApiHotfix, /GO_RUNTIME_MODULES\.txt/);
-  assert.match(firecrawlApiHotfix, /FROM node:22\.23\.3-slim@sha256:[0-9a-f]{64} AS runtime-base/);
+  assert.match(firecrawlApiHotfix, /FROM node:22\.23\.4-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS runtime-base/);
   assert.match(firecrawlApiHotfix, /pnpm-workspace\.yaml/);
   assert.match(firecrawlApiHotfix, /proxy-addr: \"2\.0\.8\"/);
   assert.match(firecrawlApiHotfix, /source-map-js: \"1\.2\.2\"/);
