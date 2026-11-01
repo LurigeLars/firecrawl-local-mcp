@@ -33,10 +33,8 @@ $Original = @{}
 foreach ($Name in $Names) {
     $Path = "Env:$Name"
     $WasSet = Test-Path -LiteralPath $Path
-    $Original[$Name] = @{
-        WasSet = $WasSet
-        Value = if ($WasSet) { (Get-Item -LiteralPath $Path).Value } else { $null }
-    }
+    $OriginalValue = if ($WasSet) { (Get-Item -LiteralPath $Path).Value } else { $null }
+    $Original[$Name] = @{ WasSet = $WasSet; Value = $OriginalValue }
 }
 
 try {
