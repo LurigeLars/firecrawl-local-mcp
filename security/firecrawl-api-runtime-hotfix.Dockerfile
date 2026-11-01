@@ -11,7 +11,7 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 # TEMPORARY LOCAL SECURITY HOTFIX.
 # Keep this file byte-aligned with pinned upstream except for this Go build stage.
 # Remove once upstream satisfies firecrawl-local-mcp issue #66 promotion gates.
-FROM golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS go-build
+FROM golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b AS go-build
 ENV GOTOOLCHAIN=local
 WORKDIR /app
 COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
