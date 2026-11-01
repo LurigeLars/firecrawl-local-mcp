@@ -1,6 +1,6 @@
-# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
+# Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'redeploy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
+param([ValidateSet('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
 
 $root = $PSScriptRoot
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
@@ -553,7 +553,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("up", "redeploy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
+$composeActions = @("up", "redeploy", "build-mcp", "redeploy-mcp", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -588,6 +588,24 @@ switch ($Action) {
         Import-AvailableRuntimeSecrets
         Invoke-PublicProxySmokeTest
         Remove-PublicProxyInitContainer
+    }
+    'build-mcp' {
+        # Stage only the reviewed public MCP image. No container is recreated,
+        # and no unrelated Firecrawl build contexts or images are touched.
+        Assert-UpstreamFirecrawlPin
+        docker @compose build mcp
+        if ($LASTEXITCODE -ne 0) { throw "docker compose build mcp failed with exit code $LASTEXITCODE" }
+        'Firecrawl MCP candidate image built; no containers redeployed.'
+    }
+    'redeploy-mcp' {
+        # Recreate only the MCP service from the image already staged and scanned.
+        # Never rebuild here: the caller must inspect the candidate first.
+        Assert-UpstreamFirecrawlPin
+        docker @compose up -d --no-deps --no-build --force-recreate mcp
+        if ($LASTEXITCODE -ne 0) { throw "docker compose redeploy-mcp failed with exit code $LASTEXITCODE" }
+        docker @compose ps mcp
+        if ($LASTEXITCODE -ne 0) { throw "docker compose ps mcp failed with exit code $LASTEXITCODE" }
+        'Firecrawl MCP service recreated; other services were not targeted.'
     }
     'sync-upstream' {
         Sync-UpstreamFirecrawlPin
