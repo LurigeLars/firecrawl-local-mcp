@@ -133,6 +133,20 @@ jobs:
             docker run --rm --entrypoint sh "$image" -c 'test ! -e /usr/local/lib/node_modules/npm && test -x /usr/local/bin/node && node --version'
           done
           docker run --rm --entrypoint sh firecrawl-mcp-runtime:review -c 'test -e /app/node_modules/.bin/firecrawl-mcp'
+          # Ensure Firecrawl SDK remains functional with the overridden, patched Zod 4.
+          docker run --rm --entrypoint node firecrawl-mcp-runtime:review --input-type=module -e '
+            import assert from "node:assert/strict";
+            import * as sdk from "firecrawl";
+            import { z } from "zod";
+            import { z as z3 } from "zod/v3";
+            import { zodToJsonSchema } from "zod-to-json-schema";
+            assert.ok(Object.keys(sdk).length > 0, "Firecrawl SDK must load");
+            const convertedV4 = z.toJSONSchema(z.object({ url: z.string() }), { target: "draft-07" });
+            assert.equal(convertedV4.properties?.url?.type, "string", "Firecrawl SDK Zod v4 conversion path");
+            const convertedV3 = zodToJsonSchema(z3.object({ url: z3.string() }));
+            assert.equal(convertedV3.properties?.url?.type, "string", "Legacy v3 schema compatibility");
+            console.log("Firecrawl SDK / Zod v4 and v3 conversion: PASS");
+          '
 
 
   node26-compat:
@@ -202,6 +216,20 @@ jobs:
             docker run --rm --entrypoint sh "$image" -c 'test ! -e /usr/local/lib/node_modules/npm && test -x /usr/local/bin/node && node --version'
           done
           docker run --rm --entrypoint sh firecrawl-mcp-runtime:review -c 'test -e /app/node_modules/.bin/firecrawl-mcp'
+          # Ensure Firecrawl SDK remains functional with the overridden, patched Zod 4.
+          docker run --rm --entrypoint node firecrawl-mcp-runtime:review --input-type=module -e '
+            import assert from "node:assert/strict";
+            import * as sdk from "firecrawl";
+            import { z } from "zod";
+            import { z as z3 } from "zod/v3";
+            import { zodToJsonSchema } from "zod-to-json-schema";
+            assert.ok(Object.keys(sdk).length > 0, "Firecrawl SDK must load");
+            const convertedV4 = z.toJSONSchema(z.object({ url: z.string() }), { target: "draft-07" });
+            assert.equal(convertedV4.properties?.url?.type, "string", "Firecrawl SDK Zod v4 conversion path");
+            const convertedV3 = zodToJsonSchema(z3.object({ url: z3.string() }));
+            assert.equal(convertedV3.properties?.url?.type, "string", "Legacy v3 schema compatibility");
+            console.log("Firecrawl SDK / Zod v4 and v3 conversion: PASS");
+          '
 
   env-restore-windows:
     name: Windows / environment restoration
