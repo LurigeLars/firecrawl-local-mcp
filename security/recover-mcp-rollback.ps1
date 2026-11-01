@@ -44,7 +44,7 @@ function Invoke-McpRollbackGit {
 function Restore-McpRollbackFromReviewedHistory {
     param([Parameter(Mandatory)][string]$ProjectRoot)
     $Commit = '75078a0b7a15188d5121fead370dc16409f33a92'
-    $BaseImageId = 'sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef66b78deb'
+    $BaseImageId = 'sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80'
     # The base digest is from the audited running host's node:26.10.0-alpine.
     # Exact Git blob SHA-1s are verified twice: in the commit tree and after export.
     $Reviewed = [ordered]@{
@@ -83,7 +83,7 @@ function Restore-McpRollbackFromReviewedHistory {
         }
         $ImageTag = 'firecrawl-mcp:rollback-reviewed-20261006'
         $null = Invoke-McpDocker -Arguments @(
-            'build','--pull=false','--no-cache=false','-t',$ImageTag,
+            'build','--pull=false','-t',$ImageTag,
             '-f',(Join-Path $Folder 'Dockerfile.mcp'),$Folder
         ) -TimeoutSeconds 1800
         $ResultId = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$ImageTag)
