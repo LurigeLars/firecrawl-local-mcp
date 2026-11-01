@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:22.23.3-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS runtime-base
+FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime-base
 
 FROM runtime-base AS build-base
 ENV PNPM_HOME="/pnpm"
@@ -9,7 +9,7 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 
 # Build Go shared library
 # TEMPORARY LOCAL SECURITY HOTFIX.
-# Keep this file byte-aligned with pinned upstream except for this Go build stage.
+# Based on reviewed upstream Dockerfile at v2.11.642; preserve local security checks.
 # Remove once upstream satisfies firecrawl-local-mcp issue #66 promotion gates.
 FROM golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS go-build
 # The pinned builder is build-time only; install the patched Go compiler from
@@ -83,55 +83,16 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 
 COPY . .
 
-# TEMPORARY LOCAL SECURITY HOTFIX.
-# Firecrawl's pinned lock resolves Express -> proxy-addr 2.0.7. Force all
-# transitive consumers to patched 2.0.8 inside this image build only.
-RUN python3 - <<'PY'
-from pathlib import Path
-
-path = Path("pnpm-workspace.yaml")
-text = path.read_text(encoding="utf-8")
-needle = "overrides:\n"
-if needle not in text:
-    raise SystemExit("pnpm-workspace.yaml has no overrides block")
-text = text.replace(
-    needle,
-    'overrides:\n  proxy-addr: "2.0.8"\n  source-map-js: "1.2.2"\n',
-    1,
-)
-replacements = {
-    '  undici: "7.30.0"\n': '  undici: "7.29.1"\n',
-    '  "smol-toml@<1.7.1": "1.8.0"\n': '  "smol-toml@>=1.0.0 <1.9.0": "1.9.0"\n',
-    '  "shell-quote@<=1.8.4": "1.10.0"\n': '  "shell-quote@<1.11.0": "1.11.0"\n',
-}
-for old, new in replacements.items():
-    if old not in text:
-        raise SystemExit(f"expected upstream dependency pin not found: {old.strip()}")
-    text = text.replace(old, new, 1)
-path.write_text(text, encoding="utf-8")
-
-package = Path("package.json")
-package_text = package.read_text(encoding="utf-8")
-old_undici = '"undici": "7.30.0"'
-new_undici = '"undici": "7.29.1"'
-if old_undici not in package_text:
-    raise SystemExit("expected direct undici 7.30.0 pin not found")
-package.write_text(package_text.replace(old_undici, new_undici, 1), encoding="utf-8")
-PY
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/native/target \
-    pnpm install --no-frozen-lockfile && \
-    grep -q '^  proxy-addr@2\.0\.8:' pnpm-lock.yaml && \
-    ! grep -q '^  proxy-addr@2\.0\.7:' pnpm-lock.yaml && \
-    grep -q '^  source-map-js@1\.2\.2:' pnpm-lock.yaml && \
-    ! grep -q '^  source-map-js@1\.2\.1:' pnpm-lock.yaml && \
-    grep -q '^  smol-toml@1\.9\.0:' pnpm-lock.yaml && \
-    ! grep -q '^  smol-toml@1\.8\.0:' pnpm-lock.yaml && \
-    grep -q '^  shell-quote@1\.11\.0:' pnpm-lock.yaml && \
-    ! grep -q '^  shell-quote@1\.10\.0:' pnpm-lock.yaml && \
-    grep -q '^  undici@7\.29\.1:' pnpm-lock.yaml && \
-    ! grep -q '^  undici@7\.30\.0:' pnpm-lock.yaml
+# Pin enforcement: upstream v2.11.642 already carries the patched Node
+# overrides. Do not re-insert obsolete dependency overrides or downgrade undici.
+# The frozen lock install above must resolve exactly the reviewed upstream set.
+RUN set -eu; \
+    grep -F '"proxy-addr@>=2.0.0 <2.0.8": "2.0.8"' pnpm-workspace.yaml; \
+    grep -F '"source-map-js@>=1.0.0 <1.2.2": "1.2.2"' pnpm-workspace.yaml; \
+    grep -F '"smol-toml@>=1.0.0 <1.9.0": "1.9.0"' pnpm-workspace.yaml; \
+    grep -F '"shell-quote@<1.11.0": "1.11.0"' pnpm-workspace.yaml; \
+    grep -F 'undici: "7.30.1"' pnpm-workspace.yaml; \
+    grep -F '"undici": "7.30.1"' package.json
 
 # Build the application from a clean output directory.
 RUN rm -rf dist && pnpm run build
