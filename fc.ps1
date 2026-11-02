@@ -580,9 +580,46 @@ try {
             Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy"))
         }
     }
+function Assert-StatefulComposeDataSafety {
+    # Block broad recreations if an existing data service lacks a stable named
+    # volume. Redis currently has in-container RDB snapshots but no mount.
+    # Isolated stateless deployments do not call this guard.
+    $Stateful = @(
+        @{ Name = 'firecrawl-redis-1'; Destination = '/data' },
+        @{ Name = 'firecrawl-rabbitmq-1'; Destination = '/var/lib/rabbitmq' },
+        @{ Name = 'firecrawl-nuq-postgres-1'; Destination = '/var/lib/postgresql/data' }
+    )
+    foreach ($Item in $Stateful) {
+        $Container = [string]$Item.Name
+        $List = @(& docker container ls --all --filter "name=^/$Container$" --format '{{.Names}}')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cannot verify data-container status: $Container"
+        }
+        if (@($List | Where-Object { [string]$_ -ceq $Container }).Count -eq 0) {
+            continue # Clean installation; no data container to preserve.
+        }
+        $MountJson = @(& docker inspect --format '{{json .Mounts}}' $Container)
+        if ($LASTEXITCODE -ne 0 -or $MountJson.Count -ne 1) {
+            throw "Cannot verify data mounts: $Container"
+        }
+        $Mounts = @($MountJson[0] | ConvertFrom-Json)
+        $Safe = @($Mounts | Where-Object {
+            $_.Type -ceq 'volume' -and
+            [string]$_.Destination -ceq [string]$Item.Destination -and
+            [string]$_.Name -match '^firecrawl_[A-Za-z0-9_.-]+$'
+        })
+        if ($Safe.Count -ne 1) {
+            throw ("Whole-stack Compose blocked: existing $Container has no reviewed named " +
+                "volume at $($Item.Destination). Complete isolated backup/migration first; " +
+                "never use 'up' or 'redeploy' to migrate stateful services.")
+        }
+    }
+}
+
 switch ($Action) {
     'up' {
         Assert-UpstreamFirecrawlPin
+        Assert-StatefulComposeDataSafety
         docker @compose up -d --build
         if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
@@ -592,6 +629,7 @@ switch ($Action) {
     }
     'redeploy' {
         Assert-UpstreamFirecrawlPin
+        Assert-StatefulComposeDataSafety
         docker @compose up -d --build --force-recreate
         if ($LASTEXITCODE -ne 0) { throw "docker compose redeploy failed with exit code $LASTEXITCODE" }
         Set-RuntimeHookSecrets -UseRealSecrets $false
