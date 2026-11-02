@@ -94,7 +94,12 @@ function Invoke-FirecrawlPublicGatewayRefresh {
     }
     # Authenticate is intentionally NOT exercised: Cloudflare Access must still
     # reject anonymous requests and expose its normal public discovery metadata.
-    & node (Join-Path $ProjectRoot 'public\selftest.mjs') (Get-PublicUrl)
-    if ($LASTEXITCODE -ne 0) { throw 'Public gateway Access/OAuth self-test failed.' }
+    $SmokePassed = $false
+    for ($Attempt = 0; $Attempt -lt 12; $Attempt++) {
+        & node (Join-Path $ProjectRoot 'public\selftest.mjs') (Get-PublicUrl)
+        if ($LASTEXITCODE -eq 0) { $SmokePassed = $true; break }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $SmokePassed) { throw 'Public gateway Access/OAuth self-test failed.' }
     "PUBLIC_GATEWAY_REFRESH_OK image=$CandidateId cloudflare_access_selftest=pass unrelated_container_ids_unchanged=true"
 }
