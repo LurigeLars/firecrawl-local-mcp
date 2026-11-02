@@ -219,3 +219,19 @@ test('single-operation stateless maintenance never invokes a full-stack redeploy
   assert.match(section, /Invoke-ApiStage -Action stage/);
   assert.match(section, /Invoke-ApiStage -Action deploy/);
 });
+
+
+test('Firecrawl API production runtime strips vulnerable bundled npm and Corepack, but preserves Node', () => {
+  const dockerfile = readFileSync(new URL('./firecrawl-api-runtime-hotfix.Dockerfile', import.meta.url), 'utf8');
+  const build = dockerfile.split('FROM runtime-base AS runtime')[0];
+  const runtime = dockerfile.split('FROM runtime-base AS runtime')[1];
+  assert.ok(runtime, 'API final runtime stage exists');
+  assert.match(build, /corepack enable/);
+  assert.match(build, /pnpm install --frozen-lockfile/);
+  assert.match(runtime, /rm -rf \/usr\/local\/lib\/node_modules\/npm \/usr\/local\/lib\/node_modules\/corepack/);
+  assert.match(runtime, /rm -f \/usr\/local\/bin\/npm \/usr\/local\/bin\/npx \/usr\/local\/bin\/corepack/);
+  assert.match(runtime, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(runtime, /test ! -e \/usr\/local\/lib\/node_modules\/corepack/);
+  assert.match(runtime, /node --version/);
+  assert.match(runtime, /CMD \["node", "dist\/src\/harness.js", "--start-docker"\]/);
+});

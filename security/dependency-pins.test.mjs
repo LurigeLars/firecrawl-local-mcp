@@ -174,5 +174,12 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /vulnerable node-tar/);
   assert.match(firecrawlApiHotfix, /TypeScript 7 is only used by development\/watch commands/);
   assert.match(firecrawlApiHotfix, /test ! -e node_modules\/typescript-7/);
-  assert.doesNotMatch(firecrawlApiHotfix, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+  // The builder must retain npm/Corepack for frozen PNPM installs. The
+  // production runtime may safely remove bundled CLI tooling (Node starts
+  // the prebuilt JavaScript directly, with no npm entrypoint).
+  const beforeRuntime = firecrawlApiHotfix.split('FROM runtime-base AS runtime')[0];
+  const runtimeOnly = firecrawlApiHotfix.split('FROM runtime-base AS runtime')[1];
+  assert.ok(runtimeOnly);
+  assert.doesNotMatch(beforeRuntime, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(runtimeOnly, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
 });
