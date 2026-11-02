@@ -65,7 +65,12 @@ function Invoke-PlaywrightStage {
                 [IO.File]::WriteAllText($Tmp,($Receipt | ConvertTo-Json -Depth 9),[Text.UTF8Encoding]::new($false))
                 Move-Item -LiteralPath $Tmp -Destination $ReceiptPath -Force
             } finally {
-                Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
+                # Host maintenance dispatch rejects any recorded $Error, even
+                # nonterminating expected errors from SilentlyContinue. Check
+                # existence explicitly and fail if actual deletion fails.
+                if (Test-Path -LiteralPath $Tmp -PathType Leaf) {
+                    Remove-Item -LiteralPath $Tmp -Force -ErrorAction Stop
+                }
             }
             "PLAYWRIGHT_STAGED $Service $Candidate; running container unchanged."
         }
