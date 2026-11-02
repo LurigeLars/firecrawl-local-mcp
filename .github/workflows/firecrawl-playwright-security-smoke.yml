@@ -90,7 +90,7 @@ jobs:
             set -eu
             test -s /usr/src/app/dist/api.js
             node --version
-            node -e "require('playwright'); require('express'); require('proxy-chain')"
+            node -e "require(\"playwright\"); require(\"express\"); require(\"proxy-chain\")"
             node node_modules/playwright/cli.js --version
             test ! -e /usr/local/lib/node_modules/npm
             test ! -e /usr/local/lib/node_modules/corepack
