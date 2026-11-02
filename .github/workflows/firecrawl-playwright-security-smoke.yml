@@ -39,7 +39,7 @@ jobs:
           git -C "$RUNNER_TEMP/firecrawl" checkout --detach 7e6bd701febaacc3bb95c0fb7eee2c509a4813c5
           test "$(git -C "$RUNNER_TEMP/firecrawl" rev-parse HEAD)" = 7e6bd701febaacc3bb95c0fb7eee2c509a4813c5
           test -f "$RUNNER_TEMP/firecrawl/apps/playwright-service-ts/Dockerfile"
-      - name: Assert wrapper Dockerfile differs only by reviewed OS security block
+      - name: Assert wrapper Dockerfile differs only by reviewed security and runtime cleanup
         shell: bash
         run: |
           set -euo pipefail
@@ -66,6 +66,12 @@ jobs:
           cleaned=replacement[len(header):]
           assert cleaned.count(block)==1, "Unexpected/absent reviewed Debian security block"
           cleaned=cleaned.replace(block,'',1)
+          cleanup="# pnpm/npm/Corepack are build tools, not needed by the three Compose services.\n# Retain only production dependencies and a direct Node.js runtime entrypoint.\nRUN pnpm prune --prod \\\n    && rm -rf /usr/local/lib/node_modules/npm \\\n        /usr/local/lib/node_modules/corepack \\\n        /usr/local/bin/npm /usr/local/bin/npx \\\n        /usr/local/bin/corepack /usr/local/bin/pnpm /usr/local/bin/pnpx \\\n        /root/.cache/node/corepack /pnpm \\\n    && test ! -e /usr/local/lib/node_modules/npm \\\n    && test ! -e /usr/local/lib/node_modules/corepack \\\n    && test -s /usr/src/app/dist/api.js\n\n"
+          assert cleaned.count(cleanup)==1, "Unreviewed runtime cleanup block"
+          cleaned=cleaned.replace(cleanup,'',1)
+          direct_node='CMD [ "node", "dist/api.js" ]'
+          assert cleaned.count(direct_node)==1, "Missing direct Node runtime command"
+          cleaned=cleaned.replace(direct_node,'CMD [ "pnpm", "start" ]',1)
           assert cleaned==original, "Wrapper Dockerfile drifted from the exact pinned upstream source"
           PY
       - name: Build pinned Playwright image with OS package upgrades
@@ -84,7 +90,11 @@ jobs:
             set -eu
             test -s /usr/src/app/dist/api.js
             node --version
-            pnpm exec playwright --version
+            node -e "require(\"playwright\"); require(\"express\"); require(\"proxy-chain\")"
+            node node_modules/playwright/cli.js --version
+            test ! -e /usr/local/lib/node_modules/npm
+            test ! -e /usr/local/lib/node_modules/corepack
+            test ! -x /usr/local/bin/pnpm
             test -d /usr/local/share/playwright
             test -s /etc/ssl/certs/ca-certificates.crt
           '
