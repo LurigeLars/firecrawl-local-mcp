@@ -300,7 +300,7 @@ test('Firecrawl disposable cache and queue refresh is one-service-scoped and gat
 
 
 test('ephemeral service refresh receives only non-secret Compose parse placeholders', () => {
-  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "up", "redeploy"/);
+  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "up", "redeploy"/);
   assert.match(launcher, /\$env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"/);
   assert.match(launcher, /\$env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"/);
   assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
@@ -335,4 +335,20 @@ test('SearXNG search proxy refresh is npm-free, scanned and one-service only', (
   assert.match(compose, /searxng-proxy:\s*\n\s*image: firecrawl-searxng-proxy:local\s*\n\s*build:/);
   assert.doesNotMatch(source, /--remove-orphans|docker compose down|docker volume rm|docker restart/);
   assert.doesNotMatch(source, /public\/gateway.env|Get-DpapiSecretValue/);
+});
+
+
+test('public gateway refresh is isolated and preserves live Cloudflare Access values', () => {
+  const source = readFileSync(new URL('./refresh-public-gateway.ps1', import.meta.url), 'utf8');
+  assert.match(launcher, /'refresh-gateway' \{\s*if \(-not \$public\)[^\n]*\n\s*Assert-UpstreamFirecrawlPin\s*\n\s*Invoke-FirecrawlPublicGatewayRefresh/);
+  assert.match(launcher, /\$composeActions = @\([^)]*"refresh-gateway"/);
+  assert.match(source, /config --format json/);
+  assert.match(source, /inspect --format '\{\{json \.Config\.Env\}\}'/);
+  assert.match(source, /Gateway environment is not unchanged at key/);
+  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
+  assert.match(source, /up -d --no-deps --no-build --force-recreate gateway/);
+  assert.match(source, /public\\selftest.mjs/);
+  assert.match(source, /Get-PublicUrl/);
+  assert.match(source, /PUBLIC_GATEWAY_REFRESH_OK/);
+  assert.doesNotMatch(source, /--remove-orphans|docker compose down|docker volume rm|docker restart/);
 });
