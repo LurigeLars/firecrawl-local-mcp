@@ -300,7 +300,7 @@ test('Firecrawl disposable cache and queue refresh is one-service-scoped and gat
 
 
 test('ephemeral service refresh receives only non-secret Compose parse placeholders', () => {
-  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "up", "redeploy"/);
+  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy"/);
   assert.match(launcher, /\$env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"/);
   assert.match(launcher, /\$env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"/);
   assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
@@ -351,4 +351,26 @@ test('public gateway refresh is isolated and preserves live Cloudflare Access va
   assert.match(source, /Get-PublicUrl/);
   assert.match(source, /PUBLIC_GATEWAY_REFRESH_OK/);
   assert.doesNotMatch(source, /--remove-orphans|docker compose down|docker volume rm|docker restart/);
+});
+
+
+test('last two stale Firecrawl Node 26.10 containers are upgraded individually', () => {
+  const source = readFileSync(new URL('./refresh-node-runtime.ps1', import.meta.url), 'utf8');
+  const dockerfile = readFileSync(new URL('./Dockerfile.node-runtime', import.meta.url), 'utf8');
+  assert.match(launcher, /'refresh-playwright-router' \{[\s\S]*?Invoke-FirecrawlNodeRuntimeRefresh -Service 'playwright-router'/);
+  assert.match(launcher, /'refresh-llm-proxy' \{[\s\S]*?Invoke-FirecrawlNodeRuntimeRefresh -Service 'llm-proxy'/);
+  assert.match(source, /ValidateSet\('playwright-router','llm-proxy'\)/);
+  assert.match(source, /Import-GeminiKey/);
+  assert.match(source, /KeyWasPresent -and -not \$GeminiConfigured/);
+  assert.match(source, /Test-LegacyGeminiKey/);
+  assert.match(source, /--profile public-proxy up -d --no-deps --no-build --force-recreate/);
+  assert.match(source, /up -d --no-deps --no-build --force-recreate \$Service/);
+  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
+  assert.match(source, /NODE_SUPPORT_REFRESH_OK/);
+  assert.match(source, /unrelated_containers_unchanged=true/);
+  assert.match(dockerfile, /node:26\.13\.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94/);
+  assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(compose, /playwright-router:\s*\n\s*profiles: \["public-proxy"\]\s*\n\s*image: firecrawl-node-runtime:local\s*\n\s*build:/);
+  assert.match(compose, /llm-proxy:\s*\n\s*image: firecrawl-node-runtime:local/);
+  assert.doesNotMatch(source, /down -v|docker volume rm|--remove-orphans|docker compose down/);
 });

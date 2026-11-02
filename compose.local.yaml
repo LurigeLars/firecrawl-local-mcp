@@ -181,7 +181,10 @@ services:
 
   playwright-router:
     profiles: ["public-proxy"]
-    image: node:26.13.0-alpine
+    image: firecrawl-node-runtime:local
+    build:
+      context: ../security
+      dockerfile: Dockerfile.node-runtime
     user: node
     cpus: 0.25
     mem_limit: 128M
@@ -336,7 +339,7 @@ services:
 
   # Sends LLM calls to Gemini when the runtime secret is present, else/fallback to Ollama with trimmed prompts (llm/trim-proxy.mjs).
   llm-proxy:
-    image: node:26.13.0-alpine
+    image: firecrawl-node-runtime:local
     command: ["node", "/app/trim-proxy.mjs"]
     user: node
     environment:

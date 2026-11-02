@@ -61,7 +61,7 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          foreach ($path in @('./fc.ps1', './scripts/backup_stateful_data.ps1', './security/refresh-ephemeral.ps1', './security/refresh-searxng.ps1', './security/refresh-node-helpers.ps1', './security/refresh-public-gateway.ps1', './security/staged-playwright-image.ps1', './scripts/configure_gemini.ps1', './scripts/configure_service_secrets.ps1', './scripts/configure_public_proxy.ps1')) {
+          foreach ($path in @('./fc.ps1', './scripts/backup_stateful_data.ps1', './security/refresh-ephemeral.ps1', './security/refresh-searxng.ps1', './security/refresh-node-helpers.ps1', './security/refresh-node-runtime.ps1', './security/refresh-public-gateway.ps1', './security/staged-playwright-image.ps1', './scripts/configure_gemini.ps1', './scripts/configure_service_secrets.ps1', './scripts/configure_public_proxy.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors) | Out-Null
