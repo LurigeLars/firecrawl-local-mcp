@@ -36,7 +36,11 @@ test('Redis runtime uses patched zlib without exposing wrapper secrets to Docker
   assert.match(redisDockerfile, /^FROM redis:8\.10\.3-alpine@sha256:21090af93f8324db2f0f0f4f38a7c60369d47d917e000c3423d89d2ae2883537$/m);
   assert.match(redisDockerfile, /apk upgrade --no-cache zlib/);
   assert.match(redisDockerfile, /grep -qvFx 'zlib-1\.3\.2-r0'/);
-  assert.match(composeLocal, /redis:[\s\S]*image: firecrawl-redis:patched\n\s+build:[\s\S]*context: \.\.\/security/);
+  const redisService = composeLocal.split('\n  redis:')[1]?.split('\n  rabbitmq:')[0];
+  assert.ok(redisService);
+  assert.match(redisService, /image: firecrawl-redis:patched/);
+  assert.match(redisService, /build:\s*\n\s*context: \.\.\/security/);
+  assert.match(redisService, /firecrawl-redis-data:\/data/);
 });
 
 

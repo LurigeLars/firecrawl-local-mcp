@@ -234,6 +234,8 @@ services:
 
   redis:
     image: firecrawl-redis:patched
+    volumes:
+      - firecrawl-redis-data:/data
     build:
       context: ../security
       dockerfile: Dockerfile.redis-security
@@ -242,6 +244,11 @@ services:
     restart: unless-stopped
   rabbitmq:
     image: rabbitmq:4.3.7-management-alpine
+    hostname: firecrawl-rabbitmq
+    environment:
+      RABBITMQ_NODENAME: rabbit@firecrawl-rabbitmq
+    volumes:
+      - firecrawl-rabbitmq-data:/var/lib/rabbitmq
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
@@ -352,4 +359,6 @@ networks:
     driver: bridge
 
 volumes:
+  firecrawl-redis-data:
+  firecrawl-rabbitmq-data:
   public-proxy-metrics:

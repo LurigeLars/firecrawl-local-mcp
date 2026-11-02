@@ -57,7 +57,7 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
 });
 
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
-  assert.match(launcher, /ValidateSet\('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
+  assert.match(launcher, /ValidateSet\([^)]*'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
   assert.match(launcher, /'redeploy' \{/);
   assert.match(launcher, /docker @compose up -d --build --force-recreate/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
@@ -273,4 +273,24 @@ test('stateful backup refuses image changes and preserves RabbitMQ quorum identi
   assert.match(source, /'start','firecrawl-api-1'/);
   assert.match(source, /restore_tested/);
   assert.doesNotMatch(source, /--force-recreate|docker compose up|down -v|volume rm|container rm/);
+});
+
+
+test('Firecrawl disposable cache and queue refresh is one-service-scoped and gated', () => {
+  const source = readFileSync(new URL('./refresh-ephemeral.ps1', import.meta.url), 'utf8');
+  assert.match(launcher, /'refresh-redis' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlEphemeralRefresh -Service 'redis'/);
+  assert.match(launcher, /'refresh-rabbitmq' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/);
+  assert.match(source, /ValidateSet\('redis','rabbitmq'\)/);
+  assert.match(source, /--no-deps --no-build --force-recreate --renew-anon-volumes/);
+  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
+  assert.match(source, /messages_unacknowledged/);
+  assert.match(source, /Target image identity changed during security scan/);
+  assert.match(source, /stable hostname verification failed/);
+  assert.match(source, /Scoped \$Service did not become healthy/);
+  assert.match(source, /Unexpected unrelated container replacement/);
+  assert.doesNotMatch(source, /'up','-d'.*'nuq-postgres'|docker compose down|docker volume rm|docker container prune/);
+  assert.match(compose, /firecrawl-redis-data:\/data/);
+  assert.match(compose, /firecrawl-rabbitmq-data:\/var\/lib\/rabbitmq/);
+  assert.match(compose, /RABBITMQ_NODENAME: rabbit@firecrawl-rabbitmq/);
+  assert.match(compose, /hostname: firecrawl-rabbitmq/);
 });
