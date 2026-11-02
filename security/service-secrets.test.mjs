@@ -254,3 +254,23 @@ test('whole-stack Compose refuses to recreate stateful containers without review
   assert.ok(staged);
   assert.doesNotMatch(staged, /Assert-StatefulComposeDataSafety/);
 });
+
+
+test('stateful backup refuses image changes and preserves RabbitMQ quorum identity', () => {
+  const source = readFileSync(new URL('../scripts/backup_stateful_data.ps1', import.meta.url), 'utf8');
+  assert.match(source, /ValidateSet\('Inspect','Backup'\)/);
+  assert.match(source, /Action = 'Inspect'/);
+  assert.match(source, /redis-cli','--raw','SAVE'/);
+  assert.match(source, /redis-check-rdb/);
+  assert.match(source, /rabbitmqctl','export_definitions'/);
+  assert.match(source, /'stop','--time','90','firecrawl-api-1'/);
+  assert.match(source, /'stop','--time','90','firecrawl-rabbitmq-1'/);
+  assert.match(source, /'cp','firecrawl-rabbitmq-1:\/var\/lib\/rabbitmq\/\.'/);
+  assert.match(source, /'mnesia'/);
+  assert.match(source, /'\\.erlang\\.cookie'/);
+  assert.match(source, /finally \{/);
+  assert.match(source, /'start','firecrawl-rabbitmq-1'/);
+  assert.match(source, /'start','firecrawl-api-1'/);
+  assert.match(source, /restore_tested/);
+  assert.doesNotMatch(source, /--force-recreate|docker compose up|down -v|volume rm|container rm/);
+});
