@@ -235,3 +235,22 @@ test('Firecrawl API production runtime strips vulnerable bundled npm and Corepac
   assert.match(runtime, /node --version/);
   assert.match(runtime, /CMD \["node", "dist\/src\/harness.js", "--start-docker"\]/);
 });
+
+
+test('whole-stack Compose refuses to recreate stateful containers without reviewed named volumes', () => {
+  assert.match(compose, /rabbitmq:4\.3\.7-management-alpine/);
+  assert.doesNotMatch(compose, /rabbitmq:4\.4\.0-management-alpine/);
+  const guard = launcher.split('function Assert-StatefulComposeDataSafety {')[1]?.split('switch ($Action) {')[0];
+  assert.ok(guard);
+  for (const dest of ['/data', '/var/lib/rabbitmq', '/var/lib/postgresql/data']) {
+    assert.ok(guard.includes(dest));
+  }
+  assert.match(guard, /'volume'/);
+  assert.match(guard, /firecrawl_/);
+  assert.match(guard, /Complete isolated backup\/migration first/);
+  assert.match(launcher, /'up' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build/);
+  assert.match(launcher, /'redeploy' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build --force-recreate/);
+  const staged = launcher.split("    'maintain-stateless' {")[1]?.split("    'stage-api' {")[0];
+  assert.ok(staged);
+  assert.doesNotMatch(staged, /Assert-StatefulComposeDataSafety/);
+});
