@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const compose = readFileSync(new URL('../compose.local.yaml', import.meta.url), 'utf8');
 const launcher = readFileSync(new URL('../fc.ps1', import.meta.url), 'utf8');
+const playwrightStage = readFileSync(new URL('./staged-playwright-image.ps1', import.meta.url), 'utf8');
 const bootstrap = readFileSync(new URL('../scripts/configure_service_secrets.ps1', import.meta.url), 'utf8');
 const publicProxyBootstrap = readFileSync(new URL('../scripts/configure_public_proxy.ps1', import.meta.url), 'utf8');
 const composeDefaults = readFileSync(new URL('../compose.defaults.env', import.meta.url), 'utf8');
@@ -185,4 +186,10 @@ test('optional Compose defaults suppress warnings without supplying values', () 
     launcher,
     /'--env-file', "\$root\\compose\.defaults\.env",[\s\S]*'--env-file', "\$root\\\.env"/,
   );
+});
+
+test('Playwright staging temp cleanup does not record false PowerShell errors', () => {
+  assert.match(playwrightStage, /if \(Test-Path -LiteralPath \$Tmp -PathType Leaf\)/);
+  assert.match(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction Stop/);
+  assert.doesNotMatch(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction SilentlyContinue/);
 });
