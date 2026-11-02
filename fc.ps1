@@ -1,6 +1,6 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
+param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
 
 $root = $PSScriptRoot
 . (Join-Path $root "security\staged-mcp-image.ps1")
@@ -559,7 +559,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
+$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -623,11 +623,6 @@ switch ($Action) {
     'refresh-search-proxy' {
         Assert-UpstreamFirecrawlPin
         Invoke-FirecrawlNodeHelperRefresh -Service 'searxng-proxy' -ComposeArguments $compose -ProjectRoot $root
-    }
-    'refresh-gateway' {
-        if (-not $public) { throw 'Public Firecrawl gateway is not configured.' }
-        Assert-UpstreamFirecrawlPin
-        Invoke-FirecrawlNodeHelperRefresh -Service 'gateway' -ComposeArguments $compose -ProjectRoot $root
     }
     'refresh-searxng' {
         Assert-UpstreamFirecrawlPin
