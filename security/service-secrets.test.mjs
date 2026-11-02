@@ -284,6 +284,9 @@ test('Firecrawl disposable cache and queue refresh is one-service-scoped and gat
   assert.match(source, /--no-deps --no-build --force-recreate --renew-anon-volumes/);
   assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
   assert.match(source, /messages_unacknowledged/);
+  assert.match(source, /--formatter=json name messages_unacknowledged --quiet/);
+  assert.match(source, /ConvertFrom-Json -InputObject/);
+  assert.match(source, /RabbitMQ JSON queue telemetry invalid; refusing reset/);
   assert.match(source, /Target image identity changed during security scan/);
   assert.match(source, /stable hostname verification failed/);
   assert.match(source, /Scoped \$Service did not become healthy/);
