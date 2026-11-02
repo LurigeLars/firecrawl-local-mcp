@@ -57,7 +57,7 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
 });
 
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
-  assert.match(launcher, /ValidateSet\('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
+  assert.match(launcher, /ValidateSet\('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
   assert.match(launcher, /'redeploy' \{/);
   assert.match(launcher, /docker @compose up -d --build --force-recreate/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
@@ -192,4 +192,30 @@ test('Playwright staging temp cleanup does not record false PowerShell errors', 
   assert.match(playwrightStage, /if \(Test-Path -LiteralPath \$Tmp -PathType Leaf\)/);
   assert.match(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction Stop/);
   assert.doesNotMatch(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction SilentlyContinue/);
+});
+
+
+test('API staging is isolated from data stores and has an HTTP liveness gate', () => {
+  const source = readFileSync(new URL('./staged-api-image.ps1', import.meta.url), 'utf8');
+  assert.match(launcher, /'stage-api'/);
+  assert.match(launcher, /'deploy-api'/);
+  assert.match(source, /\('build',\$Service\)/);
+  assert.match(source, /'--no-deps','--no-build','--force-recreate',\$Service/);
+  assert.match(source, /\/v0\/health\/liveness/);
+  assert.match(source, /firecrawl-api-runtime-hotfix\.Dockerfile/);
+  assert.doesNotMatch(source, /\('up','-d'.*'redis'/);
+});
+
+test('single-operation stateless maintenance never invokes a full-stack redeploy', () => {
+  const section = launcher.split("    'maintain-stateless' {")[1]?.split("    'stage-api' {")[0];
+  assert.ok(section);
+  for (const name of ['api', 'mcp', 'playwright-service', 'browser-session-service', 'playwright-public-proxy-service']) {
+    assert.match(section, new RegExp("'" + name + "'"));
+  }
+  for (const forbidden of ['redis', 'rabbitmq', 'nuq-postgres', 'searxng']) {
+    assert.doesNotMatch(section, new RegExp("'" + forbidden + "'\\s*\\{"));
+  }
+  assert.doesNotMatch(section, /docker\s+@compose\s+up\s+-d\s+--build/);
+  assert.match(section, /Invoke-ApiStage -Action stage/);
+  assert.match(section, /Invoke-ApiStage -Action deploy/);
 });
