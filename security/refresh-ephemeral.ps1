@@ -34,12 +34,21 @@ function Invoke-FirecrawlEphemeralRefresh {
     if ($Service -eq 'rabbitmq') {
         # Refuse to discard a message that a consumer has checked out.
         # Inactive READY messages may be disposable for this private setup.
-        $UnackedRows = @(& docker exec $Container rabbitmqctl -q list_queues messages_unacknowledged 2>&1)
+        # Strictly parse RabbitMQ's machine-readable output. The default table
+        # contains banners/headers that must never be mistaken for message rows.
+        $UnackedRows = @(& docker exec $Container rabbitmqctl list_queues --formatter=json name messages_unacknowledged --quiet 2>&1)
         if ($LASTEXITCODE -ne 0) { throw 'Cannot verify RabbitMQ in-flight messages.' }
-        foreach ($Line in $UnackedRows) {
-            $Value = ([string]$Line).Trim()
-            if ($Value -eq '') { continue }
-            if ($Value -cnotmatch '^[0-9]+$') { throw 'Unexpected RabbitMQ queue telemetry; refusing reset.' }
+        try {
+            $Queues = ConvertFrom-Json -InputObject ($UnackedRows -join [Environment]::NewLine) -Depth 8
+        } catch {
+            throw 'RabbitMQ JSON queue telemetry invalid; refusing reset.'
+        }
+        foreach ($Queue in @($Queues)) {
+            if ($null -eq $Queue -or $null -eq $Queue.PSObject.Properties['messages_unacknowledged']) {
+                throw 'RabbitMQ JSON queue count missing; refusing reset.'
+            }
+            $Value = [string]$Queue.messages_unacknowledged
+            if ($Value -cnotmatch '^[0-9]+$') { throw 'RabbitMQ queue count is not numeric; refusing reset.' }
             if ([int64]$Value -gt 0) { throw 'RabbitMQ has in-flight unacknowledged messages; refusing reset.' }
         }
     }
