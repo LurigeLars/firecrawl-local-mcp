@@ -29,6 +29,18 @@ RUN pnpm exec playwright install chromium --with-deps
 
 RUN pnpm run build
 
+# pnpm/npm/Corepack are build tools, not needed by the three Compose services.
+# Retain only production dependencies and a direct Node.js runtime entrypoint.
+RUN pnpm prune --prod \
+    && rm -rf /usr/local/lib/node_modules/npm \
+        /usr/local/lib/node_modules/corepack \
+        /usr/local/bin/npm /usr/local/bin/npx \
+        /usr/local/bin/corepack /usr/local/bin/pnpm /usr/local/bin/pnpx \
+        /root/.cache/node/corepack /pnpm \
+    && test ! -e /usr/local/lib/node_modules/npm \
+    && test ! -e /usr/local/lib/node_modules/corepack \
+    && test -s /usr/src/app/dist/api.js
+
 RUN chown -R node:node /usr/src/app \
   && chmod -R a+rX /usr/local/share/playwright
 
@@ -39,4 +51,4 @@ EXPOSE ${PORT}
 
 USER node
 
-CMD [ "pnpm", "start" ]
+CMD [ "node", "dist/api.js" ]
