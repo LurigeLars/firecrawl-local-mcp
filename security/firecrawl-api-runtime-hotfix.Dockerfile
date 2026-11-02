@@ -134,6 +134,17 @@ NODE
 # Runtime stage
 FROM runtime-base AS runtime
 
+# Runtime executes the prebuilt Node application; npm and Corepack are needed
+# only in build-base. The pinned official Node base bundles vulnerable npm CLI
+# dependencies (brace-expansion, pacote, sigstore, picomatch, ip-address).
+# Remove the CLI package trees from the final filesystem, not from build-base.
+RUN set -eu; \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack; \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack; \
+    test ! -e /usr/local/lib/node_modules/npm; \
+    test ! -e /usr/local/lib/node_modules/corepack; \
+    node --version
+
 # Install security updates for Debian packages inherited from the pinned Node runtime,
 # not just dependencies touched by apt-get install. Keep Node 22 and the pinned base digest.
 RUN apt-get update \
