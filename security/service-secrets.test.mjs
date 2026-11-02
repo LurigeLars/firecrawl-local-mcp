@@ -267,7 +267,7 @@ test('stateful backup refuses image changes and preserves RabbitMQ quorum identi
   assert.match(source, /'stop','--time','90','firecrawl-rabbitmq-1'/);
   assert.match(source, /'cp','firecrawl-rabbitmq-1:\/var\/lib\/rabbitmq\/\.'/);
   assert.match(source, /'mnesia'/);
-  assert.match(source, /'\\.erlang\\.cookie'/);
+  assert.ok(source.includes("'.erlang.cookie'"));
   assert.match(source, /finally \{/);
   assert.match(source, /'start','firecrawl-rabbitmq-1'/);
   assert.match(source, /'start','firecrawl-api-1'/);
