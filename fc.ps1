@@ -570,7 +570,13 @@ $playwrightUrlWasSet = Test-Path Env:PLAYWRIGHT_MICROSERVICE_URL
 $playwrightUrlOriginal = if ($playwrightUrlWasSet) { $env:PLAYWRIGHT_MICROSERVICE_URL } else { $null }
 try {
     if ($Action -in $composeActions) {
-        Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy", "deploy-proxy"))
+        # Only the public proxy deployment needs the existing DPAPI-backed
+        # post_start hook; preserve all other reviewed secret boundaries.
+        if ($Action -eq "deploy-proxy") {
+            Set-RuntimeHookSecrets -UseRealSecrets $true
+        } else {
+            Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy"))
+        }
     }
 switch ($Action) {
     'up' {
