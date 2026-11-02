@@ -340,7 +340,7 @@ test('SearXNG search proxy refresh is npm-free, scanned and one-service only', (
 
 test('public gateway refresh is isolated and preserves live Cloudflare Access values', () => {
   const source = readFileSync(new URL('./refresh-public-gateway.ps1', import.meta.url), 'utf8');
-  assert.match(launcher, /'refresh-gateway' \{\s*if \(-not \$public\).*Assert-UpstreamFirecrawlPin[\s\S]*?Invoke-FirecrawlPublicGatewayRefresh/);
+  assert.match(launcher, /'refresh-gateway' \{\s*if \(-not \$public\)[^\n]*\n\s*Assert-UpstreamFirecrawlPin\s*\n\s*Invoke-FirecrawlPublicGatewayRefresh/);
   assert.match(launcher, /\$composeActions = @\([^)]*"refresh-gateway"/);
   assert.match(source, /config --format json/);
   assert.match(source, /inspect --format '\{\{json \.Config\.Env\}\}'/);
