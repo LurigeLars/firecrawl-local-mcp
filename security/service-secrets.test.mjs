@@ -57,7 +57,7 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
 });
 
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
-  assert.match(launcher, /ValidateSet\('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
+  assert.match(launcher, /ValidateSet\('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
   assert.match(launcher, /'redeploy' \{/);
   assert.match(launcher, /docker @compose up -d --build --force-recreate/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
