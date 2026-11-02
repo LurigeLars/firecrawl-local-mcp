@@ -134,11 +134,14 @@ NODE
 # Runtime stage
 FROM runtime-base AS runtime
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    procps \
-    curl \
+# Install security updates for Debian packages inherited from the pinned Node runtime,
+# not just dependencies touched by apt-get install. Keep Node 22 and the pinned base digest.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
+        git \
+        procps \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # FoundationDB client library (libfdb_c + fdbcli)
