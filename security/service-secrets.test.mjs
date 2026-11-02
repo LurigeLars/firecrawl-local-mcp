@@ -193,3 +193,15 @@ test('Playwright staging temp cleanup does not record false PowerShell errors', 
   assert.match(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction Stop/);
   assert.doesNotMatch(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction SilentlyContinue/);
 });
+
+
+test('API staging is isolated from data stores and has an HTTP liveness gate', () => {
+  const source = readFileSync(new URL('./staged-api-image.ps1', import.meta.url), 'utf8');
+  assert.match(launcher, /'stage-api'/);
+  assert.match(launcher, /'deploy-api'/);
+  assert.match(source, /\('build',\$Service\)/);
+  assert.match(source, /'--no-deps','--no-build','--force-recreate',\$Service/);
+  assert.match(source, /\/v0\/health\/liveness/);
+  assert.match(source, /firecrawl-api-runtime-hotfix\.Dockerfile/);
+  assert.doesNotMatch(source, /\('up','-d'.*'redis'/);
+});
