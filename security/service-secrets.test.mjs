@@ -300,7 +300,7 @@ test('Firecrawl disposable cache and queue refresh is one-service-scoped and gat
 
 
 test('ephemeral service refresh receives only non-secret Compose parse placeholders', () => {
-  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "up", "redeploy"/);
+  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "up", "redeploy"/);
   assert.match(launcher, /\$env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"/);
   assert.match(launcher, /\$env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"/);
   assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
