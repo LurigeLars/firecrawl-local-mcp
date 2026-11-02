@@ -315,7 +315,10 @@ services:
 
   # Routes Firecrawl searches: Google+Startpage (language all) first, Bing (en-GB) as fallback; handles site: filters.
   searxng-proxy:
-    image: node:26.13.0-alpine
+    image: firecrawl-searxng-proxy:local
+    build:
+      context: ../security
+      dockerfile: Dockerfile.searxng-proxy
     command: ["node", "/app/lang-proxy.mjs"]
     user: node
     environment:

@@ -1,0 +1,11 @@
+# Dedicated minimal Node runtime for internal-only SearXNG language proxy.
+FROM node:26.13.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94
+
+RUN apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+    && test ! -e /usr/local/lib/node_modules/npm \
+    && test -x /usr/local/bin/node
+
+USER node
+WORKDIR /app
+CMD ["node", "/app/lang-proxy.mjs"]

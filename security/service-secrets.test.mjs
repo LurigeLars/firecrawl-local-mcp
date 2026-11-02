@@ -300,7 +300,7 @@ test('Firecrawl disposable cache and queue refresh is one-service-scoped and gat
 
 
 test('ephemeral service refresh receives only non-secret Compose parse placeholders', () => {
-  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "up", "redeploy"/);
+  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "up", "redeploy"/);
   assert.match(launcher, /\$env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"/);
   assert.match(launcher, /\$env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"/);
   assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
@@ -318,4 +318,21 @@ test('SearXNG critical certifi remediation is one-service scoped and protected b
   assert.match(refresh, /internal search proxy/);
   assert.match(refresh, /Unexpected unrelated service recreation/);
   assert.doesNotMatch(refresh, /down -v|docker volume rm|--remove-orphans/);
+});
+
+
+test('SearXNG search proxy refresh is npm-free, scanned and one-service only', () => {
+  const source = readFileSync(new URL('./refresh-node-helpers.ps1', import.meta.url), 'utf8');
+  const dockerfile = readFileSync(new URL('./Dockerfile.searxng-proxy', import.meta.url), 'utf8');
+  assert.match(launcher, /'refresh-search-proxy' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlNodeHelperRefresh/);
+  assert.match(launcher, /\$composeActions = @\([^)]*"refresh-search-proxy"/);
+  assert.match(source, /ValidateSet\('searxng-proxy'\)/);
+  assert.match(source, /up -d --no-deps --no-build --force-recreate \$Service/);
+  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
+  assert.match(source, /SEARCH_PROXY_REFRESH_OK/);
+  assert.match(dockerfile, /FROM node:26\.13\.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94/);
+  assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(compose, /searxng-proxy:\s*\n\s*image: firecrawl-searxng-proxy:local\s*\n\s*build:/);
+  assert.doesNotMatch(source, /--remove-orphans|docker compose down|docker volume rm|docker restart/);
+  assert.doesNotMatch(source, /public\/gateway.env|Get-DpapiSecretValue/);
 });
