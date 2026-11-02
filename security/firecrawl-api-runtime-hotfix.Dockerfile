@@ -139,9 +139,12 @@ FROM runtime-base AS runtime
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
+        ca-certificates \
         git \
         procps \
         curl \
+    && update-ca-certificates \
+    && test -s /etc/ssl/certs/ca-certificates.crt \
     && rm -rf /var/lib/apt/lists/*
 
 # FoundationDB client library (libfdb_c + fdbcli)
