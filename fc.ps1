@@ -1,6 +1,6 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status')
+param([ValidateSet('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
 
 $root = $PSScriptRoot
 . (Join-Path $root "security\staged-mcp-image.ps1")
@@ -556,7 +556,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
+$composeActions = @("up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -573,7 +573,8 @@ try {
     if ($Action -in $composeActions) {
         # Only the public proxy deployment needs the existing DPAPI-backed
         # post_start hook; preserve all other reviewed secret boundaries.
-        if ($Action -in @("deploy-proxy", "deploy-api")) {
+        if ($Action -in @("deploy-proxy", "deploy-api") -or
+            ($Action -eq "maintain-stateless" -and $Service -in @("api", "playwright-public-proxy-service"))) {
             Set-RuntimeHookSecrets -UseRealSecrets $true
         } else {
             Set-RuntimeHookSecrets -UseRealSecrets ($Action -in @("up", "redeploy"))
@@ -609,6 +610,35 @@ switch ($Action) {
         # Never rebuild here: the caller must inspect the candidate first.
         Assert-UpstreamFirecrawlPin
         Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments $compose -ProjectRoot $root
+    }
+    'maintain-stateless' {
+        # One transaction per service: stage, scan, deploy, verify; rollback on failure.
+        # Never recreate data services or invoke a whole-stack Compose action.
+        Assert-UpstreamFirecrawlPin
+        switch -CaseSensitive ($Service) {
+            'api' {
+                Invoke-ApiStage -Action stage -ComposeArguments $compose -ProjectRoot $root
+                Invoke-ApiStage -Action deploy -ComposeArguments $compose -ProjectRoot $root
+            }
+            'mcp' {
+                Invoke-McpStageSecurityCheck -Action build -ComposeArguments $compose -ProjectRoot $root
+                Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments $compose -ProjectRoot $root
+            }
+            'playwright-service' {
+                Invoke-PlaywrightStage -Action stage -Service $Service -ComposeArguments $compose -ProjectRoot $root
+                Invoke-PlaywrightStage -Action deploy -Service $Service -ComposeArguments $compose -ProjectRoot $root
+            }
+            'browser-session-service' {
+                Invoke-PlaywrightStage -Action stage -Service $Service -ComposeArguments $compose -ProjectRoot $root
+                Invoke-PlaywrightStage -Action deploy -Service $Service -ComposeArguments $compose -ProjectRoot $root
+            }
+            'playwright-public-proxy-service' {
+                if (-not $PublicProxyConfigured) { throw 'Playwright public proxy is not configured.' }
+                Invoke-PlaywrightStage -Action stage -Service $Service -ComposeArguments $compose -ProjectRoot $root
+                Invoke-PlaywrightStage -Action deploy -Service $Service -ComposeArguments $compose -ProjectRoot $root
+            }
+            default { throw 'Unreviewed or stateful service is not permitted in maintain-stateless.' }
+        }
     }
     'stage-api' {
         Assert-UpstreamFirecrawlPin
