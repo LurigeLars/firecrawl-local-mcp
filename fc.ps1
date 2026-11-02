@@ -1,11 +1,12 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
+param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
 
 $root = $PSScriptRoot
 . (Join-Path $root "security\staged-mcp-image.ps1")
 . (Join-Path $root "security\staged-playwright-image.ps1")
 . (Join-Path $root "security\staged-api-image.ps1")
+. (Join-Path $root "security\refresh-ephemeral.ps1")
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
@@ -617,6 +618,14 @@ function Assert-StatefulComposeDataSafety {
 }
 
 switch ($Action) {
+    'refresh-redis' {
+        Assert-UpstreamFirecrawlPin
+        Invoke-FirecrawlEphemeralRefresh -Service 'redis' -ComposeArguments $compose
+    }
+    'refresh-rabbitmq' {
+        Assert-UpstreamFirecrawlPin
+        Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq' -ComposeArguments $compose
+    }
     'up' {
         Assert-UpstreamFirecrawlPin
         Assert-StatefulComposeDataSafety
