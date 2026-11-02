@@ -1,4 +1,4 @@
-# Isolated API staging. Never rebuild or restart Redis, RabbitMQ, Postgres, or API.
+# Isolated API staging. Rebuilds only API; never restarts Redis, RabbitMQ, Postgres, or other services.
 function Get-ApiStageHashes {
     param([string]$ProjectRoot)
     $Files = @('fc.ps1','security/staged-mcp-image.ps1','security/staged-api-image.ps1',
