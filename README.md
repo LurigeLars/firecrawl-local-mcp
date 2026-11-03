@@ -262,6 +262,22 @@ MCP registration (user scope, done once):
 claude mcp add-json firecrawl-mcp -s user '{"type":"stdio","command":"node","args":["<repo-path>/local-mcp/stdio-proxy.mjs"],"env":{"FIRECRAWL_API_URL":"http://127.0.0.1:3002"}}'
 ```
 
+## RabbitMQ 4.4 maintenance through Docker-MCP
+
+The existing `firecrawl-rabbitmq-refresh` allowlisted alias now performs the
+reviewed, one-time 4.3.7 → 4.4.0 migration from `fc.ps1 refresh-rabbitmq`.
+It validates the exact image, broker health, default vhost, empty queues,
+persistent named volume and stable node name; enables feature flags, runs the
+existing offline RabbitMQ/Redis backup, then recreates **only** RabbitMQ.
+The API is paused during the change and restarted afterward. Image and volume
+identity, broker health and RabbitMQ diagnostics are verified before success.
+
+This operation never deletes volumes, performs generic Compose redeploys, or
+automatically downgrades a migrated broker. Backups remain private under the
+local Firecrawl backup directory and are retained for recovery. Unexpected
+queue traffic, node identities, image hashes or failed backup checks abort
+the upgrade. On repeat runs an already healthy 4.4.0 broker is left unchanged.
+
 ## Ephemeral stateful research browser
 
 `browser-session-service` is a separate local Playwright/Chromium sidecar for tasks that need page state or request-level debugging rather than one-shot scraping. It reuses the reviewed Playwright image from the pinned upstream Firecrawl checkout but does not modify or vendor upstream Firecrawl source.
