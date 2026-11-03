@@ -662,7 +662,22 @@ switch ($Action) {
     }
     'refresh-rabbitmq' {
         Assert-UpstreamFirecrawlPin
-        Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq' -ComposeArguments $compose
+        # The old isolated refresh helper targets 4.3.7 and must not report
+        # success while the reviewed Compose target is 4.4.0. Migration of the
+        # persisted broker volume requires a separate, verified backup and
+        # explicit operator approval; it is never an ephemeral cache reset.
+        $RabbitCurrent = @(& docker inspect --format '{{.Config.Image}}' 'firecrawl-rabbitmq-1')
+        if ($LASTEXITCODE -ne 0 -or $RabbitCurrent.Count -ne 1) {
+            throw 'Cannot verify current RabbitMQ image; refusing refresh.'
+        }
+        if ([string]$RabbitCurrent[0] -cne 'rabbitmq:4.4.0-management-alpine') {
+            throw 'RabbitMQ 4.4 migration pending: back up and verify feature flags before scoped upgrade; no implicit reset.'
+        }
+        $RabbitHealth = @(& docker inspect --format '{{.State.Health.Status}}' 'firecrawl-rabbitmq-1')
+        if ($LASTEXITCODE -ne 0 -or $RabbitHealth.Count -ne 1 -or [string]$RabbitHealth[0] -cne 'healthy') {
+            throw 'RabbitMQ 4.4 is not healthy.'
+        }
+        'RABBITMQ_CURRENT_VERIFIED version=4.4.0 (no container changes)'
     }
     'up' {
         Assert-UpstreamFirecrawlPin
