@@ -283,10 +283,15 @@ test('stateful backup refuses image changes and preserves RabbitMQ quorum identi
 });
 
 
-test('Firecrawl disposable cache and queue refresh is one-service-scoped and gated', () => {
+test('Firecrawl cache refresh is scoped, while RabbitMQ 4.4 requires explicit state migration', () => {
   const source = readFileSync(new URL('./refresh-ephemeral.ps1', import.meta.url), 'utf8');
   assert.match(launcher, /'refresh-redis' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlEphemeralRefresh -Service 'redis'/);
-  assert.match(launcher, /'refresh-rabbitmq' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/);
+  const rabbitAction = launcher.split("    'refresh-rabbitmq' {")[1]?.split("    'up' {")[0];
+  assert.ok(rabbitAction, 'RabbitMQ action remains registered');
+  assert.match(rabbitAction, /Assert-UpstreamFirecrawlPin/);
+  assert.match(rabbitAction, /RabbitMQ 4\.4 migration pending/);
+  assert.match(rabbitAction, /RABBITMQ_CURRENT_VERIFIED/);
+  assert.doesNotMatch(rabbitAction, /Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/);
   assert.match(source, /ValidateSet\('redis','rabbitmq'\)/);
   assert.match(source, /--no-deps --no-build --force-recreate --renew-anon-volumes/);
   assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
