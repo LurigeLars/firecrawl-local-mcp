@@ -24,8 +24,12 @@ foreach ($Name in @('firecrawl-api-1','firecrawl-redis-1','firecrawl-rabbitmq-1'
 $Hostname = Inspect-Value 'firecrawl-rabbitmq-1' '{{.Config.Hostname}}'
 $RabbitVolume = Inspect-Value 'firecrawl-rabbitmq-1' '{{range .Mounts}}{{if eq .Destination "/var/lib/rabbitmq"}}{{.Name}}{{end}}{{end}}'
 $RedisVolume = Inspect-Value 'firecrawl-redis-1' '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}'
-if ($Hostname -cnotmatch '^[a-f0-9]{12,64}$' -or $RabbitVolume -cnotmatch '^[a-f0-9]{64}$' -or $RedisVolume) {
-    throw 'Unexpected data storage or RabbitMQ node identity: backup refused.'
+# These are stable, reviewed Compose named volumes and the configured
+# RabbitMQ hostname. Do not assume anonymous hex volumes or Docker hostnames.
+if ($Hostname -cne 'firecrawl-rabbitmq' -or
+    $RabbitVolume -cne 'firecrawl_firecrawl-rabbitmq-data' -or
+    $RedisVolume -cne 'firecrawl_firecrawl-redis-data') {
+    throw 'Unexpected named data volumes or RabbitMQ node identity: backup refused.'
 }
 $Node = "rabbit@$Hostname"
 $null = Invoke-Docker -Arguments @('exec','firecrawl-rabbitmq-1','rabbitmq-diagnostics','-q','check_running')
@@ -33,7 +37,7 @@ $KeyCount = (Invoke-Docker -Arguments @('exec','firecrawl-redis-1','redis-cli','
 if ($KeyCount -cnotmatch '^[0-9]+$') { throw 'Redis key count failed.' }
 $Report = [ordered]@{
     action=$Action; redis_keys=[int64]$KeyCount; redis_volume_mounted=$false
-    rabbitmq_node=$Node; rabbitmq_volume_kind='anonymous'
+    rabbitmq_node=$Node; rabbitmq_volume_kind='named'
     original_api_id=$Originals['firecrawl-api-1']
     original_redis_id=$Originals['firecrawl-redis-1']
     original_rabbit_id=$Originals['firecrawl-rabbitmq-1']
