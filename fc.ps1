@@ -671,6 +671,10 @@ switch ($Action) {
         $Current = @(& docker inspect --format '{{.Config.Image}}|{{.State.Running}}|{{.State.Health.Status}}' $Rabbit)
         if ($LASTEXITCODE -ne 0 -or $Current.Count -ne 1) { throw 'RabbitMQ container inspection failed.' }
         if ([string]$Current[0] -ceq "$Target|true|healthy") {
+            $RunningId = @(& docker inspect --format '{{.Image}}' $Rabbit)
+            if ($LASTEXITCODE -ne 0 -or [string]$RunningId[0] -cne $TargetId) {
+                throw 'Running RabbitMQ 4.4 image does not match reviewed identity.'
+            }
             'RABBITMQ_CURRENT_VERIFIED version=4.4.0 (no container changes)'
             break
         }
