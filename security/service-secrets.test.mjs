@@ -248,9 +248,8 @@ test('whole-stack Compose refuses to recreate stateful containers without review
   assert.match(guard, /'volume'/);
   assert.match(guard, /firecrawl_/);
   assert.match(guard, /Complete isolated backup\/migration first/);
-  assert.match(launcher, /'RunningRabbitImage'/) === false ? false : true;
   assert.match(launcher, /\$RunningRabbitImage/);
-  assert.match(launcher, /'RabbitMQ 4\.4 migration pending'/);
+  assert.match(launcher, /RabbitMQ 4\.4 migration pending/);
   assert.match(launcher, /'up' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build/);
   assert.match(launcher, /'redeploy' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build --force-recreate/);
   const staged = launcher.split("    'maintain-stateless' {")[1]?.split("    'stage-api' {")[0];
