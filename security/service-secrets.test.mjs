@@ -289,8 +289,17 @@ test('Firecrawl cache refresh is scoped, while RabbitMQ 4.4 requires explicit st
   const rabbitAction = launcher.split("    'refresh-rabbitmq' {")[1]?.split("    'up' {")[0];
   assert.ok(rabbitAction, 'RabbitMQ action remains registered');
   assert.match(rabbitAction, /Assert-UpstreamFirecrawlPin/);
-  assert.match(rabbitAction, /RabbitMQ 4\.4 migration pending/);
   assert.match(rabbitAction, /RABBITMQ_CURRENT_VERIFIED/);
+  assert.match(rabbitAction, /RABBITMQ_UPGRADED/);
+  assert.match(rabbitAction, /Assert-RabbitQueuesIdle/);
+  assert.match(rabbitAction, /backup_stateful_data\.ps1/);
+  assert.match(rabbitAction, /rabbitmq-data\\\.erlang\.cookie/);
+  assert.match(rabbitAction, /--no-deps --no-build --force-recreate rabbitmq/);
+  assert.match(rabbitAction, /TargetId/);
+  assert.match(rabbitAction, /enable_feature_flag all/);
+  assert.match(rabbitAction, /docker scout cves --only-severity critical,high --only-fixed --exit-code/);
+  assert.match(rabbitAction, /do not downgrade/);
+  assert.doesNotMatch(rabbitAction, /down -v|volume rm|--renew-anon-volumes/);
   assert.doesNotMatch(rabbitAction, /Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/);
   assert.match(source, /ValidateSet\('redis','rabbitmq'\)/);
   assert.match(source, /--no-deps --no-build --force-recreate --renew-anon-volumes/);
