@@ -661,23 +661,125 @@ switch ($Action) {
         Invoke-FirecrawlEphemeralRefresh -Service 'redis' -ComposeArguments $compose
     }
     'refresh-rabbitmq' {
+        # Fixed Docker-MCP alias; never expose arbitrary Compose or shell input.
         Assert-UpstreamFirecrawlPin
-        # The old isolated refresh helper targets 4.3.7 and must not report
-        # success while the reviewed Compose target is 4.4.0. Migration of the
-        # persisted broker volume requires a separate, verified backup and
-        # explicit operator approval; it is never an ephemeral cache reset.
-        $RabbitCurrent = @(& docker inspect --format '{{.Config.Image}}' 'firecrawl-rabbitmq-1')
-        if ($LASTEXITCODE -ne 0 -or $RabbitCurrent.Count -ne 1) {
-            throw 'Cannot verify current RabbitMQ image; refusing refresh.'
+        $Rabbit = 'firecrawl-rabbitmq-1'
+        $Api = 'firecrawl-api-1'
+        $Old = 'rabbitmq:4.3.7-management-alpine'
+        $Target = 'rabbitmq:4.4.0-management-alpine'
+        $TargetId = 'sha256:b768d2e09a809b48458d6c3c32fc2894643a6bfafd76264c120373eff0ee6532'
+        $Current = @(& docker inspect --format '{{.Config.Image}}|{{.State.Running}}|{{.State.Health.Status}}' $Rabbit)
+        if ($LASTEXITCODE -ne 0 -or $Current.Count -ne 1) { throw 'RabbitMQ container inspection failed.' }
+        if ([string]$Current[0] -ceq "$Target|true|healthy") {
+            'RABBITMQ_CURRENT_VERIFIED version=4.4.0 (no container changes)'
+            break
         }
-        if ([string]$RabbitCurrent[0] -cne 'rabbitmq:4.4.0-management-alpine') {
-            throw 'RabbitMQ 4.4 migration pending: back up and verify feature flags before scoped upgrade; no implicit reset.'
+        if ([string]$Current[0] -cne "$Old|true|healthy") { throw 'Unreviewed RabbitMQ baseline; migration refused.' }
+        $Volume = @(& docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/rabbitmq"}}{{.Name}}{{end}}{{end}}' $Rabbit)
+        $HostName = @(& docker inspect --format '{{.Config.Hostname}}' $Rabbit)
+        $RedisVolume = @(& docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' 'firecrawl-redis-1')
+        if ($LASTEXITCODE -ne 0 -or $Volume.Count -ne 1 -or
+            [string]$Volume[0] -cne 'firecrawl_firecrawl-rabbitmq-data' -or
+            [string]$HostName[0] -cne 'firecrawl-rabbitmq' -or
+            [string]$RedisVolume[0] -cne 'firecrawl_firecrawl-redis-data') {
+            throw 'Unexpected RabbitMQ/Redis data volume or node identity.'
         }
-        $RabbitHealth = @(& docker inspect --format '{{.State.Health.Status}}' 'firecrawl-rabbitmq-1')
-        if ($LASTEXITCODE -ne 0 -or $RabbitHealth.Count -ne 1 -or [string]$RabbitHealth[0] -cne 'healthy') {
-            throw 'RabbitMQ 4.4 is not healthy.'
+        $Candidate = @(& docker image inspect --format '{{.Id}}' $Target)
+        if ($LASTEXITCODE -ne 0 -or $Candidate.Count -ne 1 -or [string]$Candidate[0] -cne $TargetId) {
+            throw 'Expected reviewed RabbitMQ 4.4 image is unavailable or changed.'
         }
-        'RABBITMQ_CURRENT_VERIFIED version=4.4.0 (no container changes)'
+        & docker scout cves --only-severity critical,high --only-fixed --exit-code ("local://" + $Target) | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ candidate failed fixable Critical/High security scan.' }
+        $AfterScan = @(& docker image inspect --format '{{.Id}}' $Target)
+        if ($LASTEXITCODE -ne 0 -or [string]$AfterScan[0] -cne $TargetId) {
+            throw 'RabbitMQ image identity changed during the security scan.'
+        }
+        function Assert-RabbitQueuesIdle {
+            $HostsText = @(& docker exec $Rabbit rabbitmqctl list_vhosts --formatter=json name --quiet 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ virtual host listing failed.' }
+            try { $Hosts = @((($HostsText -join [Environment]::NewLine) | ConvertFrom-Json -Depth 8)) }
+            catch { throw 'RabbitMQ virtual host listing is not valid JSON.' }
+            if ($Hosts.Count -ne 1 -or [string]$Hosts[0].name -cne '/') {
+                throw 'Unreviewed RabbitMQ virtual host: unattended upgrade refused.'
+            }
+            $QueuesText = @(& docker exec $Rabbit rabbitmqctl list_queues -p / --formatter=json name messages_ready messages_unacknowledged --quiet 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ queue listing failed.' }
+            try { $Queues = @((($QueuesText -join [Environment]::NewLine) | ConvertFrom-Json -Depth 8)) }
+            catch { throw 'RabbitMQ queue listing is not valid JSON.' }
+            foreach ($Queue in $Queues) {
+                if ($null -eq $Queue -or
+                    $null -eq $Queue.PSObject.Properties['messages_ready'] -or
+                    $null -eq $Queue.PSObject.Properties['messages_unacknowledged']) {
+                    throw 'RabbitMQ queue counters are missing.'
+                }
+                foreach ($Name in @('messages_ready','messages_unacknowledged')) {
+                    $Count = [string]$Queue.$Name
+                    if ($Count -cnotmatch '^[0-9]+$') { throw 'RabbitMQ queue counter is invalid.' }
+                    if ([int64]$Count -gt 0) { throw 'RabbitMQ still has pending or in-flight jobs.' }
+                }
+            }
+        }
+        Assert-RabbitQueuesIdle
+        & docker exec $Rabbit rabbitmqctl enable_feature_flag all | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ 4.3 feature flags could not be prepared.' }
+        # Reuse the existing offline backup; it stops then restores the same
+        # original API/broker containers and retains their named volumes.
+        $BackupText = @(& (Join-Path $root 'scripts\backup_stateful_data.ps1') -Action Backup)
+        try { $Receipt = ($BackupText -join [Environment]::NewLine) | ConvertFrom-Json -Depth 8 }
+        catch { throw 'Backup did not produce a valid receipt.' }
+        $Backup = [string]$Receipt.backup_path
+        if ([string]::IsNullOrWhiteSpace($Backup) -or
+            -not (Test-Path -LiteralPath (Join-Path $Backup 'manifest.json') -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $Backup 'rabbitmq-definitions.json') -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $Backup 'rabbitmq-data\.erlang.cookie') -PathType Leaf) -or
+            [int64]$Receipt.rabbitmq_queue_count -lt 1 -or
+            [int]$Receipt.image_changes -ne 0) {
+            throw 'Incomplete RabbitMQ backup receipt; no migration performed.'
+        }
+        $ApiStopped = $false
+        try {
+            & docker stop --time 90 $Api | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Firecrawl API could not be stopped.' }
+            $ApiStopped = $true
+            $ApiState = @(& docker inspect --format '{{.State.Running}}' $Api)
+            if ($LASTEXITCODE -ne 0 -or [string]$ApiState[0] -cne 'false') { throw 'Firecrawl API is still running.' }
+            Assert-RabbitQueuesIdle
+            & docker @compose up -d --no-deps --no-build --force-recreate rabbitmq
+            if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ 4.4 recreation failed; keep offline backup, do not downgrade.' }
+            $Healthy = $false
+            for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
+                $State = @(& docker inspect --format '{{.State.Health.Status}}' $Rabbit)
+                if ($LASTEXITCODE -eq 0 -and [string]$State[0] -ceq 'healthy') { $Healthy = $true; break }
+                Start-Sleep -Seconds 2
+            }
+            if (-not $Healthy) { throw 'RabbitMQ 4.4 did not become healthy; keep offline backup, do not downgrade.' }
+            $NewImage = @(& docker inspect --format '{{.Config.Image}}|{{.Image}}' $Rabbit)
+            $NewVolume = @(& docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/rabbitmq"}}{{.Name}}{{end}}{{end}}' $Rabbit)
+            $NewHost = @(& docker inspect --format '{{.Config.Hostname}}' $Rabbit)
+            if ($LASTEXITCODE -ne 0 -or [string]$NewImage[0] -cne "$Target|$TargetId" -or
+                [string]$NewVolume[0] -cne 'firecrawl_firecrawl-rabbitmq-data' -or
+                [string]$NewHost[0] -cne 'firecrawl-rabbitmq') {
+                throw 'RabbitMQ new image/node/volume verification failed; preserve backup.'
+            }
+            & docker exec $Rabbit rabbitmqctl enable_feature_flag all | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ 4.4 feature flag activation failed.' }
+            & docker exec $Rabbit rabbitmq-diagnostics -q check_running | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ 4.4 diagnostics failed.' }
+        }
+        finally {
+            if ($ApiStopped) {
+                $ApiNow = @(& docker inspect --format '{{.State.Running}}' $Api)
+                if ($LASTEXITCODE -ne 0 -or [string]$ApiNow[0] -cne 'true') {
+                    & docker start $Api | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw 'Firecrawl API restart failed; inspect manually.' }
+                }
+            }
+        }
+        $ApiNow = @(& docker inspect --format '{{.State.Running}}' $Api)
+        if ($LASTEXITCODE -ne 0 -or [string]$ApiNow[0] -cne 'true') {
+            throw 'Firecrawl API did not recover after RabbitMQ upgrade.'
+        }
+        "RABBITMQ_UPGRADED version=4.4.0 healthy=true backup=$Backup"
     }
     'up' {
         Assert-UpstreamFirecrawlPin
