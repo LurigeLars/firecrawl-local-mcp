@@ -618,6 +618,18 @@ function Assert-StatefulComposeDataSafety {
                 "volume at $($Item.Destination). Complete isolated backup/migration first; " +
                 "never use 'up' or 'redeploy' to migrate stateful services.")
         }
+        if ($Container -ceq 'firecrawl-rabbitmq-1') {
+            # A Compose tag bump must not implicitly migrate persisted broker
+            # state on routine 'up' / 'redeploy'. An offline, verified backup,
+            # feature flag review and scoped migration are required separately.
+            $RunningRabbitImage = @(& docker inspect --format '{{.Config.Image}}' $Container)
+            if ($LASTEXITCODE -ne 0 -or $RunningRabbitImage.Count -ne 1) {
+                throw 'RabbitMQ running image cannot be verified; blocking whole-stack upgrade.'
+            }
+            if ([string]$RunningRabbitImage[0] -cne 'rabbitmq:4.4.0-management-alpine') {
+                throw 'RabbitMQ 4.4 migration pending. Use a reviewed, backed-up single-service upgrade; whole-stack Compose is blocked.'
+            }
+        }
     }
 }
 
