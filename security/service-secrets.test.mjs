@@ -238,8 +238,8 @@ test('Firecrawl API production runtime strips vulnerable bundled npm and Corepac
 
 
 test('whole-stack Compose refuses to recreate stateful containers without reviewed named volumes', () => {
-  assert.match(compose, /rabbitmq:4\.3\.7-management-alpine/);
-  assert.doesNotMatch(compose, /rabbitmq:4\.4\.0-management-alpine/);
+  assert.match(compose, /rabbitmq:4\.4\.0-management-alpine/);
+  assert.doesNotMatch(compose, /rabbitmq:4\.3\.7-management-alpine/);
   const guard = launcher.split('function Assert-StatefulComposeDataSafety {')[1]?.split('switch ($Action) {')[0];
   assert.ok(guard);
   for (const dest of ['/data', '/var/lib/rabbitmq', '/var/lib/postgresql/data']) {
@@ -248,6 +248,13 @@ test('whole-stack Compose refuses to recreate stateful containers without review
   assert.match(guard, /'volume'/);
   assert.match(guard, /firecrawl_/);
   assert.match(guard, /Complete isolated backup\/migration first/);
+  assert.match(launcher, /\$RunningRabbitImage/);
+  assert.match(launcher, /RabbitMQ 4\.4 migration pending/);
+  assert.match(launcher, /'refresh-rabbitmq' \{[\s\S]*?\$RabbitCurrent/);
+  assert.doesNotMatch(
+    launcher.split("    'refresh-rabbitmq' {")[1]?.split("    'up' {")[0] ?? '',
+    /Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/,
+  );
   assert.match(launcher, /'up' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build/);
   assert.match(launcher, /'redeploy' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build --force-recreate/);
   const staged = launcher.split("    'maintain-stateless' {")[1]?.split("    'stage-api' {")[0];
@@ -276,10 +283,15 @@ test('stateful backup refuses image changes and preserves RabbitMQ quorum identi
 });
 
 
-test('Firecrawl disposable cache and queue refresh is one-service-scoped and gated', () => {
+test('Firecrawl cache refresh is scoped, while RabbitMQ 4.4 requires explicit state migration', () => {
   const source = readFileSync(new URL('./refresh-ephemeral.ps1', import.meta.url), 'utf8');
   assert.match(launcher, /'refresh-redis' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlEphemeralRefresh -Service 'redis'/);
-  assert.match(launcher, /'refresh-rabbitmq' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/);
+  const rabbitAction = launcher.split("    'refresh-rabbitmq' {")[1]?.split("    'up' {")[0];
+  assert.ok(rabbitAction, 'RabbitMQ action remains registered');
+  assert.match(rabbitAction, /Assert-UpstreamFirecrawlPin/);
+  assert.match(rabbitAction, /RabbitMQ 4\.4 migration pending/);
+  assert.match(rabbitAction, /RABBITMQ_CURRENT_VERIFIED/);
+  assert.doesNotMatch(rabbitAction, /Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/);
   assert.match(source, /ValidateSet\('redis','rabbitmq'\)/);
   assert.match(source, /--no-deps --no-build --force-recreate --renew-anon-volumes/);
   assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
