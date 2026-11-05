@@ -1,4 +1,9 @@
 # Local overrides layered on top of firecrawl/docker-compose.yaml (upstream stays untouched).
+# OCI labels let Docker-MCP's deployment audit compare a running image with the repo HEAD.
+x-image-revision: &image-revision
+  org.opencontainers.image.source: https://github.com/LurigeLars/firecrawl-local-mcp
+  org.opencontainers.image.revision: ${SOURCE_REVISION:-unknown}
+
 services:
   # FoundationDB is only needed with NUQ_BACKEND=fdb; keep it off by default.
   foundationdb:
@@ -12,6 +17,7 @@ services:
     build:
       context: apps/api
       dockerfile: ../../../security/firecrawl-api-runtime-hotfix.Dockerfile
+      labels: *image-revision
     user: node
     restart: unless-stopped
     # Wrapper-owned DoS blast-radius limits. Keep these explicit even while
@@ -49,6 +55,7 @@ services:
     build:
       context: apps/playwright-service-ts
       dockerfile: ../../../security/Dockerfile.playwright-security
+      labels: *image-revision
     restart: unless-stopped
     # Wrapper-owned DoS blast-radius limits. The PID cap is local hardening;
     # CPU/RAM values intentionally match the current upstream defaults.
@@ -75,6 +82,7 @@ services:
     build:
       context: apps/playwright-service-ts
       dockerfile: ../../../security/Dockerfile.playwright-security
+      labels: *image-revision
     restart: unless-stopped
     cpus: 1.0
     mem_limit: 2G
@@ -113,6 +121,7 @@ services:
     build:
       context: apps/playwright-service-ts
       dockerfile: ../../../security/Dockerfile.playwright-security
+      labels: *image-revision
     restart: unless-stopped
     cpus: 1.0
     mem_limit: 2G
@@ -185,6 +194,7 @@ services:
     build:
       context: ../security
       dockerfile: Dockerfile.node-runtime
+      labels: *image-revision
     user: node
     cpus: 0.25
     mem_limit: 128M
@@ -242,6 +252,7 @@ services:
     build:
       context: ../security
       dockerfile: Dockerfile.redis-security
+      labels: *image-revision
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
@@ -256,6 +267,8 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
   nuq-postgres:
+    build:
+      labels: *image-revision
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ""
@@ -322,6 +335,7 @@ services:
     build:
       context: ../security
       dockerfile: Dockerfile.searxng-proxy
+      labels: *image-revision
     command: ["node", "/app/lang-proxy.mjs"]
     user: node
     environment:
