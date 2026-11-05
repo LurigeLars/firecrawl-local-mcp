@@ -1,6 +1,6 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
+param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'migrate-nuq-postgres', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
 
 $root = $PSScriptRoot
 # Stamped into image labels (compose x-image-revision) so Docker-MCP's audit can spot stale images.
@@ -564,7 +564,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini")
+$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -581,7 +581,7 @@ try {
     if ($Action -in $composeActions) {
         # Only the public proxy deployment needs the existing DPAPI-backed
         # post_start hook; preserve all other reviewed secret boundaries.
-        if ($Action -in @("deploy-proxy", "deploy-api", "refresh-searxng") -or
+        if ($Action -in @("deploy-proxy", "deploy-api", "refresh-searxng") -or $Action -eq "migrate-nuq-postgres" -or
             ($Action -eq "maintain-stateless" -and $Service -in @("api", "playwright-public-proxy-service"))) {
             Set-RuntimeHookSecrets -UseRealSecrets $true
         } else {
@@ -900,6 +900,66 @@ switch ($Action) {
     'repair-postgres-auth' {
         Import-ServiceRuntimeSecrets
         Repair-PostgresRuntimePassword
+    }
+    'migrate-nuq-postgres' {
+        # One-off move from the image's anonymous volume to the reviewed named
+        # volume. NUQ is a job queue: initdb recreates its schema and pg_cron
+        # jobs from nuq.sql, so only idle, empty queues may move. The old
+        # anonymous volume is left in place as the rollback copy.
+        Assert-UpstreamFirecrawlPin
+        $Pg = 'firecrawl-nuq-postgres-1'
+        $Api = 'firecrawl-api-1'
+        $Named = 'firecrawl_nuq-postgres-data'
+        $MountFormat = '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}'
+        $Old = @(& docker inspect --format $MountFormat $Pg)
+        if ($LASTEXITCODE -ne 0 -or $Old.Count -ne 1) { throw 'NUQ PostgreSQL inspection failed.' }
+        if ([string]$Old[0] -ceq $Named) { "NUQ_POSTGRES_CURRENT_VERIFIED volume=$Named (no container changes)"; break }
+        if ([string]$Old[0] -cnotmatch '^[0-9a-f]{64}$') { throw 'Unreviewed NUQ PostgreSQL volume; migration refused.' }
+        $ExpectedJobs = @(Select-String -LiteralPath (Join-Path $root 'firecrawl\apps\nuq-postgres\nuq.sql') -Pattern 'cron\.schedule\(').Count
+        if ($ExpectedJobs -lt 1) { throw 'nuq.sql has no pg_cron jobs; refusing migration.' }
+        $CountSql = 'SELECT (SELECT count(*) FROM nuq.queue_scrape) + (SELECT count(*) FROM nuq.queue_scrape_backlog) + (SELECT count(*) FROM nuq.queue_crawl_finished) + (SELECT count(*) FROM nuq.group_crawl)'
+        $Backup = Join-Path $env:LOCALAPPDATA ('FirecrawlLocal\backups\nuq-postgres-' + [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss'))
+        $ApiStopped = $false
+        try {
+            & docker stop --time 90 $Api | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Firecrawl API could not be stopped.' }
+            $ApiStopped = $true
+            $Pending = @(& docker exec $Pg psql -U postgres -d postgres -Atqc $CountSql)
+            if ($LASTEXITCODE -ne 0 -or [string]$Pending[0] -cne '0') { throw 'NUQ still holds jobs; migration refused.' }
+            # Logical backup of the old database before anything is recreated.
+            & docker exec $Pg sh -c 'umask 077; pg_dumpall -U postgres > /tmp/nuq-backup.sql' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'NUQ pg_dumpall failed; no migration performed.' }
+            $null = New-Item -Path $Backup -ItemType Directory -Force
+            & docker cp "${Pg}:/tmp/nuq-backup.sql" (Join-Path $Backup 'nuq-pg_dumpall.sql') | Out-Null
+            if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath (Join-Path $Backup 'nuq-pg_dumpall.sql')).Length -le 0) {
+                throw 'NUQ backup missing or empty; no migration performed.'
+            }
+            & docker exec $Pg rm -f /tmp/nuq-backup.sql | Out-Null
+            & docker @compose up -d --no-deps --no-build --force-recreate nuq-postgres
+            if ($LASTEXITCODE -ne 0) { throw "NUQ PostgreSQL recreation failed; rollback volume $($Old[0]) and backup $Backup kept." }
+            $Jobs = ''
+            for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
+                # Healthy alone is not enough: initdb's temporary server also answers pg_isready.
+                $Jobs = [string]@(& docker exec $Pg psql -U postgres -d postgres -Atqc 'SELECT count(*) FROM cron.job' 2>$null)[0]
+                if ($LASTEXITCODE -eq 0 -and $Jobs -ceq [string]$ExpectedJobs) { break }
+                Start-Sleep -Seconds 2
+            }
+            $New = @(& docker inspect --format $MountFormat $Pg)
+            if ($Jobs -cne [string]$ExpectedJobs -or [string]$New[0] -cne $Named) {
+                throw "NUQ PostgreSQL verification failed (jobs=$Jobs volume=$($New[0])); rollback volume $($Old[0]) and backup $Backup kept."
+            }
+        }
+        finally {
+            if ($ApiStopped) {
+                & docker start $Api | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Firecrawl API restart failed; inspect manually.' }
+            }
+        }
+        # A stopped container loses its tmpfs secrets; restore them as 'recover' does.
+        Import-ServiceRuntimeSecrets
+        Import-AvailableRuntimeSecrets
+        if (-not (Test-PostgresRuntimePassword)) { throw 'New NUQ PostgreSQL rejects the DPAPI password.' }
+        "NUQ_POSTGRES_MIGRATED volume=$Named cron_jobs=$Jobs backup=$Backup rollback_volume=$($Old[0])"
     }
     'import-gemini' {
         Import-GeminiKey

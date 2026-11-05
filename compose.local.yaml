@@ -270,6 +270,9 @@ services:
     build:
       labels: *image-revision
     restart: unless-stopped
+    # Job queue only; first move from the old anonymous volume with `fc.ps1 migrate-nuq-postgres`.
+    volumes:
+      - nuq-postgres-data:/var/lib/postgresql/data
     environment:
       POSTGRES_PASSWORD: ""
       POSTGRES_PASSWORD_FILE: /run/firecrawl-secrets/postgres_password
@@ -381,4 +384,5 @@ networks:
 volumes:
   firecrawl-redis-data:
   firecrawl-rabbitmq-data:
+  nuq-postgres-data:
   public-proxy-metrics:

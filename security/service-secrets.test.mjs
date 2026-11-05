@@ -264,6 +264,23 @@ test('whole-stack Compose refuses to recreate stateful containers without review
 });
 
 
+test('NUQ PostgreSQL moves to its named volume only when idle, after a backup, keeping the old volume', () => {
+  assert.match(compose, /nuq-postgres-data:\/var\/lib\/postgresql\/data/);
+  const action = launcher.split("    'migrate-nuq-postgres' {")[1]?.split("    'import-gemini' {")[0];
+  assert.ok(action, 'migration action is registered');
+  assert.match(launcher, /ValidateSet\([^)]*'migrate-nuq-postgres'/);
+  assert.match(action, /firecrawl_nuq-postgres-data/);
+  assert.match(action, /NUQ still holds jobs; migration refused/);
+  assert.match(action, /pg_dumpall/);
+  assert.ok(action.indexOf('pg_dumpall') < action.indexOf('--force-recreate nuq-postgres'), 'backup precedes recreate');
+  assert.match(action, /--no-deps --no-build --force-recreate nuq-postgres/);
+  assert.match(action, /cron\.job/);
+  assert.match(action, /Import-ServiceRuntimeSecrets/);
+  assert.match(action, /Test-PostgresRuntimePassword/);
+  assert.doesNotMatch(action, /down -v|volume rm|--renew-anon-volumes|Assert-StatefulComposeDataSafety/);
+});
+
+
 test('stateful backup refuses image changes and preserves RabbitMQ quorum identity', () => {
   const source = readFileSync(new URL('../scripts/backup_stateful_data.ps1', import.meta.url), 'utf8');
   assert.match(source, /ValidateSet\('Inspect','Backup'\)/);
