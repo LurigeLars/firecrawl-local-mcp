@@ -145,3 +145,16 @@ test('tools/list compacts descriptions without changing schema semantics', () =>
   );
   assert.equal(original.description.startsWith('Very long upstream'), true);
 });
+
+test('tools/list drops outputSchema because rewritten results carry no structuredContent', () => {
+  const original = { name: 'firecrawl_scrape', inputSchema: { type: 'object' }, outputSchema: { type: 'object', properties: { summary: { type: 'string' } } } };
+  assert.equal(compactToolDefinition(original).outputSchema, undefined);
+  assert.ok(original.outputSchema, 'upstream definition is not mutated');
+  const message = { id: 79, result: {
+    content: [{ type: 'text', text: JSON.stringify({ summary: 's', metadata: { url: 'https://example.com', ogImage: 'x' } }) }],
+    structuredContent: { summary: 's' },
+  } };
+  const out = rewriteResponse(message, { allowedTools: new Set(), compactIds: new Set([79]), crawlRequests: new Map() });
+  assert.equal(out.result.structuredContent, undefined);
+  assert.equal(JSON.parse(out.result.content[0].text).summary, 's');
+});
