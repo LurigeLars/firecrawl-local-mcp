@@ -33,12 +33,12 @@ WORKDIR /app
 COPY sharedLibs/go-html-to-md ./sharedLibs/go-html-to-md
 
 RUN cd sharedLibs/go-html-to-md && \
-    go get golang.org/x/net@v0.60.0 && \
+    go get golang.org/x/net@v0.62.0 && \
     go mod download && \
-    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.60.0' && \
+    go list -m golang.org/x/net | grep -Fx 'golang.org/x/net v0.62.0' && \
     go version | grep -F 'go1.26.10' && \
     go build -o libhtml-to-markdown.so -buildmode=c-shared html-to-markdown.go && \
-    go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.60.0'
+    go version -m libhtml-to-markdown.so | grep -F 'golang.org/x/net' | grep -F 'v0.62.0'
 
 FROM build-base AS build
 WORKDIR /app
@@ -193,7 +193,7 @@ RUN set -eu; \
     xnet="$(grep -F 'golang.org/x/net' /tmp/go-runtime-modules.txt || true)"; \
     test -n "$xnet"; \
     printf '%s\n' "$xnet"; \
-    if printf '%s\n' "$xnet" | grep -v -F 'v0.60.0'; then \
+    if printf '%s\n' "$xnet" | grep -v -F 'v0.62.0'; then \
       echo "unexpected golang.org/x/net version in runtime" >&2; \
       exit 1; \
     fi; \

@@ -48,7 +48,8 @@ function Invoke-PlaywrightStage {
         }
         try {
             # Build only one Playwright image. Never run compose up here.
-            $null = Invoke-McpDocker -Arguments (@($ComposeArguments) + @('build',$Service)) -TimeoutSeconds 1500
+            # --no-cache: a cached `apt-get upgrade` layer would silently skip new Debian security fixes.
+            $null = Invoke-McpDocker -Arguments (@($ComposeArguments) + @('build','--no-cache',$Service)) -TimeoutSeconds 1500
             $Candidate = Invoke-McpDocker -Arguments @('image','inspect','--format','{{.Id}}',$ImageTag)
             if ($Candidate -cnotmatch '^sha256:[0-9a-f]{64}$') { throw 'Invalid Playwright candidate image ID.' }
             $null = Invoke-McpDocker -Arguments @('scout','cves','--only-severity','critical,high','--only-fixed','--exit-code',('local://' + $ImageTag)) -TimeoutSeconds 900
