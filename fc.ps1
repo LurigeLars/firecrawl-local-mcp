@@ -3,6 +3,9 @@
 param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
 
 $root = $PSScriptRoot
+# Stamped into image labels (compose x-image-revision) so Docker-MCP's audit can spot stale images.
+# A tree with local changes is not HEAD, so leave it unset and the label falls back to "unknown".
+$env:SOURCE_REVISION = if (-not (git -C $root status --porcelain 2>$null)) { git -C $root rev-parse HEAD 2>$null }
 . (Join-Path $root "security\staged-mcp-image.ps1")
 . (Join-Path $root "security\staged-playwright-image.ps1")
 . (Join-Path $root "security\staged-api-image.ps1")

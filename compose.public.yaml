@@ -1,5 +1,10 @@
 # Public ChatGPT access: firecrawl-mcp (HTTP) -> gateway -> shared Cloudflare Tunnel.
 # Nothing here publishes a host port; the only way in is through the tunnel.
+# OCI labels let Docker-MCP's deployment audit compare a running image with the repo HEAD.
+x-image-revision: &image-revision
+  org.opencontainers.image.source: https://github.com/LurigeLars/firecrawl-local-mcp
+  org.opencontainers.image.revision: ${SOURCE_REVISION:-unknown}
+
 services:
   browser-session-service:
     networks: [browser_runtime, browser_edge]
@@ -8,6 +13,7 @@ services:
     build:
       context: ../public
       dockerfile: Dockerfile.mcp
+      labels: *image-revision
     environment:
       FIRECRAWL_API_URL: http://api:3002
       # Upstream MCP HTTP host validation requires the reverse-proxy's
@@ -28,6 +34,7 @@ services:
     build:
       context: ../public
       dockerfile: Dockerfile.gateway
+      labels: *image-revision
     command: ["node", "/app/gateway.mjs"]
     user: node
     env_file:
