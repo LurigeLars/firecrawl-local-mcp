@@ -327,7 +327,9 @@ export function compactToolDefinition(tool) {
   if (override) out.description = override;
   else if (typeof out.description === 'string') out.description = compactSchemaText(out.description, 220);
   if (out.inputSchema) out.inputSchema = compactSchemaDescriptions(out.inputSchema);
-  if (out.outputSchema) out.outputSchema = compactSchemaDescriptions(out.outputSchema);
+  // The proxy rewrites results (compaction, response budget) and drops structuredContent, so it must not
+  // advertise an outputSchema: MCP clients reject a tool result without structuredContent when one is declared.
+  delete out.outputSchema;
   return out;
 }
 
