@@ -278,6 +278,24 @@ local Firecrawl backup directory and are retained for recovery. Unexpected
 queue traffic, node identities, image hashes or failed backup checks abort
 the upgrade. On repeat runs an already healthy 4.4.0 broker is left unchanged.
 
+## NUQ PostgreSQL named volume
+
+`nuq-postgres` holds Firecrawl's NUQ job queue, not long-term data: its tables
+are queued/active scrape and crawl jobs (cleaned by pg_cron within hours) and
+the pg_cron run log (pruned after 24 h). Schema and the pg_cron jobs come from
+upstream `nuq.sql` at initdb. It now lives on the named volume
+`firecrawl_nuq-postgres-data`, which the whole-stack guard accepts.
+
+Older installations kept it on the image's anonymous volume, which blocks
+`up` / `redeploy`. `fc.ps1 migrate-nuq-postgres` moves it once: it pauses the
+API, refuses unless every NUQ table is empty, writes a `pg_dumpall` backup to
+`%LOCALAPPDATA%\FirecrawlLocal\backups\nuq-postgres-*`, recreates **only**
+`nuq-postgres` on the named volume (fresh initdb with the DPAPI password),
+verifies the volume, the pg_cron job count against `nuq.sql` and TCP password
+auth, then restarts the API and restores runtime secrets. The old anonymous
+volume is not deleted and remains the rollback copy. A repeat run on the named
+volume changes nothing.
+
 ## Ephemeral stateful research browser
 
 `browser-session-service` is a separate local Playwright/Chromium sidecar for tasks that need page state or request-level debugging rather than one-shot scraping. It reuses the reviewed Playwright image from the pinned upstream Firecrawl checkout but does not modify or vendor upstream Firecrawl source.
