@@ -165,7 +165,7 @@ test('public gateway is Cloudflare Access only with no secret-path fallback', ()
   assert.doesNotMatch(gateway, /ALLOW_SECRET_PATH/);
   assert.doesNotMatch(publicCompose, /ALLOW_SECRET_PATH/);
   assert.match(gateway, /ACCESS_AUD is required/);
-  assert.match(gateway, /split\('\?'\)\[0\]==='\/mcp'/);
+  assert.match(gateway, /split\('\?'\)\[0\]\s*===\s*'\/mcp'/);
   assert.match(launcher, /Remove-LegacyGatewaySecret/);
   assert.match(launcher, /Where-Object \{ \$_ -notmatch '\^\\s\*GATEWAY_SECRET='/);
   assert.equal(existsSync(new URL('../public/browser.env.example', import.meta.url)), false);
