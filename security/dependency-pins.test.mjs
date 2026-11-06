@@ -29,7 +29,7 @@ test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin pat
     assert.match(source, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
     assert.match(source, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);
   }
-  assert.match(publicCompose, /gateway:[\s\S]*image: firecrawl-gateway:local\n\s+build:[\s\S]*dockerfile: Dockerfile\.gateway/);
+  assert.match(publicCompose, /gateway:[\s\S]*image: firecrawl-gateway:local\r?\n\s+build:[\s\S]*dockerfile: Dockerfile\.gateway/);
 });
 
 test('Redis runtime uses patched zlib without exposing wrapper secrets to Docker build', () => {
