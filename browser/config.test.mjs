@@ -8,7 +8,7 @@ const service = readFileSync(new URL('./service.mjs', import.meta.url), 'utf8');
 const tools = readFileSync(new URL('../public/gateway/browser-tools.mjs', import.meta.url), 'utf8');
 
 function serviceBlock(source, name) {
-  const lines = source.split('\n');
+  const lines = source.split(/\r?\n/); // Windows checkouts get CRLF
   const start = lines.findIndex(line => line === `  ${name}:`);
   assert.notEqual(start, -1, `missing service ${name}`);
   let end = lines.length;

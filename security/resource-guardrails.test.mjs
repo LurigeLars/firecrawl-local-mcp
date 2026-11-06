@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 const compose = readFileSync(new URL("../compose.local.yaml", import.meta.url), "utf8");
 
 function serviceBlock(name) {
-  const lines = compose.split("\n");
+  const lines = compose.split(/\r?\n/); // Windows checkouts get CRLF
   const start = lines.findIndex((line) => line === `  ${name}:`);
   assert.notEqual(start, -1, `missing service ${name}`);
 
