@@ -24,6 +24,10 @@ export const MAX_CRAWL_LIMIT = 100;
 export const MAX_CRAWL_CONCURRENCY = 4;
 export const MAX_INLINE_TOOL_RESULT_BYTES = 128 * 1024;
 const URL_FETCH_TOOLS = new Set(['firecrawl_scrape', 'firecrawl_map', 'firecrawl_crawl']);
+
+// Private-address blocklist copied in three places: public/gateway/policy.mjs and browser/safety.mjs
+// in LurigeLars/firecrawl-local-mcp, and lib/network-safety.js in camofox-browser.
+// Make a security fix in every copy.
 const BLOCKED_DESTINATIONS = new BlockList();
 
 for (const [network, prefix] of [
