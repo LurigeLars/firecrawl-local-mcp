@@ -145,7 +145,7 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
 test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(composeLocal, /context:\s+apps\/api/);
   assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
-  assert.match(firecrawlApiHotfix, /^FROM golang:1\.27\.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b AS go-build$/m);
+  assert.match(firecrawlApiHotfix, /^FROM golang:1\.27\.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS go-build$/m);
   assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
   assert.match(firecrawlApiHotfix, /go1\.26\.10\.linux-/);
   assert.match(firecrawlApiHotfix, /ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5/);
