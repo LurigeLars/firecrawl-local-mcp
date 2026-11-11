@@ -369,7 +369,7 @@ test('SearXNG search proxy refresh is npm-free, scanned and one-service only', (
   assert.match(source, /up -d --no-deps --no-build --force-recreate \$Service/);
   assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
   assert.match(source, /SEARCH_PROXY_REFRESH_OK/);
-  assert.match(dockerfile, /FROM node:26\.13\.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94/);
+  assert.match(dockerfile, /FROM node:26\.13\.0-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216/);
   assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
   assert.match(compose, /searxng-proxy:\s*\n\s*image: firecrawl-searxng-proxy:local\s*\n\s*build:/);
   assert.doesNotMatch(source, /--remove-orphans|docker compose down|docker volume rm|docker restart/);
@@ -407,7 +407,7 @@ test('last two stale Firecrawl Node 26.10 containers are upgraded individually',
   assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
   assert.match(source, /NODE_SUPPORT_REFRESH_OK/);
   assert.match(source, /unrelated_containers_unchanged=true/);
-  assert.match(dockerfile, /node:26\.13\.0-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94/);
+  assert.match(dockerfile, /node:26\.13\.0-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216/);
   assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
   assert.match(compose, /playwright-router:\s*\n\s*profiles: \["public-proxy"\]\s*\n\s*image: firecrawl-node-runtime:local\s*\n\s*build:/);
   assert.match(compose, /llm-proxy:\s*\n\s*image: firecrawl-node-runtime:local/);
