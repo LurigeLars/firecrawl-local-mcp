@@ -297,7 +297,7 @@ services:
 
   # Search backend for Firecrawl (SEARXNG_ENDPOINT in .env). Internal network only, no host port.
   searxng:
-    image: searxng/searxng:2026.10.30-ffa88e3ba
+    image: searxng/searxng:2026.11.5-adbf160ff
     user: "977:977"
     entrypoint:
       - /bin/sh
