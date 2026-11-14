@@ -126,7 +126,15 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
   assert.match(launcher, /Invoke-McpStageSecurityCheck -Action build -ComposeArguments \$compose/);
   assert.match(launcher, /Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments \$compose/);
   assert.match(staged, /Invoke-McpDocker -Arguments \(@\(\$ComposeArguments\) \+ @\('build', 'mcp'\)\)/);
-  assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code'/);
+  assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code',\s*'--vex-location',\$Vex,'--vex-author','firecrawl-local-mcp maintainers',/);
+  assert.equal((staged.match(/Get-McpScoutArguments -ProjectRoot \$ProjectRoot\) -TimeoutSeconds 900/g) || []).length, 2);
+  assert.doesNotMatch(staged, /'scout','cves'[^\n]*'local:\/\/firecrawl-mcp:latest'\) -TimeoutSeconds/);
+  const vex = JSON.parse(read('security/vex/firecrawl-mcp.openvex.json'));
+  assert.equal(vex.author, 'firecrawl-local-mcp maintainers');
+  for (const s of vex.statements) {
+    assert.deepEqual(s.products.map(p => p['@id']), ['pkg:docker/firecrawl-mcp']);
+    for (const p of s.products) for (const c of p.subcomponents) assert.match(c['@id'], /^pkg:apk\/alpine\/[a-z0-9-]+@[^?]+-r\d+\?os_name=alpine&os_version=3\.\d+$/);
+  }
   assert.match(staged, /if \(\$null -ne \$RawText\)/);
   assert.match(staged, /image_id = \$Id/);
   assert.match(staged, /rollback_image_id = \$PreviousId/);

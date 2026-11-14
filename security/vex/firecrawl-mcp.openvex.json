@@ -1,0 +1,23 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/LurigeLars/firecrawl-local-mcp/security/vex/firecrawl-mcp.openvex.json",
+  "author": "firecrawl-local-mcp maintainers",
+  "timestamp": "2026-11-14T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": { "name": "CVE-2026-107891" },
+      "products": [
+        {
+          "@id": "pkg:docker/firecrawl-mcp",
+          "subcomponents": [
+            { "@id": "pkg:apk/alpine/musl@1.2.6-r3?os_name=alpine&os_version=3.24" }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "Alpine 3.24 fixed this CVE in musl 1.2.6-r3 (aports 3.24-stable main/musl/APKBUILD secfixes 1.2.6-r3, CVE-2026-107891.patch; security.alpinelinux.org lists 3.24-main fixed in 1.2.6-r3). Docker Scout applies the edge fix version 1.2.6-r6 to 3.24. Covers only this exact musl build; any other version is scanned normally."
+    }
+  ]
+}
