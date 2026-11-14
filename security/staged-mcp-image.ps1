@@ -57,7 +57,8 @@ function Get-McpSourceHashes {
     $Files = @(
         'fc.ps1', 'security/staged-mcp-image.ps1', 'upstream/firecrawl.json',
         'compose.local.yaml', 'compose.public.yaml', 'public/Dockerfile.mcp',
-        'public/package.json', 'public/package-lock.json'
+        'public/package.json', 'public/package-lock.json',
+        'security/vex/firecrawl-mcp.openvex.json'
     )
     $Hashes = [ordered]@{}
     foreach ($File in $Files) {
@@ -68,6 +69,16 @@ function Get-McpSourceHashes {
         $Hashes[$File] = (Get-FileHash -LiteralPath $FullPath -Algorithm SHA256 -ErrorAction Stop).Hash
     }
     return $Hashes
+}
+
+function Get-McpScoutArguments {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    # The reviewed VEX file only records verified scanner false positives for exact
+    # package versions in this image; only its own author is accepted.
+    $Vex = Join-Path $ProjectRoot 'security/vex/firecrawl-mcp.openvex.json'
+    return @('scout','cves','--only-severity','critical,high','--exit-code',
+        '--vex-location',$Vex,'--vex-author','firecrawl-local-mcp maintainers',
+        'local://firecrawl-mcp:latest')
 }
 
 function Get-McpImageId {
@@ -119,7 +130,7 @@ function Invoke-McpStageSecurityCheck {
         $null = Invoke-McpDocker -Arguments (@($ComposeArguments) + @('build', 'mcp'))
         $Id = Get-McpImageId
         # Require 0 high/critical CVEs, including ones without a patch.
-        $null = Invoke-McpDocker -Arguments @('scout','cves','--only-severity','critical,high','--exit-code','local://firecrawl-mcp:latest') -TimeoutSeconds 900
+        $null = Invoke-McpDocker -Arguments (Get-McpScoutArguments -ProjectRoot $ProjectRoot) -TimeoutSeconds 900
         if ((Get-McpImageId) -cne $Id) { throw 'Image changed during Docker Scout scan.' }
         $Receipt = [ordered]@{
             schema_version = 1
@@ -166,7 +177,7 @@ function Invoke-McpStageSecurityCheck {
     }
     $Id = Get-McpImageId
     if ($Id -cne [string]$Receipt.image_id) { throw 'Staged image identity mismatch.' }
-    $null = Invoke-McpDocker -Arguments @('scout','cves','--only-severity','critical,high','--exit-code','local://firecrawl-mcp:latest') -TimeoutSeconds 900
+    $null = Invoke-McpDocker -Arguments (Get-McpScoutArguments -ProjectRoot $ProjectRoot) -TimeoutSeconds 900
     if ((Get-McpImageId) -cne $Id) { throw 'Image changed after final CVE scan.' }
 
     $PreviousId = Invoke-McpDocker -Arguments @('inspect','--format','{{.Image}}','firecrawl-mcp-1')

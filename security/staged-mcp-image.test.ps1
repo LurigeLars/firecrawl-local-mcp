@@ -18,7 +18,8 @@ try {
     $Files = @(
         'fc.ps1','security/staged-mcp-image.ps1','upstream/firecrawl.json',
         'compose.local.yaml','compose.public.yaml','public/Dockerfile.mcp',
-        'public/package.json','public/package-lock.json'
+        'public/package.json','public/package-lock.json',
+        'security/vex/firecrawl-mcp.openvex.json'
     )
     foreach ($File in $Files) {
         $Path = Join-Path $TempRoot $File
