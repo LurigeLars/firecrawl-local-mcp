@@ -198,13 +198,12 @@ http
   .createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/healthz') return send(res, 200, 'ok');
     if (!pathAllowed(req.url)) return send(res, 404);
-    let identity = req.socket.remoteAddress ?? 'unknown';
     const v = await verifyAccessJwt(req.headers['cf-access-jwt-assertion']);
     if (!v.ok) {
       console.warn('access denied');
       return send(res, 403, 'forbidden');
     }
-    identity = v.email;
+    const identity = v.email;
     if (rateLimited(identity)) return send(res, 429, 'rate limited');
     if (!['GET', 'POST', 'DELETE'].includes(req.method ?? '')) return send(res, 405, 'method not allowed');
     if (req.method !== 'POST') return forward(req, res, null, null);
