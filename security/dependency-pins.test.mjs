@@ -153,7 +153,7 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
 test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(composeLocal, /context:\s+apps\/api/);
   assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
-  assert.match(firecrawlApiHotfix, /^FROM golang:1\.27\.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS go-build$/m);
+  assert.match(firecrawlApiHotfix, /^FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS go-build$/m);
   assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
   assert.match(firecrawlApiHotfix, /go1\.26\.10\.linux-/);
   assert.match(firecrawlApiHotfix, /ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5/);
@@ -172,7 +172,7 @@ test('temporary Firecrawl API security build is narrow and pinned', () => {
   assert.match(firecrawlApiHotfix, /minor === 26 && patch >= 10/);
   assert.match(firecrawlApiHotfix, /FROM runtime AS final/);
   assert.match(firecrawlApiHotfix, /GO_RUNTIME_MODULES\.txt/);
-  assert.match(firecrawlApiHotfix, /FROM node:22\.23\.4-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS runtime-base/);
+  assert.match(firecrawlApiHotfix, /FROM node:22.23.5-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime-base/);
   assert.match(firecrawlApiHotfix, /pnpm install --frozen-lockfile/);
   assert.match(firecrawlApiHotfix, /proxy-addr@>=2\.0\.0 <2\.0\.8/);
   assert.match(firecrawlApiHotfix, /source-map-js@>=1\.0\.0 <1\.2\.2/);
