@@ -101,7 +101,7 @@ jobs:
 
       - name: Run browser security regression
         shell: bash
-        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs
+        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs local-mcp/locked-runtime.test.mjs
 
       - name: Run public proxy routing regression
         shell: bash
@@ -192,7 +192,7 @@ jobs:
 
       - name: Run browser security regression
         shell: bash
-        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs
+        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs local-mcp/locked-runtime.test.mjs
 
       - name: Run public proxy routing regression
         shell: bash

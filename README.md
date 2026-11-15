@@ -247,7 +247,7 @@ The smoke also verifies that `sensitive_rejected` and `requests_total` increment
 
 ## Local MCP proxy (Claude desktop, Claude Code, Codex)
 
-`local-mcp/stdio-proxy.mjs` wraps the exact `firecrawl-mcp` version in `public/package.json` over stdio and applies the same rules as the public gateway
+`local-mcp/stdio-proxy.mjs` wraps the exact `firecrawl-mcp` tree locked in `public/package.json` + `public/package-lock.json` over stdio. On first start (and after a lock change) it runs `npm ci --ignore-scripts --omit=dev` into `local-mcp/.runtime/<lock hash>/`, built in a temp directory and renamed into place when complete, so concurrent client starts never share a half-written install; there is no `npx`. It applies the same rules as the public gateway
 (`public/gateway/policy.mjs`). It exposes the five bounded Firecrawl tools plus nine local ephemeral-browser tools; `parse` and unsupported Firecrawl formats are refused, the server instructions come from
 `public/gateway/instructions.md`, and scrapes that only ask for `query`/`json`/`summary` drop the page metadata
 (a query answer is ~60 tokens instead of ~570). Markdown/html/links results keep their metadata.
