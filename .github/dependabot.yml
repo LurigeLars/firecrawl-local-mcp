@@ -1,116 +1,78 @@
 version: 2
 
+# One weekly pull request for all version updates (every ecosystem), so the
+# strict up-to-date branch rule needs a single CI run. Security updates are
+# not part of this group and still open immediately.
+multi-ecosystem-groups:
+  weekly-dependencies:
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "09:00"
+      timezone: Europe/Stockholm
+    open-pull-requests-limit: 5
+
 updates:
   # Docker images referenced by compose.local.yaml and compose.public.yaml.
   - package-ecosystem: "docker-compose"
     directories:
       - "/"
       - "/security"
-    schedule:
-      interval: "weekly"
-      day: "saturday"
-      time: "09:00"
-      timezone: "Europe/Stockholm"
-    open-pull-requests-limit: 5
+    multi-ecosystem-group: weekly-dependencies
+    patterns: ["*"]
     groups:
       security-minor-patch:
         applies-to: "security-updates"
         patterns: ["*"]
         update-types: ["minor", "patch"]
-      docker-compose-minor-patch:
-        applies-to: "version-updates"
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
 
   # Base image used by public/Dockerfile.mcp.
   - package-ecosystem: "docker"
     directory: "/public"
-    schedule:
-      interval: "weekly"
-      day: "saturday"
-      time: "09:00"
-      timezone: "Europe/Stockholm"
-    open-pull-requests-limit: 5
+    multi-ecosystem-group: weekly-dependencies
+    patterns: ["*"]
     groups:
       security-minor-patch:
         applies-to: "security-updates"
         patterns: ["*"]
         update-types: ["minor", "patch"]
-      dockerfile-minor-patch:
-        applies-to: "version-updates"
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-
 
   # Reviewed Redis security image uses a dedicated Dockerfile under /security.
   # Dependabot proposals must pass image security checks before promotion.
   - package-ecosystem: "docker"
     directory: "/security"
+    multi-ecosystem-group: weekly-dependencies
+    patterns: ["*"]
     # Node 22 -> 26 changes the Firecrawl API build/runtime toolchain and
     # requires a separate compatibility and complete image security review.
     # Continue taking Node 22 security patches and Redis/Go package updates.
     ignore:
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
-    schedule:
-      interval: "weekly"
-      day: "saturday"
-      time: "09:15"
-      timezone: "Europe/Stockholm"
-    open-pull-requests-limit: 2
     groups:
       security-minor-patch:
         applies-to: "security-updates"
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-      security-redis-minor-patch:
-        applies-to: "version-updates"
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
   # firecrawl-mcp runtime dependency shared by the public image and local stdio proxy.
   - package-ecosystem: "npm"
     directory: "/public"
-    schedule:
-      interval: "weekly"
-      day: "saturday"
-      time: "09:00"
-      timezone: "Europe/Stockholm"
-    open-pull-requests-limit: 5
+    multi-ecosystem-group: weekly-dependencies
+    patterns: ["*"]
     groups:
       security-minor-patch:
         applies-to: "security-updates"
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
-      npm-minor-patch:
-        applies-to: "version-updates"
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
   # Third-party GitHub Actions used by workflows.
   - package-ecosystem: "github-actions"
     directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "saturday"
-      time: "09:00"
-      timezone: "Europe/Stockholm"
-    open-pull-requests-limit: 5
+    multi-ecosystem-group: weekly-dependencies
+    patterns: ["*"]
     groups:
       security-minor-patch:
         applies-to: "security-updates"
         patterns: ["*"]
         update-types: ["minor", "patch"]
-      github-actions-minor-patch:
-        applies-to: "version-updates"
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
