@@ -10,6 +10,7 @@ const dockerfile = read('public/Dockerfile.mcp');
 const gatewayDockerfile = read('public/Dockerfile.gateway');
 const publicCompose = read('compose.public.yaml');
 const proxy = read('local-mcp/stdio-proxy.mjs');
+const lockedRuntime = read('local-mcp/locked-runtime.mjs');
 const pin = JSON.parse(read('upstream/firecrawl.json'));
 const launcher = read('fc.ps1');
 const composeLocal = read('compose.local.yaml');
@@ -94,8 +95,13 @@ test('firecrawl-mcp has one exact manifest version source and reproducible publi
   assert.doesNotMatch(dockerfile, /npm install/);
   assert.doesNotMatch(dockerfile, /npm ci(?![^\n]*--ignore-scripts)/);
   assert.doesNotMatch(dockerfile, /firecrawl-mcp@\d/);
-  assert.match(proxy, /public\/package\.json/);
-  assert.doesNotMatch(proxy, /firecrawl-mcp@\d/);
+  // The local proxy runs the same locked tree as the image: npm ci from public/package-lock.json, never npx.
+  assert.match(proxy, /ensureLockedRuntime\(\s*fileURLToPath\(new URL\('\.\.\/public\/'/);
+  assert.match(proxy, /spawn\(process\.execPath, \[mcpEntry\]/);
+  assert.doesNotMatch(proxy, /npx|firecrawl-mcp@\d/);
+  assert.match(lockedRuntime, /'package-lock\.json'/);
+  assert.match(lockedRuntime, /\['ci', '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund'\]/);
+  assert.doesNotMatch(lockedRuntime, /'npx'|npm install/);
 });
 
 test('upstream Firecrawl pin is machine-readable and enforced before builds', () => {
