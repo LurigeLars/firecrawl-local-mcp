@@ -27,7 +27,7 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
     }
 
     $Source = Get-Content -LiteralPath (Join-Path $ProjectRoot 'security\Dockerfile.node-runtime') -Raw
-    if ($Source -notmatch 'node:26[.]13[.]0-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216' -or
+    if ($Source -notmatch 'node:26[.]13[.]1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5' -or
         $Source -notmatch 'rm -rf /usr/local/lib/node_modules/npm') {
         throw 'Reviewed pinned npm-free Node runtime Dockerfile changed.'
     }
@@ -77,8 +77,8 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
         throw "New $Service does not use reviewed Node 26.13 runtime."
     }
     $ActualVersion = (& docker exec $Container node --version)
-    if ($LASTEXITCODE -ne 0 -or [string]$ActualVersion -cnotmatch '^v26[.]13[.]0$') {
-        throw "New $Service runtime version is not Node 26.13.0."
+    if ($LASTEXITCODE -ne 0 -or [string]$ActualVersion -cnotmatch '^v26[.]13[.]1$') {
+        throw "New $Service runtime version is not Node 26.13.1."
     }
     if ($Service -eq 'llm-proxy' -and $GeminiConfigured) {
         Import-GeminiKey

@@ -23,7 +23,7 @@ function Invoke-FirecrawlPublicGatewayRefresh {
         throw 'Unexpected existing gateway image; refuse implicit upgrade.'
     }
     $Source = Get-Content -LiteralPath (Join-Path $ProjectRoot 'public\Dockerfile.gateway') -Raw
-    if ($Source -notmatch 'node:26[.]13[.]0-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216' -or
+    if ($Source -notmatch 'node:26[.]13[.]1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5' -or
         $Source -notmatch 'rm -rf /usr/local/lib/node_modules/npm') {
         throw 'Reviewed pinned npm-free public gateway Dockerfile changed.'
     }
