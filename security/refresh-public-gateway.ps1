@@ -66,7 +66,7 @@ function Invoke-FirecrawlPublicGatewayRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$CandidateId -cnotmatch '^sha256:[a-f0-9]{64}$') {
         throw 'Cannot inspect candidate gateway image.'
     }
-    & docker scout cves --only-severity critical,high --only-fixed --exit-code ("local://" + $CandidateId) | Out-Null
+    & docker scout cves --only-severity critical,high --only-fixed --exit-code --vex-location (Join-Path $PSScriptRoot 'vex/firecrawl-mcp.openvex.json') --vex-author 'firecrawl-local-mcp maintainers' ("local://" + $CandidateId) | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Scout rejected candidate gateway; old runtime untouched.' }
     $AfterScan = (& docker image inspect --format '{{.Id}}' $TargetImage)
     if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$CandidateId) {

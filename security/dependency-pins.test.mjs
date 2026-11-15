@@ -132,8 +132,17 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
   const vex = JSON.parse(read('security/vex/firecrawl-mcp.openvex.json'));
   assert.equal(vex.author, 'firecrawl-local-mcp maintainers');
   for (const s of vex.statements) {
-    assert.deepEqual(s.products.map(p => p['@id']), ['pkg:docker/firecrawl-mcp']);
+    assert.deepEqual(s.products.map(p => p['@id']), [
+      'pkg:docker/firecrawl-mcp', 'pkg:docker/firecrawl-searxng-proxy', 'pkg:docker/firecrawl-gateway',
+      'pkg:docker/firecrawl-node-runtime', 'pkg:docker/firecrawl-redis',
+    ]);
     for (const p of s.products) for (const c of p.subcomponents) assert.match(c['@id'], /^pkg:apk\/alpine\/[a-z0-9-]+@[^?]+-r\d+\?os_name=alpine&os_version=3\.\d+$/);
+  }
+  // The Alpine-based one-service refreshes pass the same reviewed VEX and accept only its author.
+  for (const name of ['refresh-node-helpers', 'refresh-public-gateway', 'refresh-node-runtime', 'refresh-ephemeral']) {
+    const refresh = read(`security/${name}.ps1`);
+    assert.equal((refresh.match(/scout cves /g) || []).length, 1, name);
+    assert.match(refresh, /scout cves --only-severity critical,high --only-fixed --exit-code --vex-location \(Join-Path \$PSScriptRoot 'vex\/firecrawl-mcp\.openvex\.json'\) --vex-author 'firecrawl-local-mcp maintainers' /, name);
   }
   assert.match(staged, /if \(\$null -ne \$RawText\)/);
   assert.match(staged, /image_id = \$Id/);
