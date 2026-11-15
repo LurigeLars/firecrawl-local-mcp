@@ -7,7 +7,7 @@ function Invoke-FirecrawlPublicGatewayRefresh {
     )
     $Container = 'firecrawl-gateway-1'
     $TargetImage = 'firecrawl-gateway:local'
-    $OldId = 'sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80'
+    $OldId = 'sha256:057c38ab1745dd4f79f024df5e89ae115957b2ce41dd9b30cb0ff962f767a918'
     $Unrelated = [ordered]@{}
     foreach ($Name in @('firecrawl-api-1','firecrawl-redis-1','firecrawl-rabbitmq-1',
                         'firecrawl-nuq-postgres-1','firecrawl-searxng-1','firecrawl-searxng-proxy-1',

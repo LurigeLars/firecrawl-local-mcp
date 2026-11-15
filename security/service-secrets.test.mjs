@@ -351,7 +351,7 @@ test('SearXNG critical certifi remediation is one-service scoped and protected b
   assert.match(launcher, /'refresh-searxng' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlSearchBackendRefresh/);
   assert.match(launcher, /\$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng"\)/);
   assert.match(refresh, /searxng\/searxng:2026\.10\.30-ffa88e3ba/);
-  assert.match(refresh, /sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847/);
+  assert.match(refresh, /sha256:0b104e2e1117b0ca83a36f3ac6ecda7d9ee948ccea6ead74750a03e1b856229a/);
   assert.match(refresh, /scout cves --only-severity critical,high --only-fixed --exit-code/);
   assert.match(refresh, /up -d --no-deps --no-build --force-recreate \$Service/);
   assert.match(refresh, /internal search proxy/);

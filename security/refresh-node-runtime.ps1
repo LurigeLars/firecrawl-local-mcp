@@ -7,7 +7,7 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
         [Parameter(Mandatory)][string]$ProjectRoot
     )
     $Container = "firecrawl-$Service-1"
-    $Old = 'sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80'
+    $Old = 'sha256:660ad04b09f135e402cc3e8661f22f54dbdc653ea2e5cc7933f3b32600ebaf97'
     $Image = 'firecrawl-node-runtime:local'
     $Unrelated = [ordered]@{}
     foreach ($Name in @('firecrawl-api-1','firecrawl-nuq-postgres-1',

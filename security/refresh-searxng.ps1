@@ -4,9 +4,9 @@ function Invoke-FirecrawlSearchBackendRefresh {
     param([Parameter(Mandatory)][string[]]$ComposeArguments)
     $Service = 'searxng'
     $Container = 'firecrawl-searxng-1'
-    $OldId = 'sha256:2fb0fa85096fe6df5c3ab98ecb4d6e0ee2ef66b8fb96ce6fce0f75b51c4bd90a'
-    $TargetImage = 'searxng/searxng:2026.10.30-ffa88e3ba'
-    $TargetId = 'sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
+    $OldId = 'sha256:124830d6d9d048f1e87741e47365e9a224f57af3be2de4c9059ab86964338169'
+    $TargetImage = 'searxng/searxng:2026.11.12-de722ab1b'
+    $TargetId = 'sha256:0b104e2e1117b0ca83a36f3ac6ecda7d9ee948ccea6ead74750a03e1b856229a'
     $Unrelated = [ordered]@{}
     foreach ($Name in @('firecrawl-api-1','firecrawl-redis-1','firecrawl-rabbitmq-1','firecrawl-nuq-postgres-1')) {
         $Id = (& docker inspect --format '{{.Id}}' $Name)
@@ -53,5 +53,5 @@ function Invoke-FirecrawlSearchBackendRefresh {
             throw "Unexpected unrelated service recreation: $Name"
         }
     }
-    "SEARXNG_REFRESH_OK image=$TargetId source=2026.10.30-ffa88e3ba internal_http=200 unrelated_containers_unchanged=true"
+    "SEARXNG_REFRESH_OK image=$TargetId source=2026.11.12-de722ab1b internal_http=200 unrelated_containers_unchanged=true"
 }

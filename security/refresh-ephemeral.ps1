@@ -7,7 +7,7 @@ function Invoke-FirecrawlEphemeralRefresh {
     )
     $Container = "firecrawl-$Service-1"
     $ExpectedOld = if ($Service -eq 'redis') {
-        'sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0'
+        'sha256:8b29983e57fb6a920d2816c48c09938e770a3178b2f1e980950b1659af81b5d5'
     } else {
         'sha256:1aab4d911053f3ee4ff9bb231f5192ebd6a12281f8044910256a667fdb04108d'
     }
