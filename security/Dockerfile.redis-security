@@ -1,6 +1,6 @@
 # Redis 8.10.3 remains the upstream application version.
 # Patch the Alpine zlib package (CVE-2026-85091) in a minimal derived image.
 # The build context is security/ only: never send local .env or upstream state.
-FROM redis:8.10.3-alpine@sha256:71885d8cc6e42f2bc0aa2eb853bfc4be200b5108a46ac50e117ae1df0531fb80
+FROM redis:8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
 RUN apk upgrade --no-cache zlib \
     && apk info -v zlib | grep -qvFx 'zlib-1.3.2-r0'
