@@ -175,7 +175,7 @@ services:
 
   public-proxy-metrics-init:
     profiles: ["public-proxy"]
-    image: node:26.13.0-alpine
+    image: node:26.13.1-alpine
     user: root
     command: ["sh", "-c", "chown 1000:1000 /var/lib/firecrawl-proxy"]
     volumes:
@@ -230,7 +230,7 @@ services:
 
   public-proxy-smoke:
     profiles: ["smoke"]
-    image: node:26.13.0-alpine
+    image: node:26.13.1-alpine
     user: node
     command: ["node", "/app/public-proxy-live-smoke.mjs"]
     environment:
@@ -297,7 +297,7 @@ services:
 
   # Search backend for Firecrawl (SEARXNG_ENDPOINT in .env). Internal network only, no host port.
   searxng:
-    image: searxng/searxng:2026.11.5-adbf160ff
+    image: searxng/searxng:2026.11.12-de722ab1b
     user: "977:977"
     entrypoint:
       - /bin/sh
