@@ -8,7 +8,6 @@ function Invoke-FirecrawlNodeHelperRefresh {
     )
     $Container = 'firecrawl-searxng-proxy-1'
     $TargetImage = 'firecrawl-searxng-proxy:local'
-    $ReviewedOldId = 'sha256:0362847daf94c6c290df33cd9bfe2decea5b6888055bd1f2f0697ac15103c2a2'
     $Required = [ordered]@{}
     foreach ($Name in @('firecrawl-api-1','firecrawl-redis-1','firecrawl-rabbitmq-1',
                         'firecrawl-nuq-postgres-1','firecrawl-searxng-1','firecrawl-gateway-1')) {
@@ -18,16 +17,8 @@ function Invoke-FirecrawlNodeHelperRefresh {
         }
         $Required[$Name] = [string]$Id
     }
-    $RunningId = (& docker inspect --format '{{.Image}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$RunningId -cne $ReviewedOldId) {
-        throw 'Unexpected original SearXNG proxy image. Refusing blind upgrade.'
-    }
-    $Dockerfile = Join-Path $ProjectRoot 'security\Dockerfile.searxng-proxy'
-    $Source = Get-Content -LiteralPath $Dockerfile -Raw
-    if ($Source -notmatch 'node:26[.]13[.]1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5' -or
-        $Source -notmatch 'rm -rf /usr/local/lib/node_modules/npm') {
-        throw 'Reviewed pinned npm-free SearXNG proxy Dockerfile changed.'
-    }
+    $BaselineId = Get-FirecrawlRunningImage -Container $Container
+    $null = Get-FirecrawlPinnedNodeVersion -Dockerfile (Join-Path $ProjectRoot 'security\Dockerfile.searxng-proxy')
     # Build stages only; the old container stays online until scan passes.
     & docker @ComposeArguments build $Service
     if ($LASTEXITCODE -ne 0) { throw 'SearXNG proxy build failed; old runtime remains active.' }
@@ -43,10 +34,7 @@ function Invoke-FirecrawlNodeHelperRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$CandidateId) {
         throw 'SearXNG proxy image identity changed after security scan.'
     }
-    $StillOld = (& docker inspect --format '{{.Image}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$StillOld -cne $ReviewedOldId) {
-        throw 'Original SearXNG proxy changed during staging; refusing deployment.'
-    }
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $BaselineId -Repository 'firecrawl-searxng-proxy'
     & docker @ComposeArguments up -d --no-deps --no-build --force-recreate $Service
     if ($LASTEXITCODE -ne 0) { throw 'Scoped SearXNG proxy deployment failed.' }
     $Actual = (& docker inspect --format '{{.Image}}' $Container)
@@ -67,5 +55,5 @@ function Invoke-FirecrawlNodeHelperRefresh {
             throw "Unrelated container was recreated: $Name"
         }
     }
-    "SEARCH_PROXY_REFRESH_OK image=$CandidateId internal_http=200 unrelated_container_ids_unchanged=true"
+    "SEARCH_PROXY_REFRESH_OK image=$CandidateId rollback=$Rollback internal_http=200 unrelated_container_ids_unchanged=true"
 }

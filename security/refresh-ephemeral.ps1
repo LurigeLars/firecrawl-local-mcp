@@ -6,11 +6,6 @@ function Invoke-FirecrawlEphemeralRefresh {
         [Parameter(Mandatory)][string[]]$ComposeArguments
     )
     $Container = "firecrawl-$Service-1"
-    $ExpectedOld = if ($Service -eq 'redis') {
-        'sha256:8b29983e57fb6a920d2816c48c09938e770a3178b2f1e980950b1659af81b5d5'
-    } else {
-        'sha256:1aab4d911053f3ee4ff9bb231f5192ebd6a12281f8044910256a667fdb04108d'
-    }
     $TargetImage = if ($Service -eq 'redis') { 'firecrawl-redis:patched' } else { 'rabbitmq:4.3.7-management-alpine' }
     $RabbitTarget = 'sha256:1528a88eebf2bc4d0ab7e9d5d9bc542e9bdf5e1b105e65848fcf8de5c2186528'
     $OtherIds = [ordered]@{}
@@ -27,10 +22,7 @@ function Invoke-FirecrawlEphemeralRefresh {
             throw "Required queue/cache service is not running: $Name"
         }
     }
-    $RunningImage = (& docker inspect --format '{{.Image}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$RunningImage -notmatch '^sha256:[a-f0-9]{64}$') {
-        throw "Cannot verify current image: $Container"
-    }
+    $RunningImage = Get-FirecrawlRunningImage -Container $Container
     if ($Service -eq 'rabbitmq') {
         # Refuse to discard a message that a consumer has checked out.
         # Inactive READY messages may be disposable for this private setup.
@@ -73,9 +65,8 @@ function Invoke-FirecrawlEphemeralRefresh {
         if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$TargetId) {
             throw 'Target image identity changed during security scan.'
         }
-        if ([string]$RunningImage -cne $ExpectedOld) {
-            throw 'Unexpected original queue/cache image; refusing implicit migration.'
-        }
+        $RollbackRepository = if ($Service -eq 'redis') { 'firecrawl-redis' } else { 'rabbitmq' }
+        $null = Save-FirecrawlRollbackImage -Container $Container -BaselineId $RunningImage -Repository $RollbackRepository
         # Intentionally discard only this service's old ephemeral data.
         # New dedicated named volumes stabilize future routine updates.
         & docker @ComposeArguments up -d --no-deps --no-build --force-recreate --renew-anon-volumes $Service

@@ -11,6 +11,25 @@ const composeDefaults = readFileSync(new URL('../compose.defaults.env', import.m
 const publicCompose = readFileSync(new URL('../compose.public.yaml', import.meta.url), 'utf8');
 const gateway = readFileSync(new URL('../public/gateway/gateway.mjs', import.meta.url), 'utf8');
 
+test('one-service refreshes use the running image as baseline instead of hard-coded ids', () => {
+  const helper = readFileSync(new URL('./refresh-baseline.ps1', import.meta.url), 'utf8');
+  assert.ok(launcher.indexOf('security\\refresh-baseline.ps1') < launcher.indexOf('security\\refresh-ephemeral.ps1'),
+    'fc.ps1 loads the shared baseline helper before the refresh scripts');
+  assert.match(helper, /function Get-FirecrawlRunningImage/);
+  assert.match(helper, /changed while its candidate was staged; deployment aborted/);
+  assert.match(helper, /rollback-\$\(\$BaselineId\.Substring\(7, 12\)\)/);
+  assert.match(helper, /\^FROM node:\(\[0-9\]\+\[\.\]\[0-9\]\+\[\.\]\[0-9\]\+\)-alpine@sha256:\[a-f0-9\]\{64\}/);
+  for (const name of ['refresh-public-gateway', 'refresh-node-helpers', 'refresh-node-runtime', 'refresh-searxng', 'refresh-ephemeral']) {
+    const source = readFileSync(new URL(`./${name}.ps1`, import.meta.url), 'utf8');
+    assert.match(source, /Get-FirecrawlRunningImage -Container \$Container/, name);
+    assert.match(source, /Save-FirecrawlRollbackImage -Container \$Container -BaselineId/, name);
+    // Only the unused RabbitMQ branch of refresh-ephemeral still names an exact image id.
+    const ids = (source.match(/'sha256:[0-9a-f]{64}'/g) || []).filter(id => !source.includes(`$RabbitTarget = ${id}`));
+    assert.deepEqual(ids, [], `${name} hard-codes an image id`);
+    assert.doesNotMatch(source, /node:\d+\[?\.\]?\d+\[?\.\]?\d+-alpine@sha256:[0-9a-f]{64}|\^v\d+\[\.\]/, `${name} hard-codes a Node pin`);
+  }
+});
+
 test('service secrets are injected into tmpfs by post_start hooks', () => {
   assert.doesNotMatch(compose, /^secrets:\s*$/m);
 
@@ -350,8 +369,11 @@ test('SearXNG critical certifi remediation is one-service scoped and protected b
   const refresh = readFileSync(new URL('./refresh-searxng.ps1', import.meta.url), 'utf8');
   assert.match(launcher, /'refresh-searxng' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlSearchBackendRefresh/);
   assert.match(launcher, /\$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng"\)/);
-  assert.match(refresh, /searxng\/searxng:2026\.11\.12-de722ab1b/);
-  assert.match(refresh, /sha256:0b104e2e1117b0ca83a36f3ac6ecda7d9ee948ccea6ead74750a03e1b856229a/);
+  // The target is the exact versioned tag in Compose, pulled and then identified by image id.
+  assert.match(refresh, /config --images \$Service/);
+  assert.match(refresh, /Compose does not pin SearXNG to an exact versioned tag/);
+  assert.match(refresh, /pull \$Service/);
+  assert.match(compose, /image: searxng\/searxng:\d{4}\.\d{1,2}\.\d{1,2}-[0-9a-f]{7,}\s*$/m);
   assert.match(refresh, /scout cves --only-severity critical,high --only-fixed --exit-code/);
   assert.match(refresh, /up -d --no-deps --no-build --force-recreate \$Service/);
   assert.match(refresh, /internal search proxy/);
