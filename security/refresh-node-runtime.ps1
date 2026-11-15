@@ -55,7 +55,7 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$Candidate -cnotmatch '^sha256:[0-9a-f]{64}$') {
         throw 'Pinned Node helper image missing; run router refresh first.'
     }
-    & docker scout cves --only-severity critical,high --only-fixed --exit-code ("local://" + $Candidate) | Out-Null
+    & docker scout cves --only-severity critical,high --only-fixed --exit-code --vex-location (Join-Path $PSScriptRoot 'vex/firecrawl-mcp.openvex.json') --vex-author 'firecrawl-local-mcp maintainers' ("local://" + $Candidate) | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Scout rejected the $Service image; old container untouched." }
     $AfterScan = (& docker image inspect --format '{{.Id}}' $Image)
     if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$Candidate) {

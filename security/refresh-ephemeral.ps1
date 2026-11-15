@@ -67,7 +67,7 @@ function Invoke-FirecrawlEphemeralRefresh {
     }
     if ([string]$RunningImage -cne [string]$TargetId) {
         # High/Critical *fixable* issues are a hard fail. No insecure override.
-        & docker scout cves --only-severity critical,high --only-fixed --exit-code ("local://" + $TargetImage) | Out-Null
+        & docker scout cves --only-severity critical,high --only-fixed --exit-code --vex-location (Join-Path $PSScriptRoot 'vex/firecrawl-mcp.openvex.json') --vex-author 'firecrawl-local-mcp maintainers' ("local://" + $TargetImage) | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Docker Scout refused target image; live container untouched.' }
         $AfterScan = (& docker image inspect --format '{{.Id}}' $TargetImage)
         if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$TargetId) {

@@ -35,7 +35,7 @@ function Invoke-FirecrawlNodeHelperRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$CandidateId -cnotmatch '^sha256:[a-f0-9]{64}$') {
         throw 'Candidate SearXNG proxy image identity unavailable.'
     }
-    & docker scout cves --only-severity critical,high --only-fixed --exit-code ("local://" + $CandidateId) | Out-Null
+    & docker scout cves --only-severity critical,high --only-fixed --exit-code --vex-location (Join-Path $PSScriptRoot 'vex/firecrawl-mcp.openvex.json') --vex-author 'firecrawl-local-mcp maintainers' ("local://" + $CandidateId) | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw 'Scout rejected candidate SearXNG proxy (fixable critical/high). Old runtime remains active.'
     }
