@@ -9,6 +9,7 @@ $env:SOURCE_REVISION = if (-not (git -C $root status --porcelain 2>$null)) { git
 . (Join-Path $root "security\staged-mcp-image.ps1")
 . (Join-Path $root "security\staged-playwright-image.ps1")
 . (Join-Path $root "security\staged-api-image.ps1")
+. (Join-Path $root "security\refresh-baseline.ps1")
 . (Join-Path $root "security\refresh-ephemeral.ps1")
 . (Join-Path $root "security\refresh-searxng.ps1")
 . (Join-Path $root "security\refresh-node-helpers.ps1")

@@ -7,7 +7,6 @@ function Invoke-FirecrawlPublicGatewayRefresh {
     )
     $Container = 'firecrawl-gateway-1'
     $TargetImage = 'firecrawl-gateway:local'
-    $OldId = 'sha256:057c38ab1745dd4f79f024df5e89ae115957b2ce41dd9b30cb0ff962f767a918'
     $Unrelated = [ordered]@{}
     foreach ($Name in @('firecrawl-api-1','firecrawl-redis-1','firecrawl-rabbitmq-1',
                         'firecrawl-nuq-postgres-1','firecrawl-searxng-1','firecrawl-searxng-proxy-1',
@@ -18,15 +17,8 @@ function Invoke-FirecrawlPublicGatewayRefresh {
         }
         $Unrelated[$Name] = [string]$Id
     }
-    $CurrentImageId = (& docker inspect --format '{{.Image}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$CurrentImageId -cne $OldId) {
-        throw 'Unexpected existing gateway image; refuse implicit upgrade.'
-    }
-    $Source = Get-Content -LiteralPath (Join-Path $ProjectRoot 'public\Dockerfile.gateway') -Raw
-    if ($Source -notmatch 'node:26[.]13[.]1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5' -or
-        $Source -notmatch 'rm -rf /usr/local/lib/node_modules/npm') {
-        throw 'Reviewed pinned npm-free public gateway Dockerfile changed.'
-    }
+    $OldId = Get-FirecrawlRunningImage -Container $Container
+    $null = Get-FirecrawlPinnedNodeVersion -Dockerfile (Join-Path $ProjectRoot 'public\Dockerfile.gateway')
     # Compare effective gateway environment against the live gateway *locally*.
     # Do not emit effective Compose config: it contains ignored OAuth/Access values.
     $EffectiveJson = (& docker @ComposeArguments config --format json | Out-String)
@@ -72,10 +64,7 @@ function Invoke-FirecrawlPublicGatewayRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$CandidateId) {
         throw 'Gateway candidate identity changed after scan.'
     }
-    $StillOld = (& docker inspect --format '{{.Image}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$StillOld -cne $OldId) {
-        throw 'Gateway changed during staging; deployment aborted.'
-    }
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $OldId -Repository 'firecrawl-gateway'
     & docker @ComposeArguments up -d --no-deps --no-build --force-recreate gateway
     if ($LASTEXITCODE -ne 0) { throw 'Public gateway scoped deploy failed.' }
     $NewImage = (& docker inspect --format '{{.Image}}' $Container)
@@ -101,5 +90,5 @@ function Invoke-FirecrawlPublicGatewayRefresh {
         Start-Sleep -Seconds 3
     }
     if (-not $SmokePassed) { throw 'Public gateway Access/OAuth self-test failed.' }
-    "PUBLIC_GATEWAY_REFRESH_OK image=$CandidateId cloudflare_access_selftest=pass unrelated_container_ids_unchanged=true"
+    "PUBLIC_GATEWAY_REFRESH_OK image=$CandidateId rollback=$Rollback cloudflare_access_selftest=pass unrelated_container_ids_unchanged=true"
 }

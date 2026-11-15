@@ -7,7 +7,6 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
         [Parameter(Mandatory)][string]$ProjectRoot
     )
     $Container = "firecrawl-$Service-1"
-    $Old = 'sha256:660ad04b09f135e402cc3e8661f22f54dbdc653ea2e5cc7933f3b32600ebaf97'
     $Image = 'firecrawl-node-runtime:local'
     $Unrelated = [ordered]@{}
     foreach ($Name in @('firecrawl-api-1','firecrawl-nuq-postgres-1',
@@ -21,16 +20,8 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
         }
         $Unrelated[$Name] = [string]$Id
     }
-    $Current = (& docker inspect --format '{{.Image}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$Current -cne $Old) {
-        throw "Unexpected original $Service image; refuse unreviewed replacement."
-    }
-
-    $Source = Get-Content -LiteralPath (Join-Path $ProjectRoot 'security\Dockerfile.node-runtime') -Raw
-    if ($Source -notmatch 'node:26[.]13[.]1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5' -or
-        $Source -notmatch 'rm -rf /usr/local/lib/node_modules/npm') {
-        throw 'Reviewed pinned npm-free Node runtime Dockerfile changed.'
-    }
+    $Old = Get-FirecrawlRunningImage -Container $Container
+    $ExpectedVersion = Get-FirecrawlPinnedNodeVersion -Dockerfile (Join-Path $ProjectRoot 'security\Dockerfile.node-runtime')
 
     # Preserve the optional Gemini runtime key BEFORE recreating llm-proxy's
     # tmpfs. Import-GeminiKey is the existing DPAPI-backed function in fc.ps1.
@@ -61,10 +52,7 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$Candidate) {
         throw 'Reviewed Node helper image changed during scan.'
     }
-    $OriginalNow = (& docker inspect --format '{{.Image}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$OriginalNow -cne $Old) {
-        throw 'Old Node helper container changed during staging; no deployment.'
-    }
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $Old -Repository 'firecrawl-node-runtime'
     if ($Service -eq 'playwright-router') {
         & docker @ComposeArguments --profile public-proxy up -d --no-deps --no-build --force-recreate $Service
     } else {
@@ -74,11 +62,11 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
 
     $ActualImage = (& docker inspect --format '{{.Image}}' $Container)
     if ($LASTEXITCODE -ne 0 -or [string]$ActualImage -cne [string]$Candidate) {
-        throw "New $Service does not use reviewed Node 26.13 runtime."
+        throw "New $Service does not use the reviewed Node runtime image."
     }
     $ActualVersion = (& docker exec $Container node --version)
-    if ($LASTEXITCODE -ne 0 -or [string]$ActualVersion -cnotmatch '^v26[.]13[.]1$') {
-        throw "New $Service runtime version is not Node 26.13.1."
+    if ($LASTEXITCODE -ne 0 -or ([string]$ActualVersion).Trim() -cne $ExpectedVersion) {
+        throw "New $Service runtime version is not Node $ExpectedVersion."
     }
     if ($Service -eq 'llm-proxy' -and $GeminiConfigured) {
         Import-GeminiKey
@@ -106,5 +94,5 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
             throw "Unrelated container changed unexpectedly: $Name"
         }
     }
-    "NODE_SUPPORT_REFRESH_OK service=$Service node=$ActualVersion image=$Candidate gemini_restored=$GeminiConfigured unrelated_containers_unchanged=true"
+    "NODE_SUPPORT_REFRESH_OK service=$Service node=$ActualVersion image=$Candidate rollback=$Rollback gemini_restored=$GeminiConfigured unrelated_containers_unchanged=true"
 }
