@@ -8,7 +8,7 @@ function Invoke-FirecrawlNodeHelperRefresh {
     )
     $Container = 'firecrawl-searxng-proxy-1'
     $TargetImage = 'firecrawl-searxng-proxy:local'
-    $ReviewedOldId = 'sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80'
+    $ReviewedOldId = 'sha256:0362847daf94c6c290df33cd9bfe2decea5b6888055bd1f2f0697ac15103c2a2'
     $Required = [ordered]@{}
     foreach ($Name in @('firecrawl-api-1','firecrawl-redis-1','firecrawl-rabbitmq-1',
                         'firecrawl-nuq-postgres-1','firecrawl-searxng-1','firecrawl-gateway-1')) {
