@@ -2,19 +2,21 @@
 // Usage: node local-mcp/test-proxy.mjs
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
-const proxy = spawn(process.execPath, [new URL('./stdio-proxy.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')],
+const proxy = spawn(process.execPath, [fileURLToPath(new URL('./stdio-proxy.mjs', import.meta.url))],
   { env: { ...process.env, FIRECRAWL_API_URL: 'http://127.0.0.1:3002' }, stdio: ['pipe', 'pipe', 'inherit'] });
-const pending = [];
+const pending = new Map();
 let nextId = 1;
+// Match responses by id: the server also sends notifications (e.g. log messages) without one.
 readline.createInterface({ input: proxy.stdout }).on('line', line => {
   const m = JSON.parse(line);
-  const resolve = pending.shift();
-  if (resolve) resolve(m);
+  const resolve = pending.get(m.id);
+  if (resolve) { pending.delete(m.id); resolve(m); }
 });
 const rpc = (method, params) => new Promise(resolve => {
   const id = nextId++;
-  pending.push(resolve);
+  pending.set(id, resolve);
   proxy.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
 });
 const results = [];
