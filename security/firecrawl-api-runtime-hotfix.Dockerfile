@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:22.23.4-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS runtime-base
+FROM node:22.23.5-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime-base
 
 FROM runtime-base AS build-base
 ENV PNPM_HOME="/pnpm"
@@ -11,7 +11,7 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 # TEMPORARY LOCAL SECURITY HOTFIX.
 # Based on reviewed upstream API v2.11.642, preserving current fork's pinned runtime base.
 # Remove once upstream satisfies firecrawl-local-mcp issue #66 promotion gates.
-FROM golang:1.27.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS go-build
+FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS go-build
 # The pinned builder is build-time only; install the patched Go compiler from
 # the official signed-distribution SHA256 values before compiling the shared library.
 # This avoids leaving an unverified/floating builder digest in the release path.
