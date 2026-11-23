@@ -113,6 +113,145 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Dedicated Camoufox instances share NO sessions/cookies with InfluencerResearch.
+  # Their bearer key is random and stays in a private, permission-restricted Docker volume.
+  camofox-research-secrets-init:
+    image: node:26.13.1-alpine
+    user: root
+    command:
+      - node
+      - -e
+      - >-
+        const fs=require('node:fs'),crypto=require('node:crypto');
+        const f='/run/camofox-research-secrets/access_key';
+        if(!fs.existsSync(f)) fs.writeFileSync(f,crypto.randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});
+        fs.chownSync(f,1000,1000);fs.chmodSync(f,0o600);
+    volumes: [camofox-research-secrets:/run/camofox-research-secrets]
+    networks: [browser_runtime]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+  camofox-research:
+    image: influencerresearch-camofox
+    user: node
+    environment:
+      NODE_ENV: production
+      CAMOFOX_PORT: "9377"
+      CAMOFOX_BIND_HOST: 0.0.0.0
+      CAMOUFOX_EXECUTABLE: /opt/camoufox/camoufox-bin
+      CAMOUFOX_INSTALL_DIR: /opt/camoufox
+      HOME: /run/camofox
+      XDG_CACHE_HOME: /run/camofox/cache
+      CAMOFOX_PROFILE_DIR: /run/camofox/profiles
+      CAMOFOX_COOKIES_DIR: /run/camofox/cookies
+      CAMOFOX_TRACES_DIR: /run/camofox/traces
+      CAMOFOX_CRASH_REPORT_ENABLED: "false"
+      CAMOFOX_DISABLE_DEFAULT_ADDONS: "true"
+      MAX_SESSIONS: "2"
+      MAX_TABS_GLOBAL: "2"
+      MAX_TABS_PER_SESSION: "1"
+      BROWSER_IDLE_TIMEOUT_MS: "60000"
+      SESSION_TIMEOUT_MS: "60000"
+    volumes: [camofox-research-secrets:/run/camofox-research-secrets:ro]
+    command:
+      - sh
+      - -c
+      - >-
+        while [ ! -s /run/camofox-research-secrets/access_key ]; do sleep 0.05; done;
+        export CAMOFOX_ACCESS_KEY="$(cat /run/camofox-research-secrets/access_key)";
+        exec node --max-old-space-size=192 /app/node_modules/@askjo/camofox-browser/server.js
+    depends_on:
+      camofox-research-secrets-init:
+        condition: service_completed_successfully
+    expose: ["9377"]
+    networks: [browser_runtime]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=1777
+      - /run/camofox:rw,nosuid,nodev,size=384m,uid=1000,gid=1000,mode=0700
+    shm_size: 768m
+    cpus: 2.0
+    mem_limit: 2g
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  # Proxy is only started by the existing DPAPI-protected public-proxy profile.
+  # The Camofox proxy session is independent of the direct session.
+  camofox-research-proxy:
+    profiles: ["public-proxy"]
+    image: influencerresearch-camofox
+    user: node
+    environment:
+      NODE_ENV: production
+      CAMOFOX_PORT: "9377"
+      CAMOFOX_BIND_HOST: 0.0.0.0
+      CAMOUFOX_EXECUTABLE: /opt/camoufox/camoufox-bin
+      CAMOUFOX_INSTALL_DIR: /run/camofox/install
+      GEOIP_SETUP_TIMEOUT_MS: "30000"
+      HOME: /run/camofox
+      XDG_CACHE_HOME: /run/camofox/cache
+      CAMOFOX_PROFILE_DIR: /run/camofox/profiles
+      CAMOFOX_COOKIES_DIR: /run/camofox/cookies
+      CAMOFOX_TRACES_DIR: /run/camofox/traces
+      CAMOFOX_CRASH_REPORT_ENABLED: "false"
+      CAMOFOX_DISABLE_DEFAULT_ADDONS: "true"
+      MAX_SESSIONS: "2"
+      MAX_TABS_GLOBAL: "2"
+      MAX_TABS_PER_SESSION: "1"
+      BROWSER_IDLE_TIMEOUT_MS: "60000"
+      SESSION_TIMEOUT_MS: "60000"
+      PROXY_STRATEGY: round_robin
+      PROXY_PROTOCOL: http
+      PROXY_HOST: p.webshare.io
+      PROXY_PORT: "80"
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=1777
+      - /run/camofox:rw,nosuid,nodev,size=384m,uid=1000,gid=1000,mode=0700
+      - /run/firecrawl-proxy-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
+    post_start:
+      - command:
+          - sh
+          - -c
+          - >-
+            umask 077;
+            test -n "$FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET";
+            test -n "$FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET";
+            printf '%s' "$FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET" > /run/firecrawl-proxy-secrets/proxy_username;
+            printf '%s' "$FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET" > /run/firecrawl-proxy-secrets/proxy_password
+        environment:
+          FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET: ${FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET:-}
+          FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET: ${FIRECRAWL_PUBLIC_PROXY_PASSWORD_SECRET:-}
+    command:
+      - sh
+      - -c
+      - >-
+        while [ ! -s /run/camofox-research-secrets/access_key ] || [ ! -s /run/firecrawl-proxy-secrets/proxy_username ] || [ ! -s /run/firecrawl-proxy-secrets/proxy_password ]; do sleep 0.05; done;
+        mkdir -p /run/camofox/install;
+        ln -sf /opt/camoufox/version.json /run/camofox/install/version.json;
+        ln -sf /opt/camoufox/fontconfig /run/camofox/install/fontconfig;
+        export CAMOFOX_ACCESS_KEY="$(cat /run/camofox-research-secrets/access_key)";
+        export PROXY_USERNAME="$(cat /run/firecrawl-proxy-secrets/proxy_username)";
+        export PROXY_PASSWORD="$(cat /run/firecrawl-proxy-secrets/proxy_password)";
+        exec node --max-old-space-size=192 /app/node_modules/@askjo/camofox-browser/server.js
+    volumes: [camofox-research-secrets:/run/camofox-research-secrets:ro]
+    depends_on:
+      camofox-research-secrets-init:
+        condition: service_completed_successfully
+    expose: ["9377"]
+    networks: [browser_runtime]
+    read_only: true
+    shm_size: 768m
+    cpus: 2.0
+    mem_limit: 2g
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
   # Public-only browser fallback. The router always tries the normal Playwright service first.
   # Only allowlisted public hostnames may retry through this proxy service after target HTTP 403/429.
   # Auth/session-bearing requests fail closed and are never sent to the third-party proxy.
@@ -386,3 +525,4 @@ volumes:
   firecrawl-rabbitmq-data:
   nuq-postgres-data:
   public-proxy-metrics:
+  camofox-research-secrets:
