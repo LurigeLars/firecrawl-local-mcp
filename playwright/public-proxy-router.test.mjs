@@ -355,3 +355,56 @@ test('URL credentials are refused before any upstream request', async t => {
   assert.equal(result.status, 400);
   assert.match(result.body.error, /URL credentials/);
 });
+
+test('HTTP 200 Cloudflare challenge on allowlisted site retries via proxy', async t => {
+  let proxyHits = 0;
+  const direct = fakePlaywright(body => ({
+    content: '<html><title>Just a moment...</title>Verify you are human</html>',
+    pageStatusCode: 200, url: body.url,
+  }));
+  const proxy = fakePlaywright(body => {
+    proxyHits++;
+    return { content: '<html>Real article</html>', pageStatusCode: 200, url: body.url };
+  });
+  const directUrl = await listen(direct);
+  const proxyUrl = await listen(proxy);
+  const router = createServer({ directUpstream: directUrl, proxyUpstream: proxyUrl,
+    proxyHosts: new Set(['5e.tools']) });
+  const routerUrl = await listen(router);
+  t.after(() => Promise.all([
+    new Promise(r => router.close(r)),
+    new Promise(r => direct.close(r)),
+    new Promise(r => proxy.close(r)),
+  ]));
+  const response = await post(routerUrl, { url: 'https://5e.tools/adventure.html#kftgv' });
+  assert.equal(response.body.content, '<html>Real article</html>');
+  assert.equal(proxyHits, 1);
+  assert.equal(response.headers.get('x-firecrawl-public-proxy'), 'used');
+});
+
+test('5e.tools Loading placeholder retries, but a populated chapter stays direct', async t => {
+  let proxyHits = 0;
+  const direct = fakePlaywright(body => ({
+    content: body.url.endsWith('/full')
+      ? '<html>Fire and Darkness Brimstone Hold ready</html>'
+      : '<html><div>Loading...</div></html>',
+    pageStatusCode: 200, url: body.url,
+  }));
+  const proxy = fakePlaywright(body => {
+    proxyHits++;
+    return { content: '<html>Chapter loaded</html>', pageStatusCode: 200, url: body.url };
+  });
+  const directUrl = await listen(direct);
+  const proxyUrl = await listen(proxy);
+  const router = createServer({ directUpstream: directUrl, proxyUpstream: proxyUrl,
+    proxyHosts: new Set(['5e.tools']) });
+  const routerUrl = await listen(router);
+  t.after(() => Promise.all([
+    new Promise(r => router.close(r)),
+    new Promise(r => direct.close(r)),
+    new Promise(r => proxy.close(r)),
+  ]));
+  assert.equal((await post(routerUrl, {url:'https://5e.tools/adventure.html'})).body.content, '<html>Chapter loaded</html>');
+  assert.equal((await post(routerUrl, {url:'https://5e.tools/full'})).body.content, '<html>Fire and Darkness Brimstone Hold ready</html>');
+  assert.equal(proxyHits, 1);
+});
