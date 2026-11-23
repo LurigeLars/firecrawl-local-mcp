@@ -106,8 +106,8 @@ test('firecrawl-mcp has one exact manifest version source and reproducible publi
 
 test('upstream Firecrawl pin is machine-readable and enforced before builds', () => {
   assert.equal(pin.repository, 'firecrawl/firecrawl');
-  assert.equal(pin.tag, 'v2.11.642');
-  assert.equal(pin.commit, '7e6bd701febaacc3bb95c0fb7eee2c509a4813c5');
+  assert.equal(pin.tag, 'v2.11.793');
+  assert.equal(pin.commit, '7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d');
   assert.match(pin.tag, /^v\d+\.\d+\.\d+$/);
   assert.match(pin.commit, /^[0-9a-f]{40}$/);
   assert.match(launcher, /upstream\\firecrawl\.json/);

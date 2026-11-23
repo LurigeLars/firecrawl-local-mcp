@@ -28,15 +28,15 @@ jobs:
           import json
           p = json.load(open('upstream/firecrawl.json', encoding='utf-8'))
           assert p['repository'] == 'firecrawl/firecrawl'
-          assert p['tag'] == 'v2.11.642'
-          assert p['commit'] == '7e6bd701febaacc3bb95c0fb7eee2c509a4813c5'
+          assert p['tag'] == 'v2.11.793'
+          assert p['commit'] == '7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d'
           PY
-          git clone --filter=blob:none --no-checkout --depth 1 --branch v2.11.642 \
+          git clone --filter=blob:none --no-checkout --depth 1 --branch v2.11.793 \
             https://github.com/firecrawl/firecrawl.git "$RUNNER_TEMP/firecrawl"
           git -C "$RUNNER_TEMP/firecrawl" sparse-checkout init --cone
           git -C "$RUNNER_TEMP/firecrawl" sparse-checkout set apps/api/sharedLibs/go-html-to-md
-          git -C "$RUNNER_TEMP/firecrawl" checkout --detach 7e6bd701febaacc3bb95c0fb7eee2c509a4813c5
-          test "$(git -C "$RUNNER_TEMP/firecrawl" rev-parse HEAD)" = 7e6bd701febaacc3bb95c0fb7eee2c509a4813c5
+          git -C "$RUNNER_TEMP/firecrawl" checkout --detach 7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d
+          test "$(git -C "$RUNNER_TEMP/firecrawl" rev-parse HEAD)" = 7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d
           test -s "$RUNNER_TEMP/firecrawl/apps/api/sharedLibs/go-html-to-md/go.mod"
       - name: Build pinned Go shared library (no deployment)
         shell: bash
@@ -67,7 +67,7 @@ jobs:
           test -d "$RUNNER_TEMP/firecrawl/apps/api/patches"
           docker build \
             --target final \
-            --build-arg GIT_SHA=7e6bd701febaacc3bb95c0fb7eee2c509a4813c5 \
+            --build-arg GIT_SHA=7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d \
             -f "$GITHUB_WORKSPACE/security/firecrawl-api-runtime-hotfix.Dockerfile" \
             -t firecrawl-api-security-review:local \
             "$RUNNER_TEMP/firecrawl/apps/api"
@@ -77,4 +77,15 @@ jobs:
             test -s /app/dist/src/harness.js &&
             grep -F "golang.org/x/net" /app/GO_RUNTIME_MODULES.txt | grep -F "v0.62.0" &&
             grep -F "go1.26.10" /app/GO_RUNTIME_MODULES.txt
+          '
+      - name: Verify the native HTML parser in the built runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --entrypoint node firecrawl-api-security-review:local -e '
+            const assert = require("node:assert/strict");
+            const { extractLinks } = require("./native");
+            extractLinks("<a href=\"/example\">Example</a>")
+              .then(links => assert.deepEqual(links, ["/example"]))
+              .catch(error => { console.error(error); process.exitCode = 1; });
           '
