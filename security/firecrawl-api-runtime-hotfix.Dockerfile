@@ -11,7 +11,7 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 # TEMPORARY LOCAL SECURITY HOTFIX.
 # Based on reviewed upstream API v2.11.793, preserving current fork's pinned runtime base.
 # Remove once upstream satisfies firecrawl-local-mcp issue #66 promotion gates.
-FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS go-build
+FROM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS go-build
 # The pinned builder is build-time only; install the patched Go compiler from
 # the official signed-distribution SHA256 values before compiling the shared library.
 # This avoids leaving an unverified/floating builder digest in the release path.

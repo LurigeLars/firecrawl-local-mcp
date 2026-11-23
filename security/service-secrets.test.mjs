@@ -268,8 +268,8 @@ test('whole-stack Compose refuses to recreate stateful containers without review
   assert.match(guard, /'volume'/);
   assert.match(guard, /firecrawl_/);
   assert.match(guard, /Complete isolated backup\/migration first/);
-  assert.match(launcher, /\$RunningRabbitImage/);
-  assert.match(launcher, /RabbitMQ 4\.4 migration pending/);
+  assert.match(guard, /config --images rabbitmq/);
+  assert.match(guard, /RabbitMQ image change pending/);
   assert.match(launcher, /'refresh-rabbitmq' \{[\s\S]*?\$Current/);
   assert.doesNotMatch(
     launcher.split("    'refresh-rabbitmq' {")[1]?.split("    'up' {")[0] ?? '',
