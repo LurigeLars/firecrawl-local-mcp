@@ -75,6 +75,15 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY patches ./patches
 COPY native ./native
 
+# Firecrawl API v2.11.642 pins kuchikiki 0.8.2, while its nodesig git
+# dependency requires 0.8.9-speedreader. Align only that native manifest
+# entry with the version used by current upstream Firecrawl. Fail closed if
+# the pinned API source changes; do not relax the pinned application tag.
+RUN set -eu; \
+    grep -Fx 'kuchikiki = "0.8.2"' native/Cargo.toml; \
+    sed -i 's/^kuchikiki = "0\.8\.2"$/kuchikiki = "0.8.9-speedreader"/' native/Cargo.toml; \
+    grep -Fx 'kuchikiki = "0.8.9-speedreader"' native/Cargo.toml
+
 # Install dependencies
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     --mount=type=cache,target=/usr/local/cargo/registry \
