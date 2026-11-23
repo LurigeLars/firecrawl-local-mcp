@@ -441,3 +441,12 @@ Notes
   `.\fc.ps1 up` (rebuilds from the old source; the `:v2.11.0-backup` images were deleted on 2026-09-16).
 - Models kept (2026-09-16): `qwen2.5-16k` (active) and `gemma3-12b-16k` (reserve: same accuracy, slower; switch with
   `MODEL_NAME=gemma3-12b-16k` in `.env` + `.\fc.ps1 up`). `qwen2.5:14b` was removed after failing the benchmark.
+### Optional isolated Camoufox fallback for blocked public pages
+
+This deployment can reuse the **reviewed Camofox image** built by InfluencerResearch without sharing its sessions, cookies, secrets or Docker network. The separate `camofox-research` container receives a random private bearer key from a dedicated Docker volume. `firecrawl_camofox_read` is exposed only through the existing Cloudflare Access-authenticated ChatGPT gateway. No cookie import, clicks, arbitrary script execution, file access or persistent authenticated profiles are exposed.
+
+The existing `public-proxy` profile starts an independent `camofox-research-proxy` service, reusing the **existing DPAPI-protected Webshare credentials** and `-rotate` username from `fc.ps1`. The read tool retries only when a direct result is blocked or challenge-like and the target is in `CAMOFOX_RESEARCH_PROXY_HOSTS` (default: `5e.tools`). No original session data/cookies flow to the proxy service. No proxy credentials are written to Git or the global environment. The direct Camoufox browser does not receive the proxy credentials. Images require the existing locally built `influencerresearch-camofox` image; deploy fails closed when it is unavailable. Re-review the runtime image when IR's image is rebuilt.
+
+The Playwright proxy router additionally recognizes HTTP 200 Cloudflare challenges and (only for 5e.tools) an unrendered `Loading...` shell. The default public research hostname set becomes `curemydisease.com,5e.tools`; an explicit `FIRECRAWL_PUBLIC_PROXY_HOSTS` setting can still override this. Both read paths are public-web-only and respect DNS/private-network restrictions.
+
+Validate after deployment with a content-bearing public page, then the D&D adventure URL. A 200 response, a blank snapshot or a Cloudflare challenge is not proof of successful extraction. Readiness and CI tests must pass before declaring success. Roll back the gateway/Camofox services if the direct path regresses; IR itself is not modified by this feature.
