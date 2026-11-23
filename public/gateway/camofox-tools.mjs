@@ -47,7 +47,7 @@ function isChallenge(snap, status, url) {
   const text = String(snap || '');
   if (/Just a moment|verify you are human|checking your browser|cf-challenge|attention required.*cloudflare|security check.*cloudflare/i.test(text)) return true;
   // 5e.tools ships a large SPA skeleton even when the requested chapter never loads.
-  return url.hostname === '5e.tools' && /^\s*(?:Loading(?:\.\.\.)?\s*){1,4}$/i.test(text.trim());
+  return (url.hostname === '5e.tools' || url.hostname.endsWith('.5e.tools')) && /Loading\.\.\./i.test(text) && !/Brimstone Hold|Fire and Darkness|Book of Vile Darkness/i.test(text);
 }
 async function call(base, key, method, path, body, timeout = 20000) {
   const response = await fetch(base.replace(/\/$/, '') + path, {
