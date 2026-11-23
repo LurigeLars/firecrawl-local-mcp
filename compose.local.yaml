@@ -343,7 +343,7 @@ services:
       PORT: 3000
       DIRECT_UPSTREAM: http://playwright-service:3000/scrape
       PROXY_UPSTREAM: http://playwright-public-proxy-service:3000/scrape
-      PUBLIC_PROXY_HOSTS: ${FIRECRAWL_PUBLIC_PROXY_HOSTS:-curemydisease.com}
+      PUBLIC_PROXY_HOSTS: ${FIRECRAWL_PUBLIC_PROXY_HOSTS:-curemydisease.com,5e.tools}
       PUBLIC_PROXY_ATTEMPTS: ${FIRECRAWL_PUBLIC_PROXY_ATTEMPTS:-3}
       PUBLIC_PROXY_METRICS_PATH: /var/lib/firecrawl-proxy/metrics.json
     command: ["node", "/app/public-proxy-router.mjs"]
