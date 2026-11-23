@@ -9,7 +9,7 @@ RUN corepack enable && corepack prepare pnpm@11.4.0 --activate
 
 # Build Go shared library
 # TEMPORARY LOCAL SECURITY HOTFIX.
-# Based on reviewed upstream API v2.11.642, preserving current fork's pinned runtime base.
+# Based on reviewed upstream API v2.11.793, preserving current fork's pinned runtime base.
 # Remove once upstream satisfies firecrawl-local-mcp issue #66 promotion gates.
 FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS go-build
 # The pinned builder is build-time only; install the patched Go compiler from
@@ -75,15 +75,18 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY patches ./patches
 COPY native ./native
 
-# Install dependencies
+# Keep the reviewed Cargo resolution during the native install hook.
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/native/target \
-    pnpm install --frozen-lockfile
+    sha256sum native/Cargo.lock > /tmp/firecrawl-cargo-lock.sha256 \
+    && pnpm install --frozen-lockfile \
+    && sha256sum -c /tmp/firecrawl-cargo-lock.sha256 \
+    && rm /tmp/firecrawl-cargo-lock.sha256
 
 COPY . .
 
-# Pin enforcement: upstream v2.11.642 already carries the patched Node
+# Pin enforcement: upstream v2.11.793 already carries the patched Node
 # overrides. Do not re-insert obsolete dependency overrides or downgrade undici.
 # The frozen lock install above must resolve exactly the reviewed upstream set.
 RUN set -eu; \
