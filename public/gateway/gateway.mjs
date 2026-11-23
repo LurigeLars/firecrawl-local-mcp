@@ -18,6 +18,7 @@ import {
   rpcToolError,
 } from './policy.mjs';
 import { appendBrowserTools, callBrowserTool, isBrowserTool } from './browser-tools.mjs';
+import { appendCamofoxTool, callCamofoxTool, isCamofoxTool } from './camofox-tools.mjs';
 
 const UPSTREAM_HOST = process.env.UPSTREAM_HOST ?? 'mcp',
   UPSTREAM_PORT = Number(process.env.UPSTREAM_PORT ?? 3000),
@@ -117,7 +118,7 @@ function sendJson(res, obj) {
   res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
   res.end(JSON.stringify(obj));
 }
-const rewriteGatewayResponse = (msg, ctx) => appendBrowserTools(rewriteResponse(msg, ctx), ALLOWED_TOOLS);
+const rewriteGatewayResponse = (msg, ctx) => appendCamofoxTool(appendBrowserTools(rewriteResponse(msg, ctx), ALLOWED_TOOLS), ALLOWED_TOOLS);
 const rewriteJsonText = (text, ctx) => {
   try {
     const parsed = JSON.parse(text);
@@ -227,7 +228,7 @@ http
       } catch {
         return send(res, 400, 'invalid json');
       }
-      const browserCalls = msgs.filter(m => m?.method === 'tools/call' && isBrowserTool(m.params?.name));
+      const browserCalls = msgs.filter(m => m?.method === 'tools/call' && (isBrowserTool(m.params?.name) || isCamofoxTool(m.params?.name)));
       if (browserCalls.length) {
         if (msgs.length !== 1)
           return sendJson(
@@ -238,7 +239,11 @@ http
           verdict = checkRequest(m, ALLOWED_TOOLS);
         if (verdict.error) return sendJson(res, rpcErrorMsg(m.id, verdict.error));
         if (verdict.toolError) return sendJson(res, rpcToolError(m.id, verdict.toolError));
-        const result = await callBrowserTool(BROWSER_SERVICE_URL, m.params?.name, m.params?.arguments ?? {});
+        const urlCheck = isCamofoxTool(m.params?.name) ? await urlSafetyReason(m.params) : null;
+        if (urlCheck) return sendJson(res, rpcToolError(m.id, urlCheck));
+        const result = isCamofoxTool(m.params?.name)
+          ? await callCamofoxTool(m.params?.arguments ?? {})
+          : await callBrowserTool(BROWSER_SERVICE_URL, m.params?.name, m.params?.arguments ?? {});
         return sendJson(res, { jsonrpc: '2.0', id: m.id ?? null, result });
       }
       let needsRewrite = false;

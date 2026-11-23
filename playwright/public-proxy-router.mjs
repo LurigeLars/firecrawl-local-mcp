@@ -9,7 +9,7 @@ const PORT = Number(process.env.PORT || 3000);
 const DEFAULT_PROXY_ATTEMPTS = Math.min(5, Math.max(1, Number(process.env.PUBLIC_PROXY_ATTEMPTS || 3)));
 const DEFAULT_METRICS_PATH = process.env.PUBLIC_PROXY_METRICS_PATH || '';
 const DEFAULT_PROXY_HOSTS = new Set(
-  String(process.env.PUBLIC_PROXY_HOSTS || 'curemydisease.com')
+  String(process.env.PUBLIC_PROXY_HOSTS || 'curemydisease.com,5e.tools')
     .split(',')
     .map(x => x.trim().toLowerCase())
     .filter(Boolean),
@@ -159,6 +159,23 @@ function targetStatus(response) {
   }
 }
 
+// The target can return HTTP 200 for a bot gate or unrendered SPA shell.
+// Restrict heuristic fallback to explicit public research hosts to avoid false positives.
+function challengeResponse(response, hostname) {
+  try {
+    const data = JSON.parse(response.body.toString('utf8'));
+    const status = Number(data?.pageStatusCode);
+    if (status === 403 || status === 429) return true;
+    if (status !== 200) return false;
+    const html = String(data?.html || data?.content || data?.text || '');
+    if (/Just a moment|verify you are human|cf-challenge|attention required.*cloudflare/i.test(html)) return true;
+    if (hostname === '5e.tools' || hostname.endsWith('.5e.tools')) {
+      return /Loading\.\.\./i.test(html) && !/Brimstone Hold|Fire and Darkness|Book of Vile Darkness/i.test(html);
+    }
+  } catch { /* malformed upstream responses are not silently reclassified */ }
+  return false;
+}
+
 function sendBuffered(res, upstreamResponse, extraHeaders = {}) {
   const headers = { ...upstreamResponse.headers, ...extraHeaders };
   delete headers['content-length'];
@@ -240,7 +257,7 @@ export function createServer({
       try {
         const direct = await requestJson(directUpstream, body);
         const status = targetStatus(direct);
-        const directBlocked = status === 403 || status === 429;
+        const directBlocked = status === 403 || status === 429 || (classification.eligible && challengeResponse(direct, new URL(body.url).hostname));
 
         if (directBlocked) increment(metrics, 'direct_blocked');
         else if (status !== null && status >= 200 && status < 400) increment(metrics, 'direct_success');
@@ -255,10 +272,10 @@ export function createServer({
             attempts += 1;
             increment(metrics, 'proxy_attempts');
             proxiedStatus = targetStatus(proxied);
-            if (proxiedStatus !== 403 && proxiedStatus !== 429) break;
+            if (!challengeResponse(proxied, new URL(body.url).hostname) && proxiedStatus !== 403 && proxiedStatus !== 429) break;
           }
 
-          if (proxiedStatus === 403 || proxiedStatus === 429) increment(metrics, 'proxy_exhausted');
+          if (proxiedStatus === 403 || proxiedStatus === 429 || challengeResponse(proxied, new URL(body.url).hostname)) increment(metrics, 'proxy_exhausted');
           else increment(metrics, 'proxy_success');
 
           commitMetrics(startedAtMs);

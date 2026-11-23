@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseAllowedTools, rememberCrawlRequest, rewriteResponse } from './policy.mjs';
+import { parseAllowedTools, rememberCrawlRequest, rewriteResponse, urlSafetyReason } from './policy.mjs';
 
 const allowedTools = parseAllowedTools();
 
@@ -128,4 +128,11 @@ test('non-crawl calls are not tracked', () => {
     params: { name: 'firecrawl_scrape', arguments: { url: 'https://example.com' } },
   }, requests), false);
   assert.equal(requests.size, 0);
+});
+
+
+test('new Camoufox read tool uses same public URL/private IP safety validation', async () => {
+  assert.match(await urlSafetyReason({ name: 'firecrawl_camofox_read', arguments: { url: 'http://127.0.0.1:9377/health' } }), /Private or local network/);
+  assert.match(await urlSafetyReason({ name: 'firecrawl_camofox_read', arguments: { url: 'http://localhost/' } }), /Private or local network/);
+  assert.match(await urlSafetyReason({ name: 'firecrawl_camofox_read', arguments: { url: 'https://u:p@5e.tools/adventure.html' } }), /credentials/);
 });
