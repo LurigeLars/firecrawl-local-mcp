@@ -626,12 +626,16 @@ function Assert-StatefulComposeDataSafety {
             # A Compose tag bump must not implicitly migrate persisted broker
             # state on routine 'up' / 'redeploy'. An offline, verified backup,
             # feature flag review and scoped migration are required separately.
-            $RunningRabbitImage = @(& docker inspect --format '{{.Config.Image}}' $Container)
-            if ($LASTEXITCODE -ne 0 -or $RunningRabbitImage.Count -ne 1) {
-                throw 'RabbitMQ running image cannot be verified; blocking whole-stack upgrade.'
+            $RabbitTarget = ([string](& docker @compose config --images rabbitmq)).Trim()
+            if ($LASTEXITCODE -ne 0 -or $RabbitTarget -cnotmatch '^rabbitmq:[0-9]+\.[0-9]+\.[0-9]+-management-alpine$') {
+                throw 'RabbitMQ Compose image cannot be verified; blocking whole-stack upgrade.'
             }
-            if ([string]$RunningRabbitImage[0] -cne 'rabbitmq:4.4.0-management-alpine') {
-                throw 'RabbitMQ 4.4 migration pending. Use a reviewed, backed-up single-service upgrade; whole-stack Compose is blocked.'
+            $RunningRabbitImage = [string](& docker inspect --format '{{.Config.Image}}|{{.Image}}' $Container)
+            if ($LASTEXITCODE -ne 0) { throw 'RabbitMQ running image cannot be verified; blocking whole-stack upgrade.' }
+            $RabbitTargetId = [string](& docker image inspect --format '{{.Id}}' $RabbitTarget)
+            if ($LASTEXITCODE -ne 0 -or $RabbitTargetId -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+                $RunningRabbitImage -cne "$RabbitTarget|$RabbitTargetId") {
+                throw 'RabbitMQ image change pending. Use a reviewed, backed-up single-service upgrade; whole-stack Compose is blocked.'
             }
         }
     }
