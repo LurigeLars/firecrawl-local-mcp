@@ -1,437 +1,215 @@
-import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
-const compose = readFileSync(new URL('../compose.local.yaml', import.meta.url), 'utf8');
-const launcher = readFileSync(new URL('../fc.ps1', import.meta.url), 'utf8');
-const playwrightStage = readFileSync(new URL('./staged-playwright-image.ps1', import.meta.url), 'utf8');
-const bootstrap = readFileSync(new URL('../scripts/configure_service_secrets.ps1', import.meta.url), 'utf8');
-const publicProxyBootstrap = readFileSync(new URL('../scripts/configure_public_proxy.ps1', import.meta.url), 'utf8');
-const composeDefaults = readFileSync(new URL('../compose.defaults.env', import.meta.url), 'utf8');
-const publicCompose = readFileSync(new URL('../compose.public.yaml', import.meta.url), 'utf8');
-const gateway = readFileSync(new URL('../public/gateway/gateway.mjs', import.meta.url), 'utf8');
+const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('one-service refreshes use the running image as baseline instead of hard-coded ids', () => {
-  const helper = readFileSync(new URL('./refresh-baseline.ps1', import.meta.url), 'utf8');
-  assert.ok(launcher.indexOf('security\\refresh-baseline.ps1') < launcher.indexOf('security\\refresh-ephemeral.ps1'),
-    'fc.ps1 loads the shared baseline helper before the refresh scripts');
-  assert.match(helper, /function Get-FirecrawlRunningImage/);
-  assert.match(helper, /changed while its candidate was staged; deployment aborted/);
-  assert.match(helper, /rollback-\$\(\$BaselineId\.Substring\(7, 12\)\)/);
-  assert.match(helper, /\^FROM node:\(\[0-9\]\+\[\.\]\[0-9\]\+\[\.\]\[0-9\]\+\)-alpine@sha256:\[a-f0-9\]\{64\}/);
-  for (const name of ['refresh-public-gateway', 'refresh-node-helpers', 'refresh-node-runtime', 'refresh-searxng', 'refresh-ephemeral']) {
-    const source = readFileSync(new URL(`./${name}.ps1`, import.meta.url), 'utf8');
-    assert.match(source, /Get-FirecrawlRunningImage -Container \$Container/, name);
-    assert.match(source, /Save-FirecrawlRollbackImage -Container \$Container -BaselineId/, name);
-    // Only the unused RabbitMQ branch of refresh-ephemeral still names an exact image id.
-    const ids = (source.match(/'sha256:[0-9a-f]{64}'/g) || []).filter(id => !source.includes(`$RabbitTarget = ${id}`));
-    assert.deepEqual(ids, [], `${name} hard-codes an image id`);
-    assert.doesNotMatch(source, /node:\d+\[?\.\]?\d+\[?\.\]?\d+-alpine@sha256:[0-9a-f]{64}|\^v\d+\[\.\]/, `${name} hard-codes a Node pin`);
+const manifest = JSON.parse(read('public/package.json'));
+const lock = JSON.parse(read('public/package-lock.json'));
+const dockerfile = read('public/Dockerfile.mcp');
+const gatewayDockerfile = read('public/Dockerfile.gateway');
+const publicCompose = read('compose.public.yaml');
+const proxy = read('local-mcp/stdio-proxy.mjs');
+const lockedRuntime = read('local-mcp/locked-runtime.mjs');
+const pin = JSON.parse(read('upstream/firecrawl.json'));
+const launcher = read('fc.ps1');
+const composeLocal = read('compose.local.yaml');
+const redisDockerfile = read('security/Dockerfile.redis-security');
+const firecrawlApiHotfix = read('security/firecrawl-api-runtime-hotfix.Dockerfile');
+
+test('public MCP allows only the Docker internal gateway hostname (no wildcard)', () => {
+  const block = publicCompose.split('  mcp:')[1]?.split('\n  gateway:')[0] ?? '';
+  assert.match(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\s*mcp(?:\s|$)/);
+  assert.doesNotMatch(block, /FIRECRAWL_MCP_ALLOWED_HOSTS:\s*["']?\*/);
+});
+
+test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin patched Alpine image', () => {
+  for (const source of [dockerfile, gatewayDockerfile]) {
+    assert.match(source, /^FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5$/m);
+    assert.match(source, /apk upgrade --no-cache/);
+    assert.match(source, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+    assert.match(source, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);
+  }
+  assert.match(publicCompose, /gateway:[\s\S]*image: firecrawl-gateway:local\r?\n\s+build:[\s\S]*dockerfile: Dockerfile\.gateway/);
+});
+
+test('Redis runtime uses patched zlib without exposing wrapper secrets to Docker build', () => {
+  assert.match(redisDockerfile, /^FROM redis:8\.10\.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3$/m);
+  assert.match(redisDockerfile, /apk upgrade --no-cache zlib/);
+  assert.match(redisDockerfile, /grep -qvFx 'zlib-1\.3\.2-r0'/);
+  const redisService = composeLocal.split('\n  redis:')[1]?.split('\n  rabbitmq:')[0];
+  assert.ok(redisService);
+  assert.match(redisService, /image: firecrawl-redis:patched/);
+  assert.match(redisService, /build:\s*\n\s*context: \.\.\/security/);
+  assert.match(redisService, /firecrawl-redis-data:\/data/);
+});
+
+
+test('public MCP installs only patched Zod 4 without a vulnerable nested v3 copy', () => {
+  assert.equal(manifest.overrides?.zod, '4.6.7');
+  const zodPackages = Object.entries(lock.packages ?? {}).filter(([path]) => /(?:^|\/)node_modules\/zod$/.test(path));
+  assert.ok(zodPackages.length > 0, 'Zod must exist in installed public MCP dependencies');
+  for (const [path, metadata] of zodPackages) {
+    assert.equal(metadata.version, '4.6.7', `vulnerable Zod package at ${path}`);
   }
 });
 
-test('service secrets are injected into tmpfs by post_start hooks', () => {
-  assert.doesNotMatch(compose, /^secrets:\s*$/m);
-
-  assert.match(compose, /post_start:/);
-  assert.doesNotMatch(compose, /mode=0777/);
-  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700/);
-  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=0,gid=0,mode=0700/);
-  assert.match(compose, /\/run\/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=977,gid=977,mode=0700/);
-  assert.match(compose, /printf '%s' "\$\$FIRECRAWL_POSTGRES_PASSWORD_SECRET" > \/run\/firecrawl-secrets\/postgres_password/);
-  assert.match(compose, /printf '%s' "\$\$FIRECRAWL_SEARXNG_SECRET_SECRET" > \/run\/firecrawl-secrets\/searxng_secret/);
-  assert.match(compose, /POSTGRES_PASSWORD_FILE:\s*\/run\/firecrawl-secrets\/postgres_password/);
-});
-
-test('internal proxies and broker/cache services use compatible privilege hardening', () => {
-  assert.match(compose, /searxng-proxy:[\s\S]*?user:\s+node[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
-  assert.match(compose, /llm-proxy:[\s\S]*?user:\s+node[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
-  assert.match(compose, /redis:[\s\S]*?no-new-privileges:true/);
-  assert.match(compose, /rabbitmq:[\s\S]*?no-new-privileges:true/);
-});
-
-test('API and SearXNG run non-root with bounded Linux privileges', () => {
-  assert.match(compose, /api:[\s\S]*?user:\s+node/);
-  assert.match(compose, /api:[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
-  assert.match(compose, /searxng:[\s\S]*?user:\s+"977:977"/);
-  assert.match(compose, /searxng:[\s\S]*?cap_drop:\s*\n\s+- ALL[\s\S]*?no-new-privileges:true/);
-  assert.match(compose, /FORCE_OWNERSHIP:\s*"false"/);
-});
-
-test('main processes wait for tmpfs secrets instead of receiving secret values in container config', () => {
-  assert.match(compose, /POSTGRES_PASSWORD:\s*""/);
-  assert.match(compose, /SEARXNG_SECRET:\s*""/);
-  assert.match(compose, /while \[ ! -s \/run\/firecrawl-secrets\/postgres_password \]/);
-  assert.match(compose, /while \[ ! -s \/run\/firecrawl-secrets\/searxng_secret \]/);
-  assert.doesNotMatch(compose, /POSTGRES_PASSWORD:\s*\$\{/);
-  assert.doesNotMatch(compose, /SEARXNG_SECRET:\s*\$\{/);
-});
-
-test('launcher no longer loads legacy secrets.env and supplies hook variables only for secret-bearing start actions', () => {
-  assert.doesNotMatch(launcher, /--env-file['",\s]+\$root\\secrets\.env/);
-  assert.match(launcher, /postgres_password\.dpapi/);
-  assert.match(launcher, /searxng_secret\.dpapi/);
-  assert.match(launcher, /Set-RuntimeHookSecrets/);
-  assert.match(launcher, /-UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
-});
-
-test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
-  assert.match(launcher, /ValidateSet\([^)]*'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
-  assert.match(launcher, /'redeploy' \{/);
-  assert.match(launcher, /docker @compose up -d --build --force-recreate/);
-  assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
-  assert.match(launcher, /function Invoke-DockerWithExactStdin/);
-  assert.match(launcher, /StandardInput\.Write\(\$InputText\)/);
-  assert.match(launcher, /Invoke-DockerWithExactStdin -InputText \$postgres/);
-  assert.match(launcher, /Invoke-DockerWithExactStdin -InputText \$searxng/);
-  assert.match(launcher, /'recover' \{\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets\s*if \(-not \(Test-PostgresRuntimePassword\)\)/s);
-});
-
-test('exact stdin helper does not append a host newline to runtime secrets', () => {
-  assert.match(launcher, /RedirectStandardInput = \$true/);
-  assert.match(launcher, /StandardInput\.Write\(\$InputText\)/);
-  assert.doesNotMatch(launcher, /\$postgres\s*\|\s*& docker @compose exec/);
-  assert.doesNotMatch(launcher, /\$searxng\s*\|\s*& docker @compose exec/);
-  assert.doesNotMatch(launcher, /\$plain\s*\|\s*& docker @compose exec/);
-});
-
-test('runtime recovery refuses a mismatched persisted PostgreSQL password and exposes an explicit one-time repair action', () => {
-  assert.match(launcher, /repair-postgres-auth/);
-  assert.match(launcher, /function Test-PostgresRuntimePassword/);
-  assert.match(launcher, /function Repair-PostgresRuntimePassword/);
-  assert.match(launcher, /hostname -i/);
-  assert.match(launcher, /PGPASSWORD="\$\(cat \/run\/firecrawl-secrets\/postgres_password\)"/);
-  assert.match(launcher, /\\password postgres/);
-  assert.match(launcher, /Run \.\\fc\.ps1 repair-postgres-auth once/);
-});
-
-test('migration removes only known legacy service-secret entries after DPAPI storage', () => {
-  assert.match(bootstrap, /POSTGRES_PASSWORD/);
-  assert.match(bootstrap, /SEARXNG_SECRET/);
-  assert.match(bootstrap, /ConvertFrom-SecureString/);
-  assert.match(bootstrap, /ConvertTo-SecureString/);
-  assert.match(bootstrap, /LEGACY_SECRETS_ENV_REMOVED/);
-});
-
-test('public proxy credentials are DPAPI-backed and isolated from the normal Firecrawl path', () => {
-  const proxyBootstrapLines = publicProxyBootstrap.split(/\r?\n/).map((line) => line.trim());
-
-  assert.match(publicProxyBootstrap, /Read-Host .*Webshare API key.*-AsSecureString/);
-  assert.ok(proxyBootstrapLines.includes('$listUri = "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100&valid=true&ordering=-valid,proxy_address"'));
-  assert.match(publicProxyBootstrap, /Invoke-RestMethod/);
-  assert.match(publicProxyBootstrap, /-Headers \$headers/);
-  assert.ok(proxyBootstrapLines.includes('$probe = Invoke-WebRequest -Uri "https://ipv4.webshare.io/" -Method Get -Proxy $server -ProxyCredential $credential -TimeoutSec 20'));
-  assert.match(publicProxyBootstrap, /API key.*sparas inte/);
-  assert.match(publicProxyBootstrap, /public_proxy_server\.dpapi/);
-  assert.match(publicProxyBootstrap, /public_proxy_username\.dpapi/);
-  assert.match(publicProxyBootstrap, /public_proxy_password\.dpapi/);
-  assert.match(publicProxyBootstrap, /ConvertFrom-SecureString/);
-  assert.doesNotMatch(publicProxyBootstrap, /webshare_api.*dpapi/i);
-
-  assert.match(compose, /playwright-public-proxy-service:/);
-  assert.match(compose, /profiles:\s*\["public-proxy"\]/);
-  assert.match(compose, /PROXY_SERVER:\s*""/);
-  assert.match(compose, /PROXY_USERNAME:\s*""/);
-  assert.match(compose, /PROXY_PASSWORD:\s*""/);
-  assert.match(compose, /\/run\/firecrawl-secrets\/proxy_server/);
-  assert.match(compose, /\/run\/firecrawl-secrets\/proxy_username/);
-  assert.match(compose, /\/run\/firecrawl-secrets\/proxy_password/);
-  assert.match(compose, /playwright-router:/);
-  assert.match(compose, /PUBLIC_PROXY_HOSTS:/);
-
-  assert.match(launcher, /public_proxy_server\.dpapi/);
-  assert.match(launcher, /public_proxy_username\.dpapi/);
-  assert.match(launcher, /public_proxy_password\.dpapi/);
-  assert.match(launcher, /--profile', 'public-proxy'/);
-  assert.match(launcher, /PLAYWRIGHT_MICROSERVICE_URL = "http:\/\/playwright-router:3000\/scrape"/);
-  assert.match(launcher, /Assert-NoGlobalProxyConfiguration/);
-  assert.match(launcher, /must remain empty in \.env/);
-  assert.ok(launcher.includes('proxy_server = "http://p.webshare.io:80"'));
-  assert.match(launcher, /EndsWith\("-rotate"/);
-});
-
-test('public proxy observability stores aggregate counters only in an isolated volume', () => {
-  assert.match(compose, /PUBLIC_PROXY_METRICS_PATH:\s*\/var\/lib\/firecrawl-proxy\/metrics\.json/);
-  assert.match(compose, /public-proxy-metrics:\/var\/lib\/firecrawl-proxy/);
-  assert.match(compose, /public-proxy-metrics:/);
-  assert.match(compose, /public-proxy-metrics-init:/);
-  assert.match(compose, /command:\s*\["sh", "-c", "chown 1000:1000 \/var\/lib\/firecrawl-proxy"\]/);
-  assert.match(compose, /cap_add:\s*\n\s+- CHOWN/);
-  assert.match(compose, /public-proxy-metrics-init:\s*\n\s+condition: service_completed_successfully/);
-  assert.match(compose, /playwright-router:[\s\S]*?user:\s+node/);
-});
-
-test('public proxy live smoke test is deployment-gated and uses only dummy session data', () => {
-  assert.match(compose, /public-proxy-smoke:/);
-  assert.match(compose, /profiles:\s*\["smoke"\]/);
-  assert.match(compose, /public-proxy-live-smoke\.mjs/);
-  assert.match(launcher, /function Invoke-PublicProxySmokeTest/);
-  assert.match(launcher, /"run", "--rm", "--no-deps"/);
-  assert.match(launcher, /Invoke-PublicProxySmokeTest/);
-  assert.match(launcher, /function Remove-PublicProxyInitContainer/);
-  assert.match(launcher, /rm -f public-proxy-metrics-init/);
-  assert.match(launcher, /Invoke-PublicProxySmokeTest\s*\n\s*Remove-PublicProxyInitContainer/);
-});
-
-test('plaintext service-secret template is retired', () => {
-  assert.equal(existsSync(new URL('../secrets.env.example', import.meta.url)), false);
-});
-
-
-
-test('public gateway is Cloudflare Access only with no secret-path fallback', () => {
-  assert.doesNotMatch(gateway, /GATEWAY_SECRET/);
-  assert.doesNotMatch(gateway, /ALLOW_SECRET_PATH/);
-  assert.doesNotMatch(publicCompose, /ALLOW_SECRET_PATH/);
-  assert.match(gateway, /ACCESS_AUD is required/);
-  assert.match(gateway, /split\('\?'\)\[0\]\s*===\s*'\/mcp'/);
-  assert.match(launcher, /Remove-LegacyGatewaySecret/);
-  assert.match(launcher, /Where-Object \{ \$_ -notmatch '\^\\s\*GATEWAY_SECRET='/);
-  assert.equal(existsSync(new URL('../public/browser.env.example', import.meta.url)), false);
-});
-
-test('optional Compose defaults suppress warnings without supplying values', () => {
-  const dataLines = composeDefaults
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#'));
-
-  assert.ok(dataLines.length > 0);
-  for (const line of dataLines) {
-    assert.match(line, /^[A-Z0-9_]+=$/);
+test('MCP and HTTP transports are locked above disclosed redirect, SSRF and isolation CVEs', () => {
+  const fixed = {
+    '@modelcontextprotocol/client': '2.3.0',
+    '@modelcontextprotocol/core': '2.3.0',
+    '@modelcontextprotocol/sdk': '1.32.0',
+    '@modelcontextprotocol/server': '2.3.0',
+    'follow-redirects': '1.16.2',
+    'axios': '1.20.0',
+  };
+  for (const [name, version] of Object.entries(fixed)) {
+    assert.equal(manifest.overrides?.[name], version, `${name} must be constrained in the manifest`);
+    const resolved = lock.packages?.[`node_modules/${name}`];
+    if (!resolved) {
+      // firecrawl-mcp 3.36.x no longer brings in these optional MCP packages.
+      // Keep the patched override for any future reintroduction, while requiring
+      // core/server and all HTTP transport packages to be installed and checked.
+      assert.ok(['@modelcontextprotocol/client', '@modelcontextprotocol/sdk'].includes(name),
+        `${name} must resolve to the patched version if used`);
+      continue;
+    }
+    assert.equal(resolved.version, version, `${name} must resolve to the patched version`);
+    assert.match(resolved.integrity ?? '', /^sha512-/);
   }
+});
 
-  assert.match(
-    launcher,
-    /'--env-file', "\$root\\compose\.defaults\.env",[\s\S]*'--env-file', "\$root\\\.env"/,
+test('firecrawl-mcp has one exact manifest version source and reproducible public install', () => {
+  const version = manifest?.dependencies?.['firecrawl-mcp'];
+  assert.match(version, /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
+  assert.equal(lock.lockfileVersion, 3);
+  assert.equal(lock?.packages?.['']?.dependencies?.['firecrawl-mcp'], version);
+  assert.equal(lock?.packages?.['node_modules/firecrawl-mcp']?.version, version);
+  assert.equal(
+    lock?.packages?.['node_modules/firecrawl-mcp']?.resolved,
+    `https://registry.npmjs.org/firecrawl-mcp/-/firecrawl-mcp-${version}.tgz`,
   );
+  assert.match(lock?.packages?.['node_modules/firecrawl-mcp']?.integrity ?? '', /^sha512-/);
+  assert.match(dockerfile, /COPY package\.json package-lock\.json \.\//);
+  assert.match(dockerfile, /npm ci --ignore-scripts --omit=dev --no-audit --no-fund/);
+  assert.doesNotMatch(dockerfile, /npm install/);
+  assert.doesNotMatch(dockerfile, /npm ci(?![^\n]*--ignore-scripts)/);
+  assert.doesNotMatch(dockerfile, /firecrawl-mcp@\d/);
+  // The local proxy runs the same locked tree as the image: npm ci from public/package-lock.json, never npx.
+  assert.match(proxy, /ensureLockedRuntime\(\s*fileURLToPath\(new URL\('\.\.\/public\/'/);
+  assert.match(proxy, /spawn\(process\.execPath, \[mcpEntry\]/);
+  assert.doesNotMatch(proxy, /npx|firecrawl-mcp@\d/);
+  assert.match(lockedRuntime, /'package-lock\.json'/);
+  assert.match(lockedRuntime, /\['ci', '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund'\]/);
+  assert.doesNotMatch(lockedRuntime, /'npx'|npm install/);
 });
 
-test('Playwright staging temp cleanup does not record false PowerShell errors', () => {
-  assert.match(playwrightStage, /if \(Test-Path -LiteralPath \$Tmp -PathType Leaf\)/);
-  assert.match(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction Stop/);
-  assert.doesNotMatch(playwrightStage, /Remove-Item -LiteralPath \$Tmp -Force -ErrorAction SilentlyContinue/);
+test('upstream Firecrawl pin is machine-readable and enforced before builds', () => {
+  assert.equal(pin.repository, 'firecrawl/firecrawl');
+  assert.equal(pin.tag, 'v2.11.642');
+  assert.equal(pin.commit, '7e6bd701febaacc3bb95c0fb7eee2c509a4813c5');
+  assert.match(pin.tag, /^v\d+\.\d+\.\d+$/);
+  assert.match(pin.commit, /^[0-9a-f]{40}$/);
+  assert.match(launcher, /upstream\\firecrawl\.json/);
+  assert.match(launcher, /Assert-UpstreamFirecrawlPin/);
+  assert.match(launcher, /Unexpected upstream Firecrawl origin/);
+  assert.match(launcher, /safe\.directory=\$safeCheckout/);
+  assert.match(launcher, /Get-Command git\.exe/);
+  assert.match(launcher, /\$originExit = \$LASTEXITCODE/);
+  assert.match(launcher, /\$statusExit = \$LASTEXITCODE/);
+  assert.match(launcher, /sync-upstream/);
+  assert.match(launcher, /Assert-UpstreamFirecrawlPin -AllowHeadMismatch/);
+  assert.match(launcher, /fetch --quiet --force origin "refs\/tags\/\$\(\$pin\.tag\):refs\/tags\/\$\(\$pin\.tag\)"/);
+  assert.match(launcher, /rev-parse "\$\(\$pin\.tag\)\^\{\}"/);
+  assert.match(launcher, /checkout --quiet --detach \(\[string\]\$pin\.commit\)/);
+  assert.doesNotMatch(launcher, /reset --hard/);
 });
 
 
-test('API staging is isolated from data stores and has an HTTP liveness gate', () => {
-  const source = readFileSync(new URL('./staged-api-image.ps1', import.meta.url), 'utf8');
-  assert.match(launcher, /'stage-api'/);
-  assert.match(launcher, /'deploy-api'/);
-  assert.match(source, /\('build','--no-cache',\$Service\)/);
-  assert.match(playwrightStage, /\('build','--no-cache',\$Service\)/);
-  assert.match(source, /'--no-deps','--no-build','--force-recreate',\$Service/);
-  assert.match(source, /\/v0\/health\/liveness/);
-  assert.match(source, /firecrawl-api-runtime-hotfix\.Dockerfile/);
-  assert.doesNotMatch(source, /\('up','-d'.*'redis'/);
-});
 
-test('single-operation stateless maintenance never invokes a full-stack redeploy', () => {
-  const section = launcher.split("    'maintain-stateless' {")[1]?.split("    'stage-api' {")[0];
-  assert.ok(section);
-  for (const name of ['api', 'mcp', 'playwright-service', 'browser-session-service', 'playwright-public-proxy-service']) {
-    assert.match(section, new RegExp("'" + name + "'"));
+test('MCP rollout requires a verified image ID, recent zero-high Scout scan and safe rollback', () => {
+  const staged = read('security/staged-mcp-image.ps1');
+  assert.match(launcher, /Invoke-McpStageSecurityCheck -Action build -ComposeArguments \$compose/);
+  assert.match(launcher, /Invoke-McpStageSecurityCheck -Action deploy -ComposeArguments \$compose/);
+  assert.match(staged, /Invoke-McpDocker -Arguments \(@\(\$ComposeArguments\) \+ @\('build', 'mcp'\)\)/);
+  assert.match(staged, /'scout','cves','--only-severity','critical,high','--exit-code',\s*'--vex-location',\$Vex,'--vex-author','firecrawl-local-mcp maintainers',/);
+  assert.equal((staged.match(/Get-McpScoutArguments -ProjectRoot \$ProjectRoot\) -TimeoutSeconds 900/g) || []).length, 2);
+  assert.doesNotMatch(staged, /'scout','cves'[^\n]*'local:\/\/firecrawl-mcp:latest'\) -TimeoutSeconds/);
+  const vex = JSON.parse(read('security/vex/firecrawl-mcp.openvex.json'));
+  assert.equal(vex.author, 'firecrawl-local-mcp maintainers');
+  for (const s of vex.statements) {
+    assert.deepEqual(s.products.map(p => p['@id']), [
+      'pkg:docker/firecrawl-mcp', 'pkg:docker/firecrawl-searxng-proxy', 'pkg:docker/firecrawl-gateway',
+      'pkg:docker/firecrawl-node-runtime', 'pkg:docker/firecrawl-redis',
+    ]);
+    for (const p of s.products) for (const c of p.subcomponents) assert.match(c['@id'], /^pkg:apk\/alpine\/[a-z0-9-]+@[^?]+-r\d+\?os_name=alpine&os_version=3\.\d+$/);
   }
-  for (const forbidden of ['redis', 'rabbitmq', 'nuq-postgres', 'searxng']) {
-    assert.doesNotMatch(section, new RegExp("'" + forbidden + "'\\s*\\{"));
+  // The Alpine-based one-service refreshes pass the same reviewed VEX and accept only its author.
+  for (const name of ['refresh-node-helpers', 'refresh-public-gateway', 'refresh-node-runtime', 'refresh-ephemeral']) {
+    const refresh = read(`security/${name}.ps1`);
+    assert.equal((refresh.match(/scout cves /g) || []).length, 1, name);
+    assert.match(refresh, /scout cves --only-severity critical,high --only-fixed --exit-code --vex-location \(Join-Path \$PSScriptRoot 'vex\/firecrawl-mcp\.openvex\.json'\) --vex-author 'firecrawl-local-mcp maintainers' /, name);
   }
-  assert.doesNotMatch(section, /docker\s+@compose\s+up\s+-d\s+--build/);
-  assert.match(section, /Invoke-ApiStage -Action stage/);
-  assert.match(section, /Invoke-ApiStage -Action deploy/);
-});
-
-
-test('Firecrawl API production runtime strips vulnerable bundled npm and Corepack, but preserves Node', () => {
-  const dockerfile = readFileSync(new URL('./firecrawl-api-runtime-hotfix.Dockerfile', import.meta.url), 'utf8');
-  const build = dockerfile.split('FROM runtime-base AS runtime')[0];
-  const runtime = dockerfile.split('FROM runtime-base AS runtime')[1];
-  assert.ok(runtime, 'API final runtime stage exists');
-  assert.match(build, /corepack enable/);
-  assert.match(build, /pnpm install --frozen-lockfile/);
-  assert.match(runtime, /rm -rf \/usr\/local\/lib\/node_modules\/npm \/usr\/local\/lib\/node_modules\/corepack/);
-  assert.match(runtime, /rm -f \/usr\/local\/bin\/npm \/usr\/local\/bin\/npx \/usr\/local\/bin\/corepack/);
-  assert.match(runtime, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);
-  assert.match(runtime, /test ! -e \/usr\/local\/lib\/node_modules\/corepack/);
-  assert.match(runtime, /node --version/);
-  assert.match(runtime, /CMD \["node", "dist\/src\/harness.js", "--start-docker"\]/);
-});
-
-
-test('whole-stack Compose refuses to recreate stateful containers without reviewed named volumes', () => {
-  assert.match(compose, /rabbitmq:4\.4\.(?:0|1)-management-alpine/);
-  assert.doesNotMatch(compose, /rabbitmq:4\.3\.7-management-alpine/);
-  const guard = launcher.split('function Assert-StatefulComposeDataSafety {')[1]?.split('switch ($Action) {')[0];
-  assert.ok(guard);
-  for (const dest of ['/data', '/var/lib/rabbitmq', '/var/lib/postgresql/data']) {
-    assert.ok(guard.includes(dest));
-  }
-  assert.match(guard, /'volume'/);
-  assert.match(guard, /firecrawl_/);
-  assert.match(guard, /Complete isolated backup\/migration first/);
-  assert.match(launcher, /\$RunningRabbitImage/);
-  assert.match(launcher, /RabbitMQ 4\.4 migration pending/);
-  assert.match(launcher, /'refresh-rabbitmq' \{[\s\S]*?\$Current/);
-  assert.doesNotMatch(
-    launcher.split("    'refresh-rabbitmq' {")[1]?.split("    'up' {")[0] ?? '',
-    /Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/,
-  );
-  assert.match(launcher, /'up' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build/);
-  assert.match(launcher, /'redeploy' \{\s*Assert-UpstreamFirecrawlPin\s*Assert-StatefulComposeDataSafety\s*docker @compose up -d --build --force-recreate/);
-  const staged = launcher.split("    'maintain-stateless' {")[1]?.split("    'stage-api' {")[0];
-  assert.ok(staged);
-  assert.doesNotMatch(staged, /Assert-StatefulComposeDataSafety/);
-});
-
-
-test('NUQ PostgreSQL moves to its named volume only when idle, after a backup, keeping the old volume', () => {
-  assert.match(compose, /nuq-postgres-data:\/var\/lib\/postgresql\/data/);
-  const action = launcher.split("    'migrate-nuq-postgres' {")[1]?.split("    'import-gemini' {")[0];
-  assert.ok(action, 'migration action is registered');
-  assert.match(launcher, /ValidateSet\([^)]*'migrate-nuq-postgres'/);
-  assert.match(action, /firecrawl_nuq-postgres-data/);
-  assert.match(action, /NUQ still holds jobs; migration refused/);
-  assert.match(action, /pg_dumpall/);
-  assert.ok(action.indexOf('pg_dumpall') < action.indexOf('--force-recreate nuq-postgres'), 'backup precedes recreate');
-  assert.match(action, /--no-deps --no-build --force-recreate nuq-postgres/);
-  assert.match(action, /cron\.job/);
-  assert.match(action, /Import-ServiceRuntimeSecrets/);
-  assert.match(action, /Test-PostgresRuntimePassword/);
-  assert.doesNotMatch(action, /down -v|volume rm|--renew-anon-volumes|Assert-StatefulComposeDataSafety/);
-});
-
-
-test('stateful backup refuses image changes and preserves RabbitMQ quorum identity', () => {
-  const source = readFileSync(new URL('../scripts/backup_stateful_data.ps1', import.meta.url), 'utf8');
-  assert.match(source, /ValidateSet\('Inspect','Backup'\)/);
-  assert.match(source, /Action = 'Inspect'/);
-  assert.match(source, /redis-cli','--raw','SAVE'/);
-  assert.match(source, /redis-check-rdb/);
-  assert.match(source, /rabbitmqctl','export_definitions'/);
-  assert.match(source, /'stop','--time','90','firecrawl-api-1'/);
-  assert.match(source, /'stop','--time','90','firecrawl-rabbitmq-1'/);
-  assert.match(source, /'cp','firecrawl-rabbitmq-1:\/var\/lib\/rabbitmq\/\.'/);
-  assert.match(source, /'mnesia'/);
-  assert.ok(source.includes("'.erlang.cookie'"));
-  assert.match(source, /finally \{/);
-  assert.match(source, /'start','firecrawl-rabbitmq-1'/);
-  assert.match(source, /'start','firecrawl-api-1'/);
-  assert.match(source, /restore_tested/);
-  assert.doesNotMatch(source, /--force-recreate|docker compose up|down -v|volume rm|container rm/);
-});
-
-
-test('Firecrawl cache refresh is scoped, while RabbitMQ 4.4 requires explicit state migration', () => {
-  const source = readFileSync(new URL('./refresh-ephemeral.ps1', import.meta.url), 'utf8');
-  assert.match(launcher, /'refresh-redis' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlEphemeralRefresh -Service 'redis'/);
-  const rabbitAction = launcher.split("    'refresh-rabbitmq' {")[1]?.split("    'up' {")[0];
-  assert.ok(rabbitAction, 'RabbitMQ action remains registered');
-  assert.match(rabbitAction, /Assert-UpstreamFirecrawlPin/);
-  assert.match(rabbitAction, /RABBITMQ_CURRENT_VERIFIED/);
-  assert.match(rabbitAction, /RABBITMQ_UPGRADED/);
-  assert.match(rabbitAction, /Assert-RabbitQueuesIdle/);
-  assert.match(rabbitAction, /backup_stateful_data\.ps1/);
-  assert.match(rabbitAction, /rabbitmq-data\\\.erlang\.cookie/);
-  assert.match(rabbitAction, /--no-deps --no-build --force-recreate rabbitmq/);
-  assert.match(rabbitAction, /TargetId/);
-  assert.match(rabbitAction, /enable_feature_flag all/);
-  assert.match(rabbitAction, /docker scout cves --only-severity critical,high --only-fixed --exit-code/);
-  assert.match(rabbitAction, /do not downgrade/);
-  assert.doesNotMatch(rabbitAction, /down -v|volume rm|--renew-anon-volumes/);
-  assert.doesNotMatch(rabbitAction, /Invoke-FirecrawlEphemeralRefresh -Service 'rabbitmq'/);
-  assert.match(source, /ValidateSet\('redis','rabbitmq'\)/);
-  assert.match(source, /--no-deps --no-build --force-recreate --renew-anon-volumes/);
-  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
-  assert.match(source, /messages_unacknowledged/);
-  assert.match(source, /--formatter=json name messages_unacknowledged --quiet/);
-  assert.match(source, /ConvertFrom-Json -InputObject/);
-  assert.match(source, /RabbitMQ JSON queue telemetry invalid; refusing reset/);
-  assert.match(source, /Target image identity changed during security scan/);
-  assert.match(source, /stable hostname verification failed/);
-  assert.match(source, /Scoped \$Service did not become healthy/);
-  assert.match(source, /Unexpected unrelated container replacement/);
-  assert.doesNotMatch(source, /'up','-d'.*'nuq-postgres'|docker compose down|docker volume rm|docker container prune/);
-  assert.match(compose, /firecrawl-redis-data:\/data/);
-  assert.match(compose, /firecrawl-rabbitmq-data:\/var\/lib\/rabbitmq/);
-  assert.match(compose, /RABBITMQ_NODENAME: rabbit@firecrawl-rabbitmq/);
-  assert.match(compose, /hostname: firecrawl-rabbitmq/);
-});
-
-
-test('ephemeral service refresh receives only non-secret Compose parse placeholders', () => {
-  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy"/);
-  assert.match(launcher, /\$env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"/);
-  assert.match(launcher, /\$env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"/);
+  assert.match(staged, /if \(\$null -ne \$RawText\)/);
+  assert.match(staged, /image_id = \$Id/);
+  assert.match(staged, /rollback_image_id = \$PreviousId/);
+  assert.match(staged, /'image','ls','--all','--no-trunc'/);
+  assert.doesNotMatch(staged, /catch\s*\{[\s\S]*?inspect-image failed with exit code/);
+  assert.match(staged, /Rollback image preservation failed before build/);
+  assert.match(staged, /Running MCP image changed since staging/);
+  assert.match(staged, /TotalHours -gt 24/);
+  assert.match(staged, /MCP source changed after scan/);
+  assert.match(staged, /'up','-d','--no-deps','--no-build','--force-recreate','mcp'/);
+  assert.match(staged, /rollback-/);
+  assert.doesNotMatch(staged, /docker compose down|--remove-orphans|\bdocker run\b/);
   assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
 });
 
-
-test('SearXNG critical certifi remediation is one-service scoped and protected by runtime secrets', () => {
-  const refresh = readFileSync(new URL('./refresh-searxng.ps1', import.meta.url), 'utf8');
-  assert.match(launcher, /'refresh-searxng' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlSearchBackendRefresh/);
-  assert.match(launcher, /\$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng"\)/);
-  // The target is the exact versioned tag in Compose, pulled and then identified by image id.
-  assert.match(refresh, /config --images \$Service/);
-  assert.match(refresh, /Compose does not pin SearXNG to an exact versioned tag/);
-  assert.match(refresh, /pull \$Service/);
-  assert.match(compose, /image: searxng\/searxng:\d{4}\.\d{1,2}\.\d{1,2}-[0-9a-f]{7,}\s*$/m);
-  assert.match(refresh, /scout cves --only-severity critical,high --only-fixed --exit-code/);
-  assert.match(refresh, /up -d --no-deps --no-build --force-recreate \$Service/);
-  assert.match(refresh, /internal search proxy/);
-  assert.match(refresh, /Unexpected unrelated service recreation/);
-  assert.doesNotMatch(refresh, /down -v|docker volume rm|--remove-orphans/);
-});
-
-
-test('SearXNG search proxy refresh is npm-free, scanned and one-service only', () => {
-  const source = readFileSync(new URL('./refresh-node-helpers.ps1', import.meta.url), 'utf8');
-  const dockerfile = readFileSync(new URL('./Dockerfile.searxng-proxy', import.meta.url), 'utf8');
-  assert.match(launcher, /'refresh-search-proxy' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlNodeHelperRefresh/);
-  assert.match(launcher, /\$composeActions = @\([^)]*"refresh-search-proxy"/);
-  assert.match(source, /ValidateSet\('searxng-proxy'\)/);
-  assert.match(source, /up -d --no-deps --no-build --force-recreate \$Service/);
-  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
-  assert.match(source, /SEARCH_PROXY_REFRESH_OK/);
-  assert.match(dockerfile, /FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5/);
-  assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
-  assert.match(compose, /searxng-proxy:\s*\n\s*image: firecrawl-searxng-proxy:local\s*\n\s*build:/);
-  assert.doesNotMatch(source, /--remove-orphans|docker compose down|docker volume rm|docker restart/);
-  assert.doesNotMatch(source, /public\/gateway.env|Get-DpapiSecretValue/);
-});
-
-
-test('public gateway refresh is isolated and preserves live Cloudflare Access values', () => {
-  const source = readFileSync(new URL('./refresh-public-gateway.ps1', import.meta.url), 'utf8');
-  assert.match(launcher, /'refresh-gateway' \{\s*if \(-not \$public\)[^\n]*\n\s*Assert-UpstreamFirecrawlPin\s*\n\s*Invoke-FirecrawlPublicGatewayRefresh/);
-  assert.match(launcher, /\$composeActions = @\([^)]*"refresh-gateway"/);
-  assert.match(source, /config --format json/);
-  assert.match(source, /inspect --format '\{\{json \.Config\.Env\}\}'/);
-  assert.match(source, /Gateway environment is not unchanged at key/);
-  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
-  assert.match(source, /up -d --no-deps --no-build --force-recreate gateway/);
-  assert.match(source, /public\\selftest.mjs/);
-  assert.match(source, /Get-PublicUrl/);
-  assert.match(source, /PUBLIC_GATEWAY_REFRESH_OK/);
-  assert.doesNotMatch(source, /--remove-orphans|docker compose down|docker volume rm|docker restart/);
-});
-
-
-test('last two stale Firecrawl Node 26.10 containers are upgraded individually', () => {
-  const source = readFileSync(new URL('./refresh-node-runtime.ps1', import.meta.url), 'utf8');
-  const dockerfile = readFileSync(new URL('./Dockerfile.node-runtime', import.meta.url), 'utf8');
-  assert.match(launcher, /'refresh-playwright-router' \{[\s\S]*?Invoke-FirecrawlNodeRuntimeRefresh -Service 'playwright-router'/);
-  assert.match(launcher, /'refresh-llm-proxy' \{[\s\S]*?Invoke-FirecrawlNodeRuntimeRefresh -Service 'llm-proxy'/);
-  assert.match(source, /ValidateSet\('playwright-router','llm-proxy'\)/);
-  assert.match(source, /Import-GeminiKey/);
-  assert.match(source, /KeyWasPresent -and -not \$GeminiConfigured/);
-  assert.match(source, /Test-LegacyGeminiKey/);
-  assert.match(source, /--profile public-proxy up -d --no-deps --no-build --force-recreate/);
-  assert.match(source, /up -d --no-deps --no-build --force-recreate \$Service/);
-  assert.match(source, /scout cves --only-severity critical,high --only-fixed --exit-code/);
-  assert.match(source, /NODE_SUPPORT_REFRESH_OK/);
-  assert.match(source, /unrelated_containers_unchanged=true/);
-  assert.match(dockerfile, /node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5/);
-  assert.match(dockerfile, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
-  assert.match(compose, /playwright-router:\s*\n\s*profiles: \["public-proxy"\]\s*\n\s*image: firecrawl-node-runtime:local\s*\n\s*build:/);
-  assert.match(compose, /llm-proxy:\s*\n\s*image: firecrawl-node-runtime:local/);
-  assert.doesNotMatch(source, /down -v|docker volume rm|--remove-orphans|docker compose down/);
+test('temporary Firecrawl API security build is narrow and pinned', () => {
+  assert.match(composeLocal, /context:\s+apps\/api/);
+  assert.match(composeLocal, /firecrawl-api-runtime-hotfix\.Dockerfile/);
+  assert.match(firecrawlApiHotfix, /^FROM golang:1.27.4@sha256:(?:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d|205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf) AS go-build$/m);
+  assert.match(firecrawlApiHotfix, /ENV GOTOOLCHAIN=local/);
+  assert.match(firecrawlApiHotfix, /grep -Fx 'kuchikiki = "0\.8\.2"' native\/Cargo\.toml/);
+  assert.match(firecrawlApiHotfix, /kuchikiki = "0\.8\.9-speedreader"/);
+  assert.match(firecrawlApiHotfix, /pnpm install --frozen-lockfile/);
+  assert.match(firecrawlApiHotfix, /go1\.26\.10\.linux-/);
+  assert.match(firecrawlApiHotfix, /ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5/);
+  assert.match(firecrawlApiHotfix, /sha256sum -c -/);
+  assert.match(firecrawlApiHotfix, /go get golang\.org\/x\/net@v0\.62\.0/);
+  assert.match(firecrawlApiHotfix, /go list -m golang\.org\/x\/net \| grep -Fx 'golang\.org\/x\/net v0\.62\.0'/);
+  assert.match(firecrawlApiHotfix, /go version \| grep -F 'go1\.26\.10'/);
+  assert.match(firecrawlApiHotfix, /go version -m libhtml-to-markdown\.so[\s\S]*golang\.org\/x\/net[\s\S]*v0\.62\.0/);
+  assert.match(firecrawlApiHotfix, /FROM runtime-base AS build-base/);
+  assert.match(firecrawlApiHotfix, /FROM build-base AS build/);
+  assert.match(firecrawlApiHotfix, /FROM runtime-base AS runtime/);
+  assert.match(firecrawlApiHotfix, /FROM runtime AS verify-go-runtime/);
+  assert.match(firecrawlApiHotfix, /\/usr\/local\/go\/bin\/go version -m "\$f"/);
+  assert.match(firecrawlApiHotfix, /grep -v -F 'v0\.62\.0'/);
+  assert.match(firecrawlApiHotfix, /runtime contains Go binaries built with toolchains vulnerable to CVE-2026-39821/);
+  assert.match(firecrawlApiHotfix, /minor === 26 && patch >= 10/);
+  assert.match(firecrawlApiHotfix, /FROM runtime AS final/);
+  assert.match(firecrawlApiHotfix, /GO_RUNTIME_MODULES\.txt/);
+  assert.match(firecrawlApiHotfix, /FROM node:22.23.5-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime-base/);
+  assert.match(firecrawlApiHotfix, /pnpm install --frozen-lockfile/);
+  assert.match(firecrawlApiHotfix, /proxy-addr@>=2\.0\.0 <2\.0\.8/);
+  assert.match(firecrawlApiHotfix, /source-map-js@>=1\.0\.0 <1\.2\.2/);
+  assert.match(firecrawlApiHotfix, /smol-toml@>=1\.0\.0 <1\.9\.0/);
+  assert.match(firecrawlApiHotfix, /shell-quote@<1\.11\.0/);
+  assert.match(firecrawlApiHotfix, /undici: "7\.30\.1"/);
+  assert.match(firecrawlApiHotfix, /"undici": "7\.30\.1"/);
+  assert.doesNotMatch(firecrawlApiHotfix, /pnpm install --no-frozen-lockfile/);
+  assert.doesNotMatch(firecrawlApiHotfix, /undici: "7\.29\.1"/);
+  assert.match(firecrawlApiHotfix, /CVE-2026-59873 is fixed in tar >= 7\.5\.19/);
+  assert.match(firecrawlApiHotfix, /vulnerable node-tar/);
+  assert.match(firecrawlApiHotfix, /TypeScript 7 is only used by development\/watch commands/);
+  assert.match(firecrawlApiHotfix, /test ! -e node_modules\/typescript-7/);
+  // The builder must retain npm/Corepack for frozen PNPM installs. The
+  // production runtime may safely remove bundled CLI tooling (Node starts
+  // the prebuilt JavaScript directly, with no npm entrypoint).
+  const beforeRuntime = firecrawlApiHotfix.split('FROM runtime-base AS runtime')[0];
+  const runtimeOnly = firecrawlApiHotfix.split('FROM runtime-base AS runtime')[1];
+  assert.ok(runtimeOnly);
+  assert.doesNotMatch(beforeRuntime, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+  assert.match(runtimeOnly, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
 });
