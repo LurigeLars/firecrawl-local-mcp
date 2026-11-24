@@ -27,6 +27,15 @@ jobs:
       - name: Check static scrape contract
         run: node --test research/rust-scrape-contract.test.mjs
       - name: Build pinned candidate and run Markdown regression tests
-        run: docker build --progress plain -t firecrawl-rust-table-ci:review -f research/Dockerfile.rust-table-ci research
+        run: docker build --progress plain --target table-test -t firecrawl-rust-table-ci:review -f research/Dockerfile.rust-table-ci research
       - name: Check every captured EIA cell in both cleanup modes
         run: python3 research/verify-eia-fixture.py
+      - name: Build isolated OCR research stage
+        run: docker build --progress plain --target ocr-test -t firecrawl-rust-ocr-ci:review -f research/Dockerfile.rust-table-ci research
+      - name: Verify selective OCR on synthetic mixed PDF
+        run: |
+          timeout 120s docker run --rm --pull=never --network none --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
+            firecrawl-rust-ocr-ci:review
