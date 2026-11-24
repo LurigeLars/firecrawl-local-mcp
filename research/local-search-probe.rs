@@ -129,7 +129,9 @@ async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'static str> 
                 ("format", "json".to_string()), ("pageno", page.to_string()),
             ];
             if req.safe { params.push(("safesearch", "2".into())); }
-            let mut response = client.get(endpoint).query(&params).send().await
+            let mut url = Url::parse(endpoint).map_err(|_| "invalid fixed search endpoint")?;
+            url.query_pairs_mut().extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
+            let mut response = client.get(url).send().await
                 .map_err(|_| "search proxy transport failed")?;
             if !response.status().is_success() { return Err("search proxy returned non-success"); }
             let mut body = Vec::new();
