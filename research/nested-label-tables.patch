@@ -115,7 +115,7 @@ diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
 -}
 +fn has_nested_table(node: &NodeRef) -> bool {
 +  node
-+    .descendants()
++    .inclusive_descendants()
 +    .skip(1)
 +    .any(|d| tag_of(&d) == Some("table"))
 +}
@@ -123,7 +123,7 @@ diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
 +// A one-row nested table with exactly one meaningful cell is sometimes
 +// used solely to indent a row label. Do not flatten genuine nested data.
 +fn nested_label_cell(cell: &NodeRef) -> Option<NodeRef> {
-+  let tables: Vec<_> = cell.descendants().skip(1)
++  let tables: Vec<_> = cell.descendants()
 +    .filter(|d| tag_of(d) == Some("table")).collect();
 +  if tables.len() != 1 { return None; }
 +  let mut inner = Vec::new();
@@ -298,9 +298,9 @@ diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
 +      <tr><td><table><tr><td></td><td><a href="/crude">Crude oil</a></td></tr></table></td><td>421.5</td><td>-1.2</td><td>0</td></tr>
 +      <tr><td><table><tr><td></td><td>Gasoline</td></tr></table></td><td></td><td>210.0</td><td>+0.8</td></tr>
 +      </table>"#);
-+    assert!(out.contains("11/06/26 | 11/13/26 | 11/20/26 |"));
-+    assert!(out.contains("| [Crude oil](/crude) | 421.5 | -1.2 | 0 |"));
-+    assert!(out.contains("| Gasoline |  | 210.0 | +0.8 |"));
++    assert!(out.contains("11/06/26 | 11/13/26 | 11/20/26 |"), "{out}");
++    assert!(out.contains("| [Crude oil](/crude) | 421.5 | -1.2 | 0 |"), "{out}");
++    assert!(out.contains("| Gasoline |  | 210.0 | +0.8 |"), "{out}");
 +  }
 +
 +  #[test]
