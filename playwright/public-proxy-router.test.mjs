@@ -408,3 +408,43 @@ test('5e.tools Loading placeholder retries, but a populated chapter stays direct
   assert.equal((await post(routerUrl, {url:'https://5e.tools/full'})).body.content, '<html>Fire and Darkness Brimstone Hold ready</html>');
   assert.equal(proxyHits, 1);
 });
+
+for (const blockedStage of ['direct', 'proxy']) {
+  test('private-network policy refusal stops routing at ' + blockedStage, async t => {
+    let directHits = 0;
+    let proxyHits = 0;
+    // Synthetic upstream error: no request is sent to a private destination.
+    const denied = {
+      content: '', pageStatusCode: 403,
+      pageError: 'Blocked insecure target URL "http://127.0.0.1/": resolves to a private/internal address'
+    };
+    const direct = fakePlaywright(() => {
+      directHits += 1;
+      return blockedStage === 'direct' ? denied : { content: '', pageStatusCode: 429 };
+    });
+    const proxy = fakePlaywright(() => { proxyHits += 1; return denied; });
+    const directUrl = await listen(direct);
+    const proxyUrl = await listen(proxy);
+    const router = createServer({
+      directUpstream: directUrl,
+      proxyUpstream: proxyUrl,
+      proxyHosts: new Set(['example.com']),
+      proxyAttempts: 3,
+      metricsPath: ''
+    });
+    const routerUrl = await listen(router);
+    t.after(() => Promise.all([
+      new Promise(r => router.close(r)),
+      new Promise(r => direct.close(r)),
+      new Promise(r => proxy.close(r))
+    ]));
+    const result = await post(routerUrl, {url: 'https://example.com/'});
+    assert.equal(result.body.pageError, denied.pageError);
+    assert.equal(directHits, 1);
+    assert.equal(proxyHits, blockedStage === 'direct' ? 0 : 1);
+    const metrics = await get(routerUrl.replace(/\/scrape$/, '/metrics'));
+    assert.equal(metrics.body.policy_denied, 1);
+    assert.equal(metrics.body.proxy_success, 0);
+    assert.equal(metrics.body.proxy_attempts, proxyHits);
+  });
+}
