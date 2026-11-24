@@ -7,16 +7,16 @@ RUN git init && git fetch --depth 1 https://github.com/firecrawl/firecrawl.git 2
 COPY nested-label-tables.patch /tmp/nested-label-tables.patch
 RUN git apply --check /tmp/nested-label-tables.patch && git apply /tmp/nested-label-tables.patch
 WORKDIR /src/apps/local
-COPY table-fixture-probe.rs pdf-page-probe.rs local-search-probe.rs /tmp/
+COPY table-fixture-probe.rs pdf-page-probe.rs local-search-probe.rs local-model-probe.rs /tmp/
 RUN test "$(grep -c '^fn process_html(' src/scrape.rs)" = 1 \
     && sed -i 's/^fn process_html(/pub fn process_html(/' src/scrape.rs \
     && mkdir -p src/bin \
-    && cp /tmp/table-fixture-probe.rs /tmp/pdf-page-probe.rs /tmp/local-search-probe.rs src/bin/
+    && cp /tmp/table-fixture-probe.rs /tmp/pdf-page-probe.rs /tmp/local-search-probe.rs /tmp/local-model-probe.rs src/bin/
 # Debug profile without debug symbols shares dependencies across tests and probe,
 # avoiding the release profile's expensive fat LTO for a correctness-only job.
 ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 RUN cargo test --locked --jobs 2 --lib markdown::tests \
-    && cargo test --locked --jobs 2 --bin local-search-probe \
+    && cargo test --locked --jobs 2 --bin local-search-probe --bin local-model-probe \
     && cargo build --locked --jobs 2 --bin table-fixture-probe --bin pdf-page-probe
 FROM debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS table-test
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
