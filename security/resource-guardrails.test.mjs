@@ -35,3 +35,7 @@ for (const [service, limits] of Object.entries(expected)) {
     }
   });
 }
+
+test("API uses the locally benchmarked NUQ worker count", () => {
+  assert.match(serviceBlock("api"), /^      NUQ_WORKER_COUNT: "3"$/m);
+});
