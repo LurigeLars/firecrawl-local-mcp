@@ -1,0 +1,4 @@
+# Temporary candidate for #221; remove when the official image includes these fixes.
+# No live broker or data-volume changes; review and scan before promotion.
+FROM rabbitmq:4.4.1-management-alpine@sha256:2b47b1aa05ec7e373950ad2e9200e9f95a9da7039c8d22c19dbf5a59101362c4
+RUN apk add --no-cache zlib=1.4-r0 openssl=3.5.9-r1 libcrypto3=3.5.9-r1 libssl3=3.5.9-r1
