@@ -12,7 +12,7 @@ const MAX_INPUT: u64 = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Request {
+pub(crate) struct Request {
     url: String,
     #[serde(default)]
     wait_for: u64,
@@ -49,7 +49,7 @@ async fn check_dns(url: &Url) -> Result<(), &'static str> {
     Ok(())
 }
 
-async fn render_at(endpoint: &str, req: Request, budget: Duration) -> Result<Value, &'static str> {
+pub(crate) async fn render_at(endpoint: &str, req: Request, budget: Duration) -> Result<Value, &'static str> {
     let target = public_url(&req.url)?;
     if req.wait_for > 10_000 { return Err("waitFor exceeds research budget"); }
     let client = reqwest::Client::builder().no_proxy()
