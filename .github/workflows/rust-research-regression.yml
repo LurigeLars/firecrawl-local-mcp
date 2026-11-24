@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths:
       - 'research/**'
+      - 'playwright/public-proxy-router*'
+      - 'public/gateway/camofox-tools*'
+      - 'public/gateway/policy*'
+      - 'searxng/lang-proxy.mjs'
+      - 'llm/trim-proxy.mjs'
       - '.github/workflows/rust-research-regression.yml'
   workflow_dispatch:
 
@@ -41,3 +46,16 @@ jobs:
             --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
             firecrawl-rust-ocr-ci:review
+  durable-job-store:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout research
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test standalone embedded SQLite research crate
+        run: |
+          rustc --version
+          cargo test --manifest-path research/job-store/Cargo.toml
+          cargo tree --manifest-path research/job-store/Cargo.toml --locked
