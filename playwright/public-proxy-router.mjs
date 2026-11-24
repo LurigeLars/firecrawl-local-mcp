@@ -32,6 +32,7 @@ const EMPTY_METRICS = Object.freeze({
   proxy_success: 0,
   proxy_exhausted: 0,
   sensitive_rejected: 0,
+  policy_denied: 0,
   upstream_errors: 0,
   total_latency_ms: 0,
 });
@@ -159,6 +160,15 @@ function targetStatus(response) {
   }
 }
 
+// The pinned Playwright service reports SSRF denial as HTTP 200 with
+// pageStatusCode=403 and this exact error prefix. It is not a target block.
+function policyDenied(response) {
+  try {
+    const data = JSON.parse(response.body.toString('utf8'));
+    return typeof data?.pageError === 'string' && data.pageError.startsWith('Blocked insecure target URL ');
+  } catch { return false; }
+}
+
 // The target can return HTTP 200 for a bot gate or unrendered SPA shell.
 // Restrict heuristic fallback to explicit public research hosts to avoid false positives.
 function challengeResponse(response, hostname) {
@@ -257,6 +267,11 @@ export function createServer({
       try {
         const direct = await requestJson(directUpstream, body);
         const status = targetStatus(direct);
+        if (policyDenied(direct)) {
+          increment(metrics, 'policy_denied');
+          commitMetrics(startedAtMs);
+          return sendBuffered(res, direct, { 'x-firecrawl-public-proxy': 'direct' });
+        }
         const directBlocked = status === 403 || status === 429 || (classification.eligible && challengeResponse(direct, new URL(body.url).hostname));
 
         if (directBlocked) increment(metrics, 'direct_blocked');
@@ -272,6 +287,14 @@ export function createServer({
             attempts += 1;
             increment(metrics, 'proxy_attempts');
             proxiedStatus = targetStatus(proxied);
+            if (policyDenied(proxied)) {
+              increment(metrics, 'policy_denied');
+              commitMetrics(startedAtMs);
+              return sendBuffered(res, proxied, {
+                'x-firecrawl-public-proxy': 'used',
+                'x-firecrawl-public-proxy-attempts': String(attempts),
+              });
+            }
             if (!challengeResponse(proxied, new URL(body.url).hostname) && proxiedStatus !== 403 && proxiedStatus !== 429) break;
           }
 
