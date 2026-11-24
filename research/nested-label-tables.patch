@@ -1,0 +1,308 @@
+diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
+--- a/apps/local/src/markdown.rs
++++ b/apps/local/src/markdown.rs
+@@ -546,108 +546,170 @@
+-fn has_nested_table(node: &NodeRef) -> bool {
+-  node
+-    .descendants()
+-    .skip(1)
+-    .any(|d| tag_of(&d) == Some("table"))
+-}
+-
+-fn table(node: &NodeRef) -> String {
+-  let mut rows = Vec::new();
+-  let mut caption = None;
+-  collect_rows(node, false, &mut rows, &mut caption);
+-  if rows.is_empty() {
+-    return blocks(node).join("\n\n");
+-  }
+-  let columns = rows
+-    .iter()
+-    .map(|r| r.cells.iter().map(cell_span).sum::<usize>())
+-    .max()
+-    .unwrap_or(0);
+-
+-  // One column, tables inside tables, or header-less tables holding whole
+-  // blocks of prose are page layout, not data.
+-  let has_header = rows.iter().any(|r| r.header)
+-    || rows
+-      .iter()
+-      .any(|r| r.cells.iter().any(|c| tag_of(c) == Some("th")));
+-  let presentational = matches!(
+-    attr(node, "role").as_deref(),
+-    Some("presentation") | Some("none")
+-  );
+-  let prose_cells = !has_header
+-    && rows.iter().any(|r| {
+-      r.cells.iter().any(|c| {
+-        c.descendants().skip(1).any(|d| {
+-          matches!(
+-            tag_of(&d),
+-            Some("p")
+-              | Some("ul")
+-              | Some("ol")
+-              | Some("pre")
+-              | Some("blockquote")
+-              | Some("h1")
+-              | Some("h2")
+-              | Some("h3")
+-              | Some("h4")
+-          )
+-        }) || c.text_contents().len() > 400
+-      })
+-    });
+-  if columns <= 1 || has_nested_table(node) || presentational || prose_cells {
+-    let mut parts = Vec::new();
+-    for row in &rows {
+-      for cell in &row.cells {
+-        let text = blocks(cell).join("\n\n");
+-        if !text.is_empty() {
+-          parts.push(text);
+-        }
+-      }
+-    }
+-    return parts.join("\n\n");
+-  }
+-
+-  let render = |row: &Row| -> String {
+-    let mut line = String::from("|");
+-    let mut used = 0;
+-    for cell in &row.cells {
+-      let span = cell_span(cell);
+-      line.push(' ');
+-      line.push_str(&cell_text(cell));
+-      line.push_str(" |");
+-      for _ in 1..span {
+-        line.push_str(" |");
+-      }
+-      used += span;
+-    }
+-    for _ in used..columns {
+-      line.push_str(" |");
+-    }
+-    line
+-  };
+-
+-  let mut out = String::new();
+-  if let Some(c) = caption {
+-    out.push_str(&format!("**{c}**\n\n"));
+-  }
+-  let mut body = rows.iter();
+-  match rows.first() {
+-    Some(first) if first.header => {
+-      out.push_str(&render(first));
+-      body.next();
+-    }
+-    _ => {
+-      out.push('|');
+-      for _ in 0..columns {
+-        out.push_str(" |");
+-      }
+-    }
+-  }
+-  out.push_str("\n|");
+-  for _ in 0..columns {
+-    out.push_str(" --- |");
+-  }
+-  for row in body {
+-    out.push('\n');
+-    out.push_str(&render(row));
+-  }
+-  out
+-}
++fn has_nested_table(node: &NodeRef) -> bool {
++  node
++    .descendants()
++    .skip(1)
++    .any(|d| tag_of(&d) == Some("table"))
++}
++
++// A one-row nested table with exactly one meaningful cell is sometimes
++// used solely to indent a row label. Do not flatten genuine nested data.
++fn nested_label_cell(cell: &NodeRef) -> Option<NodeRef> {
++  let tables: Vec<_> = cell.descendants().skip(1)
++    .filter(|d| tag_of(d) == Some("table")).collect();
++  if tables.len() != 1 { return None; }
++  let mut inner = Vec::new();
++  let mut caption = None;
++  collect_rows(&tables[0], false, &mut inner, &mut caption);
++  if inner.len() != 1 || inner[0].header || caption.is_some() { return None; }
++  if inner[0].cells.iter().any(|c| cell_span(c) != 1 || attr(c, "rowspan").is_some()) {
++    return None;
++  }
++  let meaningful: Vec<_> = inner[0].cells.iter()
++    .filter(|c| !cell_text(c).is_empty()).collect();
++  if meaningful.len() != 1 { return None; }
++  let label = meaningful[0];
++  let text = |n: &NodeRef| n.text_contents().split_whitespace().collect::<Vec<_>>().join(" ");
++  if text(cell) != text(label) || text(label).is_empty() { return None; }
++  Some((*label).clone())
++}
++
++// A narrow exception to the layout heuristic: one rectangular, explicitly
++// headed data grid, optionally preceded by full-width single-cell rows.
++// Nested tables in the body may only be first-column label wrappers.
++fn nested_data_header(rows: &[Row]) -> Option<usize> {
++  let index = rows.iter().position(|r| r.header && r.cells.len() >= 3)?;
++  let header = &rows[index];
++  let width = header.cells.len();
++  if rows.len() < index + 3
++    || rows[..index].iter().any(|r| r.cells.len() != 1 || cell_span(&r.cells[0]) < width)
++    || header.cells.iter().any(|c| tag_of(c) != Some("th")
++      || cell_span(c) != 1 || attr(c, "rowspan").is_some())
++    || header.cells.iter().skip(1).any(has_nested_table)
++  { return None; }
++  let mut found_label = false;
++  for row in &rows[index+1..] {
++    if row.header || row.cells.len() != width
++      || row.cells.iter().any(|c| tag_of(c) != Some("td")
++        || cell_span(c) != 1 || attr(c, "rowspan").is_some())
++      || row.cells.iter().skip(1).any(has_nested_table)
++    { return None; }
++    if has_nested_table(&row.cells[0]) {
++      nested_label_cell(&row.cells[0])?;
++      found_label = true;
++    }
++  }
++  found_label.then_some(index)
++}
++
++fn table(node: &NodeRef) -> String {
++  let mut rows = Vec::new();
++  let mut caption = None;
++  collect_rows(node, false, &mut rows, &mut caption);
++  if rows.is_empty() {
++    return blocks(node).join("\n\n");
++  }
++  let nested = has_nested_table(node);
++  let nested_header = if nested { nested_data_header(&rows) } else { None };
++  let data_rows = &rows[nested_header.unwrap_or(0)..];
++  let columns = data_rows
++    .iter()
++    .map(|r| r.cells.iter().map(cell_span).sum::<usize>())
++    .max()
++    .unwrap_or(0);
++
++  // One column, tables inside tables, or header-less tables holding whole
++  // blocks of prose are page layout, not data.
++  let has_header = rows.iter().any(|r| r.header)
++    || rows
++      .iter()
++      .any(|r| r.cells.iter().any(|c| tag_of(c) == Some("th")));
++  let presentational = matches!(
++    attr(node, "role").as_deref(),
++    Some("presentation") | Some("none")
++  );
++  let prose_cells = !has_header
++    && rows.iter().any(|r| {
++      r.cells.iter().any(|c| {
++        c.descendants().skip(1).any(|d| {
++          matches!(
++            tag_of(&d),
++            Some("p")
++              | Some("ul")
++              | Some("ol")
++              | Some("pre")
++              | Some("blockquote")
++              | Some("h1")
++              | Some("h2")
++              | Some("h3")
++              | Some("h4")
++          )
++        }) || c.text_contents().len() > 400
++      })
++    });
++  if columns <= 1 || (nested && nested_header.is_none()) || presentational || prose_cells {
++    let mut parts = Vec::new();
++    for row in &rows {
++      for cell in &row.cells {
++        let text = blocks(cell).join("\n\n");
++        if !text.is_empty() {
++          parts.push(text);
++        }
++      }
++    }
++    return parts.join("\n\n");
++  }
++
++  let render = |row: &Row| -> String {
++    let mut line = String::from("|");
++    let mut used = 0;
++    for cell in &row.cells {
++      let span = cell_span(cell);
++      line.push(' ');
++      // Retain the label's inline formatting rather than emitting a Markdown
++      // table inside a Markdown cell. Header navigation remains ordinary text.
++      let label = if nested_header.is_some() && !row.header { nested_label_cell(cell) } else { None };
++      line.push_str(&cell_text(label.as_ref().unwrap_or(cell)));
++      line.push_str(" |");
++      for _ in 1..span {
++        line.push_str(" |");
++      }
++      used += span;
++    }
++    for _ in used..columns {
++      line.push_str(" |");
++    }
++    line
++  };
++
++  let mut out = String::new();
++  if let Some(c) = caption {
++    out.push_str(&format!("**{c}**\n\n"));
++  }
++  if let Some(index) = nested_header {
++    for row in &rows[..index] {
++      let prelude = blocks(&row.cells[0]).join("\n\n");
++      if !prelude.is_empty() { out.push_str(&prelude); out.push_str("\n\n"); }
++    }
++  }
++  let mut body = data_rows.iter();
++  match data_rows.first() {
++    Some(first) if first.header => {
++      out.push_str(&render(first));
++      body.next();
++    }
++    _ => {
++      out.push('|');
++      for _ in 0..columns {
++        out.push_str(" |");
++      }
++    }
++  }
++  out.push_str("\n|");
++  for _ in 0..columns {
++    out.push_str(" --- |");
++  }
++  for row in body {
++    out.push('\n');
++    out.push_str(&render(row));
++  }
++  out
++}
+@@ -869,2 +931,25 @@
++  #[test]
++  fn nested_label_layout_preserves_rectangular_financial_grid() {
++    let out = md(r#"<table>
++      <tr><th colspan="4"><table><tr><td>Download</td><td>Notes</td></tr></table></th></tr>
++      <tr><th><table><tr><td>Product</td><td>Area</td></tr></table></th><th>11/06/26</th><th>11/13/26</th><th>11/20/26</th></tr>
++      <tr><td><table><tr><td></td><td><a href="/crude">Crude oil</a></td></tr></table></td><td>421.5</td><td>-1.2</td><td>0</td></tr>
++      <tr><td><table><tr><td></td><td>Gasoline</td></tr></table></td><td></td><td>210.0</td><td>+0.8</td></tr>
++      </table>"#);
++    assert!(out.contains("11/06/26 | 11/13/26 | 11/20/26 |"));
++    assert!(out.contains("| [Crude oil](/crude) | 421.5 | -1.2 | 0 |"));
++    assert!(out.contains("| Gasoline | | 210.0 | +0.8 |"));
++  }
++
++  #[test]
++  fn genuinely_nested_data_is_not_collapsed_into_a_label() {
++    let out = md(r#"<table><tr><th>Label</th><th>A</th><th>B</th></tr>
++      <tr><td><table><tr><th>Sub</th><th>Value</th></tr><tr><td>x</td><td>19</td></tr></table></td><td>10</td><td>20</td></tr>
++      <tr><td>Other</td><td>30</td><td>40</td></tr></table>"#);
++    assert!(out.contains("| Sub | Value |"));
++    assert!(out.contains("| x | 19 |"));
++    assert!(!out.contains("| Label | A | B |"));
++  }
++
+   #[test]
+   fn layout_tables_are_unwrapped() {
