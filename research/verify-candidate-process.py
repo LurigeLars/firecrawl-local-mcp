@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -12,7 +13,7 @@ BASE="http://127.0.0.1:3002"
 TOKEN="synthetic-ci-token-not-a-real-secret-0123456789"
 BIN="/usr/local/bin/candidate-main"
 
-def call(path, *, payload=None, token=TOKEN, extra=None):
+def call(path, *, payload=None, token=TOKEN, extra=None, timeout=2):
     headers = dict(extra or {})
     if token is not None:
         headers["Authorization"]="Bearer "+token
@@ -27,10 +28,53 @@ def call(path, *, payload=None, token=TOKEN, extra=None):
             return None
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     try:
-        with opener.open(req,timeout=2) as res:
-            return res.status,res.read(131072)
+        with opener.open(req,timeout=timeout) as res:
+            return res.status,res.read(2*1024*1024+1)
     except urllib.error.HTTPError as e:
         return e.code,e.read(131072)
+
+def memory_kib(pid, field):
+    for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith(field+":"):
+            return int(line.split()[1])
+    return None
+
+def verify_live(pid):
+    # Fixed public official-source URLs, no user input, credentials, browser
+    # sessions, retries or scraping of search results.
+    cases=[
+        ("IANA", "https://www.iana.org/help/example-domains",
+            ["Example Domains","RFC 2606","RFC 6761"]),
+        ("CFTC_ARCHIVE","https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm",
+            ["September 8, 2026","Open Interest","1,939,911"]),
+    ]
+    initial=memory_kib(pid,"VmRSS")
+    all_pass=True
+    for label,url,markers in cases:
+        started=time.monotonic()
+        verdict="INCONCLUSIVE"
+        status=None
+        matches=0
+        chars=0
+        try:
+            status,raw=call("/v2/scrape",payload={"url":url,"formats":["markdown"],
+                "onlyMainContent":True,"maxAge":0,"storeInCache":False,"timeout":25000},timeout=30)
+            if status==200:
+                data=json.loads(raw)["data"]
+                markdown=" ".join(data["markdown"].split())
+                matches=sum(m.lower() in markdown.lower() for m in markers)
+                chars=len(markdown)
+                verdict="PASS" if matches==len(markers) and data["source"]=="local" else "FAIL"
+        except (OSError,ValueError,KeyError,TypeError,urllib.error.URLError):
+            verdict="INCONCLUSIVE"
+        print(json.dumps({"live_source":label,"verdict":verdict,"api_status":status,
+            "markers":f"{matches}/{len(markers)}","markdown_chars":chars,
+            "elapsed_ms":round((time.monotonic()-started)*1000),
+            "process_rss_kib":memory_kib(pid,"VmRSS"),"process_peak_rss_kib":memory_kib(pid,"VmHWM"),
+            "initial_process_rss_kib":initial}))
+        all_pass &= verdict=="PASS"
+    if not all_pass:
+        raise SystemExit("LIVE_CANDIDATE_NOT_VERIFIED")
 
 with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
     token_path=pathlib.Path(td)/"token"
@@ -63,6 +107,8 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             assert call("/research/render",payload={"url":"https://169.254.169.254/","onlyMainContent":True})[0]==403
             assert call("/v2/crawl",payload={})[0]==404
             print("CANDIDATE_PROCESS_SMOKE_PASS: authenticated loopback, unsupported options and private destinations rejected")
+            if "--live" in sys.argv:
+                verify_live(proc.pid)
         finally:
             proc.terminate()
             try:
