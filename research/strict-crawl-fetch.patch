@@ -1,0 +1,83 @@
+diff --git a/apps/local/src/fetch.rs b/apps/local/src/fetch.rs
+--- a/apps/local/src/fetch.rs
++++ b/apps/local/src/fetch.rs
+@@ -162,8 +162,16 @@
+ }
+ 
+ impl Fetcher {
+   pub fn new(policy: NetworkPolicy, user_agent: Option<&str>) -> Result<Self, String> {
++    Self::new_with_redirects(policy, user_agent, true)
++  }
++
++  pub(crate) fn new_no_redirect(policy: NetworkPolicy) -> Result<Self, String> {
++    Self::new_with_redirects(policy, None, false)
++  }
++
++  fn new_with_redirects(policy: NetworkPolicy, user_agent: Option<&str>, follow_redirects: bool) -> Result<Self, String> {
+     let mut default_headers = HeaderMap::new();
+     default_headers.insert(
+       ACCEPT,
+       HeaderValue::from_static(
+@@ -172,7 +180,7 @@
+     );
+     default_headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+ 
+-    let redirect_policy = redirect::Policy::custom(move |attempt| {
++    let redirect_policy = if follow_redirects { redirect::Policy::custom(move |attempt| {
+       if attempt.previous().len() >= MAX_REDIRECTS {
+         return attempt.error(Blocked(format!("more than {MAX_REDIRECTS} redirects")));
+       }
+@@ -180,10 +188,11 @@
+         Ok(()) => attempt.follow(),
+         Err(e) => attempt.error(e),
+       }
+-    });
+-
+-    let client = Client::builder()
++    }) } else { redirect::Policy::none() };
++
++    let client = Client::builder()
++      .no_proxy()
+       .user_agent(user_agent.unwrap_or(USER_AGENT))
+       .default_headers(default_headers)
+       .redirect(redirect_policy)
+       .dns_resolver(Arc::new(GuardedResolver { policy }))
+@@ -214,7 +223,7 @@
+     }
+   }
+ 
+-  async fn fetch_once(&self, url: &Url, opts: &FetchOptions) -> Result<FetchResult, FetchError> {
++  pub(crate) async fn fetch_once(&self, url: &Url, opts: &FetchOptions) -> Result<FetchResult, FetchError> {
+     guard::check_url(url, self.policy).map_err(|e| FetchError::Blocked(e.0))?;
+ 
+     let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
+diff --git a/apps/local/src/crawl.rs b/apps/local/src/crawl.rs
+--- a/apps/local/src/crawl.rs
++++ b/apps/local/src/crawl.rs
+@@ -127,7 +127,7 @@
+   }
+ }
+ 
+-struct Scope {
++pub(crate) struct Scope {
+   seed: Url,
+   prefix: String,
+   seed_host: String,
+@@ -140,7 +140,7 @@
+ }
+ 
+ impl Scope {
+-  fn new(seed: &Url, opts: &CrawlOptions) -> Result<Self, ScrapeError> {
++  pub(crate) fn new(seed: &Url, opts: &CrawlOptions) -> Result<Self, ScrapeError> {
+     let compile = |patterns: &[String]| -> Result<Vec<Regex>, ScrapeError> {
+       patterns
+         .iter()
+@@ -175,7 +175,7 @@
+     self.allow_subdomains && registrable(&host) == self.seed_domain
+   }
+ 
+-  fn allows(&self, url: &Url) -> bool {
++  pub(crate) fn allows(&self, url: &Url) -> bool {
+     if !matches!(url.scheme(), "http" | "https") || has_skipped_extension(url) {
+       return false;
+     }

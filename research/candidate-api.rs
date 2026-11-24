@@ -17,6 +17,8 @@ mod search;
 mod render;
 #[path = "candidate-batch.rs"]
 mod batch;
+#[path = "candidate-crawl.rs"]
+mod crawl;
 
 const MAX_OUTPUT: usize = 2 * 1024 * 1024;
 const SEARCH: &str = "http://searxng-proxy:8081/search";
@@ -29,6 +31,7 @@ struct CandidateState {
     search_endpoint: String,
     render_endpoint: String,
     batch: Option<batch::BatchState>,
+    crawler: crawl::Crawler,
 }
 
 #[derive(Deserialize)]
@@ -147,7 +150,7 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         jobs:Mutex::new(HashMap::new())
     });
     let state=CandidateState{auth:auth.clone(),slots:Arc::new(Semaphore::new(4)),
-        search_endpoint,render_endpoint,batch};
+        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?};
     let app=Router::new()
         .route("/health",get(|State(state):State<CandidateState>|async move{
             let job_store=match &state.batch{None=>"disabled",Some(b) if b.ready()=>"ready",Some(_)=>"degraded"};
@@ -158,6 +161,7 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         .route("/v2/search",post(search_route))
         .route("/research/render",post(render_route))
         .route("/research/batch",post(batch::create))
+        .route("/research/crawl",post(batch::create_crawl))
         .route("/research/batch/{id}",get(batch::status).delete(batch::cancel))
         .layer(DefaultBodyLimit::max(32*1024))
         .layer(middleware::from_fn_with_state(auth,gate))

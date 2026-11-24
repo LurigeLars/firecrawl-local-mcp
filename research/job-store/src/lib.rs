@@ -1,4 +1,4 @@
-//! Embedded durable batch-store experiment. No HTTP routes or network calls.
+//! Embedded durable batch and crawl frontier experiment. No HTTP routes or network calls.
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{fs::{File,OpenOptions}, path::Path, time::{Duration,SystemTime,UNIX_EPOCH}};
@@ -22,8 +22,14 @@ impl From<serde_json::Error> for Error { fn from(e: serde_json::Error) -> Self {
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
-pub struct Claim { job: String, item: String, generation: i64 }
-impl Claim { pub fn item(&self) -> &str { &self.item } pub fn job(&self)->&str { &self.job } }
+pub struct Claim { job: String, item: String, generation: i64, crawl: Option<CrawlClaim> }
+#[derive(Debug, Clone)]
+pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32 }
+impl Claim {
+    pub fn item(&self) -> &str { &self.item }
+    pub fn job(&self)->&str { &self.job }
+    pub fn crawl(&self)->Option<&CrawlClaim> {self.crawl.as_ref()}
+}
 
 // One process owns the private local database directory. The connection is
 // dropped before the lock handle; a second scheduler cannot open this store.
@@ -51,7 +57,7 @@ impl Store {
         db.busy_timeout(Duration::from_secs(2))?;
         let version:i64=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         let tables:i64=db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0))?;
-        if version!=1 && !(version==0 && tables==0) {
+        if !matches!(version,1|2) && !(version==0 && tables==0) {
             return Err(Error::Invalid("unsupported store schema"));
         }
         db.execute_batch("
@@ -70,10 +76,18 @@ impl Store {
                 state TEXT NOT NULL CHECK(state IN ('queued','running','done','failed','cancelled')),
                 generation INTEGER NOT NULL DEFAULT 0,
                 result_seq INTEGER, payload TEXT,
+                depth INTEGER NOT NULL DEFAULT 0 CHECK(depth BETWEEN 0 AND 10),
                 PRIMARY KEY(job,key), UNIQUE(job,ordinal), UNIQUE(job,result_seq)
             );
-            PRAGMA user_version=1;
-            COMMIT;")?;
+            CREATE TABLE IF NOT EXISTS crawl_jobs (
+                job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+                seed TEXT NOT NULL, page_limit INTEGER NOT NULL CHECK(page_limit BETWEEN 1 AND 100),
+                max_depth INTEGER NOT NULL CHECK(max_depth BETWEEN 0 AND 10)
+            );")?;
+        if version==1 {
+            db.execute_batch("ALTER TABLE items ADD COLUMN depth INTEGER NOT NULL DEFAULT 0 CHECK(depth BETWEEN 0 AND 10);")?;
+        }
+        db.execute_batch("PRAGMA user_version=2; COMMIT;")?;
         let journal:String=db.query_row("PRAGMA journal_mode",[],|r|r.get(0))?;
         if !journal.eq_ignore_ascii_case("wal") {return Err(Error::Invalid("WAL unavailable"));}
         let mut store=Self {db,_owner:owner};
@@ -83,6 +97,17 @@ impl Store {
 
     /// Fixed batch; duplicate keys reject the whole creation transaction.
     pub fn create(&mut self, id: &str, keys: &[String]) -> Result<()> {
+        self.create_job(id,keys,None)
+    }
+
+    pub fn create_crawl(&mut self,id:&str,seed:&str,limit:usize,max_depth:u32)->Result<()> {
+        if !(1..=MAX_ITEMS).contains(&limit) || max_depth>10 {
+            return Err(Error::Invalid("invalid crawl limits"));
+        }
+        self.create_job(id,&[seed.to_owned()],Some((seed,limit,max_depth)))
+    }
+
+    fn create_job(&mut self,id:&str,keys:&[String],crawl:Option<(&str,usize,u32)>)->Result<()> {
         if id.is_empty() || id.len() > 128 || keys.is_empty() || keys.len() > MAX_ITEMS ||
             keys.iter().any(|k| k.is_empty() || k.len() > 8192) {
             return Err(Error::Invalid("invalid batch"));
@@ -93,6 +118,9 @@ impl Store {
         let count: i64 = tx.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))?;
         if count >= MAX_JOBS { return Err(Error::Invalid("job store full")); }
         tx.execute("INSERT INTO jobs(id,status,created_at) VALUES(?1,'scraping',?2)",params![id,now])?;
+        if let Some((seed,limit,max_depth))=crawl {
+            tx.execute("INSERT INTO crawl_jobs VALUES(?1,?2,?3,?4)",params![id,seed,limit as i64,max_depth])?;
+        }
         for (i, key) in keys.iter().enumerate() {
             tx.execute("INSERT INTO items(job,key,ordinal,state) VALUES(?1,?2,?3,'queued')",
                 params![id, key, i as i64])?;
@@ -112,20 +140,32 @@ impl Store {
 
     pub fn claim(&mut self, id: &str) -> Result<Option<Claim>> {
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let next: Option<(String,i64)> = tx.query_row(
-            "SELECT items.key,generation FROM items JOIN jobs ON jobs.id=items.job
-             WHERE job=?1 AND jobs.status='scraping' AND items.state='queued'
-             ORDER BY ordinal LIMIT 1", [id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let Some((item, old)) = next else { return Ok(None); };
+        let next: Option<(String,i64,u32)> = tx.query_row(
+            "SELECT items.key,generation,depth FROM items JOIN jobs ON jobs.id=items.job
+             WHERE items.job=?1 AND jobs.status='scraping' AND items.state='queued'
+             ORDER BY ordinal LIMIT 1", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let Some((item, old,depth)) = next else { return Ok(None); };
+        let crawl=tx.query_row("SELECT seed,max_depth FROM crawl_jobs WHERE job=?1",[id],
+            |r|Ok(CrawlClaim{seed:r.get(0)?,depth,max_depth:r.get(1)?})).optional()?;
         let generation = old.checked_add(1).ok_or(Error::Invalid("claim generation exhausted"))?;
         tx.execute("UPDATE items SET state='running',generation=?3 WHERE job=?1 AND key=?2",
             params![id,item,generation])?;
         tx.commit()?;
-        Ok(Some(Claim { job:id.into(), item, generation }))
+        Ok(Some(Claim { job:id.into(), item, generation, crawl }))
     }
 
     /// Atomic result and completion commit; old claims cannot overwrite results.
     pub fn settle(&mut self, claim: &Claim, ok: bool, payload: &Value) -> Result<()> {
+        self.settle_discovered(claim,ok,payload,&[])
+    }
+
+    /// The worker has already checked each discovered URL's scope. Store result
+    /// and newly discovered frontier atomically, so restart cannot lose links.
+    pub fn settle_discovered(&mut self,claim:&Claim,ok:bool,payload:&Value,links:&[String])->Result<()> {
+        if links.len()>MAX_ITEMS || links.iter().any(|s|s.is_empty()||s.len()>8192) ||
+            (!links.is_empty() && (!ok || claim.crawl().is_none())) {
+            return Err(Error::Invalid("invalid discovered links"));
+        }
         let payload = serde_json::to_string(payload)?;
         if payload.len() > MAX_DOC { return Err(Error::Invalid("result exceeds research bound")); }
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -140,6 +180,21 @@ impl Store {
              WHERE job=?1 AND key=?2 AND generation=?3 AND state='running'",
             params![claim.job,claim.item,claim.generation,if ok {"done"} else {"failed"},seq,payload])?;
         if changed != 1 { return Err(Error::Invalid("stale or already settled claim")); }
+        if !links.is_empty() {
+            let (limit, max_depth, depth):(i64,u32,u32)=tx.query_row(
+                "SELECT page_limit,max_depth,items.depth FROM crawl_jobs JOIN items ON items.job=crawl_jobs.job
+                 WHERE items.job=?1 AND items.key=?2",params![claim.job,claim.item],
+                |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            if depth<max_depth {
+                let mut count:i64=tx.query_row("SELECT COUNT(*) FROM items WHERE job=?1",[&claim.job],|r|r.get(0))?;
+                for link in links {
+                    if count>=limit {break;}
+                    let added=tx.execute("INSERT INTO items(job,key,ordinal,state,depth) VALUES(?1,?2,?3,'queued',?4)
+                        ON CONFLICT(job,key) DO NOTHING",params![claim.job,link,count,depth+1])?;
+                    count+=added as i64;
+                }
+            }
+        }
         let pending: i64 = tx.query_row(
             "SELECT COUNT(*) FROM items WHERE job=?1 AND state IN ('queued','running')",
             [&claim.job], |r| r.get(0))?;
@@ -237,9 +292,17 @@ impl Store {
             }
         }
         let next = if cursor < last || status == "scraping" { Some(cursor) } else { None };
+        let crawl_limits:Option<(i64,u32)>=tx.query_row("SELECT page_limit,max_depth FROM crawl_jobs WHERE job=?1",
+            [id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let mut result=json!({"status":status,"total":total,"completed":succeeded,"failed":failed,
+            "cancelled":cancelled,"results":rows,"next_after":next});
+        if let Some((page_limit,max_depth))=crawl_limits {
+            let attempts:i64=tx.query_row("SELECT COALESCE(SUM(generation),0) FROM items WHERE job=?1",[id],|r|r.get(0))?;
+            result["crawl"]=json!({"page_limit":page_limit,"max_discovery_depth":max_depth,
+                "page_attempts":attempts,"page_attempt_limit":page_limit*3,"site_coverage_verified":false});
+        }
         tx.commit()?;
-        Ok(json!({"status":status,"total":total,"completed":succeeded,"failed":failed,
-            "cancelled":cancelled,"results":rows,"next_after":next}))
+        Ok(result)
     }
 }
 
@@ -302,6 +365,51 @@ mod tests {
         assert_eq!(result["completed"],1);
         assert_eq!(result["cancelled"],2);
         assert_eq!(result["status"],"cancelled");
+    }
+
+    #[test]
+    fn crawl_frontier_atomic_restart_dedup_depth_and_failure_limit() {
+        let tmp=Temp::new();
+        let mut db=Store::open(&tmp.db()).unwrap();
+        db.create_crawl("crawl","seed",4,2).unwrap();
+        let seed=db.claim_next().unwrap().unwrap();
+        assert_eq!(seed.crawl().unwrap().depth,0);
+        db.settle_discovered(&seed,true,&json!({"page":0}),&["seed".into(),"a".into(),"a".into(),"b".into()]).unwrap();
+        let old=db.claim_next().unwrap().unwrap();
+        assert_eq!(old.item(),"a");
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let a=db.claim_next().unwrap().unwrap();
+        assert_eq!(a.item(),"a");
+        assert!(db.settle_discovered(&old,true,&json!({}),&["wrong".into()]).is_err());
+        db.settle_discovered(&a,true,&json!({"page":1}),&["b".into(),"c".into(),"over-limit".into()]).unwrap();
+        let b=db.claim_next().unwrap().unwrap();
+        assert_eq!(b.item(),"b");
+        db.settle(&b,false,&json!({"error":"fixture"})).unwrap();
+        let c=db.claim_next().unwrap().unwrap();
+        assert_eq!(c.item(),"c");
+        assert_eq!(c.crawl().unwrap().depth,2);
+        db.settle_discovered(&c,true,&json!({"page":2}),&["too-deep".into()]).unwrap();
+        assert!(db.claim_next().unwrap().is_none());
+        let result=db.page("crawl",0,100).unwrap();
+        assert_eq!(result["total"],4);
+        assert_eq!(result["completed"],3);
+        assert_eq!(result["failed"],1);
+        assert_eq!(result["crawl"]["page_attempts"],5);
+        assert_eq!(result["crawl"]["page_attempt_limit"],12);
+        assert_eq!(result["crawl"]["site_coverage_verified"],false);
+    }
+
+    #[test]
+    fn crawl_depth_zero_and_failed_discovery() {
+        let tmp=Temp::new();
+        let mut db=Store::open(&tmp.db()).unwrap();
+        db.create_crawl("crawl","seed",100,0).unwrap();
+        let seed=db.claim_next().unwrap().unwrap();
+        assert!(db.settle_discovered(&seed,false,&json!({}),&["a".into()]).is_err());
+        db.settle_discovered(&seed,true,&json!({}),&["a".into()]).unwrap();
+        assert!(db.claim_next().unwrap().is_none());
+        assert_eq!(db.page("crawl",0,10).unwrap()["total"],1);
     }
 
     #[test]

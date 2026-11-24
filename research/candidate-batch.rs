@@ -1,6 +1,6 @@
 //! Fixed-batch research route; uses the actual static scraper and SQLite store.
 //! Deliberately not exposed as the full Firecrawl batch API.
-use super::{CandidateState, bounded, decode, refusal, static_document, static_target};
+use super::{CandidateState, bounded, decode, refusal, static_document, static_target,crawl};
 use crate::serve::from_a_web_page;
 use axum::{body::Bytes, extract::{Path, Query, State}, http::{HeaderMap,StatusCode},
     response::{IntoResponse,Response},Json};
@@ -73,6 +73,29 @@ pub(super) async fn create(State(state):State<CandidateState>,headers:HeaderMap,
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct CrawlRequest { url:String, limit:usize, max_discovery_depth:u32 }
+
+pub(super) async fn create_crawl(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
+    let req:CrawlRequest=match decode(&headers,&body){Ok(v)=>v,Err(r)=>return r};
+    let Some(batch)=state.batch else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"JOB_STORE_DISABLED")};
+    if !batch.ready(){return refusal(StatusCode::SERVICE_UNAVAILABLE,"WORKER_NOT_READY");}
+    if !(1..=100).contains(&req.limit)||req.max_discovery_depth>10{
+        return refusal(StatusCode::BAD_REQUEST,"INVALID_CRAWL_LIMITS");
+    }
+    let seed=match crawl::seed(&req.url){Ok(v)=>v.to_string(),Err(s)=>return refusal(s,"DESTINATION_DENIED")};
+    let id=uuid::Uuid::new_v4().to_string();
+    let store_id=id.clone();
+    match batch.call(move|store|store.create_crawl(&store_id,&seed,req.limit,req.max_discovery_depth)).await {
+        Ok(())=>{
+            batch.notify.notify_one();
+            (StatusCode::ACCEPTED,Json(json!({"success":true,"id":id,"url":format!("/research/batch/{id}")}))).into_response()
+        }
+        Err(e)=>store_refusal(e)
+    }
+}
+
 fn default_limit()->usize{10}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,18 +133,22 @@ async fn work(state:&CandidateState,batch:&BatchState)->Result<(),StoreError>{
             batch.notify.notified().await;
             continue;
         };
-        let result=match static_target(claim.item()){
-            Ok(target)=>static_document(state,target,25000).await,
-            Err(status)=>Err(status),
+        let result=if let Some(info)=claim.crawl(){
+            state.crawler.read(&info.seed,claim.item()).await
+        } else {
+            match static_target(claim.item()){
+                Ok(target)=>static_document(state,target,25000).await.map(|doc|(doc,Vec::new())),
+                Err(status)=>Err(status),
+            }
         };
-        let (ok,payload):(bool,Value)=match result{
-            Ok(doc)=>(true,doc),
-            Err(status)=>(false,json!({"error":"static scrape failed","status":status.as_u16()}))
+        let (ok,payload,links)=match result{
+            Ok((doc,links))=>(true,doc,links),
+            Err(status)=>(false,json!({"error":"page fetch failed","status":status.as_u16()}),Vec::new())
         };
         // Oversized documents become explicit per-item failures, never partial
         // JSON. Cancellation fences late writes even if an in-flight read ends.
         let result=batch.call(move|store|{
-            match store.settle(&claim,ok,&payload){
+            match store.settle_discovered(&claim,ok,&payload,&links){
                 Err(StoreError::Invalid("result exceeds research bound"))=>
                     store.settle(&claim,false,&json!({"error":"result exceeds research bound"})),
                 other=>other
