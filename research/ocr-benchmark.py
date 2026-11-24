@@ -38,22 +38,23 @@ def fixture(path):
         c.drawImage(ImageReader(im),0,0,width=612,height=792);c.showPage()
     c.save()
 
-with tempfile.TemporaryDirectory(prefix='ocr-spike-') as td:
-    p=Path(td); pdf=p/'mixed.pdf';fixture(pdf)
-    native,_=run(['pdftotext','-f','1','-l','1',str(pdf),'-'])
-    assert 'Native text control' in native
-    results=[]
-    for page in (2,3):
-        text,_=run(['pdftotext','-f',str(page),'-l',str(page),str(pdf),'-'])
-        assert not text.strip(), 'fixture unexpectedly has text layer'
-        for dpi in (200,300):
-            prefix=p/f'p{page}-{dpi}'
-            _,render_ms=run(['pdftoppm','-f',str(page),'-l',str(page),'-r',str(dpi),'-singlefile','-gray','-png',str(pdf),str(prefix)])
-            img=prefix.with_suffix('.png')
-            with Image.open(img) as im:
-                pixels=im.width*im.height
-                assert pixels <= 16_000_000
-            for psm in (3,6):
-                s,ocr_ms=run(['tesseract',str(img),'stdout','-l','eng','--psm',str(psm)])
-                results.append({'page':page,'degraded':page==3,'dpi':dpi,'psm':psm,'pixels':pixels,'render_ms':render_ms,'ocr_ms':ocr_ms,**score(s)})
-    print(json.dumps({'native_text_ok':True,'scanned_text_layers_empty':True,'results':results},indent=2))
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory(prefix='ocr-spike-') as td:
+        p=Path(td); pdf=p/'mixed.pdf';fixture(pdf)
+        native,_=run(['pdftotext','-f','1','-l','1',str(pdf),'-'])
+        assert 'Native text control' in native
+        results=[]
+        for page in (2,3):
+            text,_=run(['pdftotext','-f',str(page),'-l',str(page),str(pdf),'-'])
+            assert not text.strip(), 'fixture unexpectedly has text layer'
+            for dpi in (200,300):
+                prefix=p/f'p{page}-{dpi}'
+                _,render_ms=run(['pdftoppm','-f',str(page),'-l',str(page),'-r',str(dpi),'-singlefile','-gray','-png',str(pdf),str(prefix)])
+                img=prefix.with_suffix('.png')
+                with Image.open(img) as im:
+                    pixels=im.width*im.height
+                    assert pixels <= 16_000_000
+                for psm in (3,6):
+                    s,ocr_ms=run(['tesseract',str(img),'stdout','-l','eng','--psm',str(psm)])
+                    results.append({'page':page,'degraded':page==3,'dpi':dpi,'psm':psm,'pixels':pixels,'render_ms':render_ms,'ocr_ms':ocr_ms,**score(s)})
+        print(json.dumps({'native_text_ok':True,'scanned_text_layers_empty':True,'results':results},indent=2))
