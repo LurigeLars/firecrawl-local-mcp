@@ -291,7 +291,7 @@ diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
 +      </table>"#);
 +    assert!(out.contains("11/06/26 | 11/13/26 | 11/20/26 |"));
 +    assert!(out.contains("| [Crude oil](/crude) | 421.5 | -1.2 | 0 |"));
-+    assert!(out.contains("| Gasoline | | 210.0 | +0.8 |"));
++    assert!(out.contains("| Gasoline |  | 210.0 | +0.8 |"));
 +  }
 +
 +  #[test]
