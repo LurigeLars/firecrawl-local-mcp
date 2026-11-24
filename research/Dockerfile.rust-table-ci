@@ -1,0 +1,25 @@
+# Research-only CI build; no production services or credentials.
+FROM rust@sha256:1f65e0abcce9b449f9533df5994f2a62391059196c481a09b8e1b522dd6d75af AS build
+WORKDIR /src
+RUN git init && git fetch --depth 1 https://github.com/firecrawl/firecrawl.git 283bc7c662cf7b14801eb8b6f82b1b26533d8008 \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = 283bc7c662cf7b14801eb8b6f82b1b26533d8008
+COPY nested-label-tables.patch /tmp/nested-label-tables.patch
+RUN git apply --check /tmp/nested-label-tables.patch && git apply /tmp/nested-label-tables.patch
+WORKDIR /src/apps/local
+COPY table-fixture-probe.rs /tmp/table-fixture-probe.rs
+RUN test "$(grep -c '^fn process_html(' src/scrape.rs)" = 1 \
+    && sed -i 's/^fn process_html(/pub fn process_html(/' src/scrape.rs \
+    && mkdir -p src/bin \
+    && cp /tmp/table-fixture-probe.rs src/bin/table-fixture-probe.rs
+# Debug profile without debug symbols shares dependencies across tests and probe,
+# avoiding the release profile's expensive fat LTO for a correctness-only job.
+ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+RUN cargo test --locked --jobs 2 --lib markdown::tests \
+    && cargo build --locked --jobs 2 --bin table-fixture-probe
+FROM debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/apps/local/target/debug/table-fixture-probe /usr/local/bin/table-fixture-probe
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/table-fixture-probe"]
