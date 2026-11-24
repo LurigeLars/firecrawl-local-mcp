@@ -507,6 +507,11 @@ function Import-PublicProxyRuntimeSecrets {
         throw 'playwright-public-proxy-service is not running.'
     }
 
+    $camofoxId = (& docker @compose ps -q camofox-research-proxy).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $camofoxId) {
+        throw 'camofox-research-proxy is not running.'
+    }
+
     $values = Get-PublicProxyRuntimeValues
     try {
         foreach ($entry in $values.GetEnumerator()) {
@@ -520,6 +525,18 @@ function Import-PublicProxyRuntimeSecrets {
                 throw "Public proxy runtime secret import failed for $($entry.Key)."
             }
         }
+        # Docker restarts clear the tmpfs; Compose post_start is not a recovery mechanism.
+        foreach ($key in @('proxy_username', 'proxy_password')) {
+            $args = $compose + @(
+                "exec", "-T", "camofox-research-proxy",
+                "sh", "-ec",
+                "umask 077; cat > /run/firecrawl-proxy-secrets/$key.tmp; test -s /run/firecrawl-proxy-secrets/$key.tmp; mv -f /run/firecrawl-proxy-secrets/$key.tmp /run/firecrawl-proxy-secrets/$key"
+            )
+            $exitCode = Invoke-DockerWithExactStdin -InputText ([string]$values[$key]) -Arguments $args
+            if ($exitCode -ne 0) {
+                throw "Camofox proxy runtime secret import failed for $key."
+            }
+        }
     }
     finally {
         foreach ($key in @($values.Keys)) { $values[$key] = $null }
@@ -527,6 +544,8 @@ function Import-PublicProxyRuntimeSecrets {
 
     & docker @compose exec -T playwright-public-proxy-service sh -c 'test -s /run/firecrawl-secrets/proxy_server && test -s /run/firecrawl-secrets/proxy_username && test -s /run/firecrawl-secrets/proxy_password'
     if ($LASTEXITCODE -ne 0) { throw 'Public proxy runtime secret verification failed.' }
+    & docker @compose exec -T camofox-research-proxy sh -c 'test -s /run/camofox-research-secrets/access_key && test -s /run/firecrawl-proxy-secrets/proxy_username && test -s /run/firecrawl-proxy-secrets/proxy_password'
+    if ($LASTEXITCODE -ne 0) { throw 'Camofox proxy runtime secret verification failed.' }
 }
 
 function Remove-PublicProxyInitContainer {
