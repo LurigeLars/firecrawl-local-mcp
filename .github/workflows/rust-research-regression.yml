@@ -26,6 +26,8 @@ jobs:
           persist-credentials: false
       - name: Check static scrape contract
         run: node --test research/rust-scrape-contract.test.mjs research/searxng-proxy-contract.test.mjs research/model-proxy-contract.test.mjs playwright/public-proxy-router.test.mjs public/gateway/camofox-tools.test.mjs public/gateway/policy-ssrf.test.mjs
+      - name: Verify SQLite durability experiment
+        run: python3 research/sqlite-job-contract.py
       - name: Build pinned candidate and run Markdown regression tests
         run: docker build --progress plain --target table-test -t firecrawl-rust-table-ci:review -f research/Dockerfile.rust-table-ci research
       - name: Check every captured EIA cell in both cleanup modes
