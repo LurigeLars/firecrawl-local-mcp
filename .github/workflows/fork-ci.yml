@@ -125,6 +125,22 @@ jobs:
           docker run --rm --entrypoint sh firecrawl-redis:review -c "apk info -v zlib | grep -qvFx 'zlib-1.3.2-r0'"
           docker run --rm --entrypoint redis-server firecrawl-redis:review --version
 
+      - name: Build and smoke-test patched RabbitMQ candidate (no production data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull -t firecrawl-rabbitmq:review -f security/Dockerfile.rabbitmq-security security
+          docker run --rm --entrypoint sh firecrawl-rabbitmq:review -ec 'apk info -v zlib openssl libcrypto3 libssl3 musl; rabbitmqctl version'
+          name=firecrawl-rabbitmq-review
+          trap 'docker rm -fv "$name" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$name" --hostname "$name" firecrawl-rabbitmq:review
+          for attempt in $(seq 1 30); do
+            if docker exec "$name" rabbitmq-diagnostics -q check_running; then exit 0; fi
+            sleep 2
+          done
+          docker logs --tail 40 "$name"
+          exit 1
+
       - name: Build and verify npm-free public MCP and gateway images
         shell: bash
         run: |
