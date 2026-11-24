@@ -15,6 +15,8 @@ use tokio::sync::Semaphore;
 mod search;
 #[path = "local-render-probe.rs"]
 mod render;
+#[path = "candidate-batch.rs"]
+mod batch;
 
 const MAX_OUTPUT: usize = 2 * 1024 * 1024;
 const SEARCH: &str = "http://searxng-proxy:8081/search";
@@ -26,6 +28,7 @@ struct CandidateState {
     slots: Arc<Semaphore>,
     search_endpoint: String,
     render_endpoint: String,
+    batch: Option<batch::BatchState>,
 }
 
 #[derive(Deserialize)]
@@ -63,22 +66,34 @@ fn valid_static(req:&StaticRequest) -> bool {
         !req.store_in_cache && (1..=45000).contains(&req.timeout)
 }
 
+fn static_target(raw:&str)->Result<url::Url,StatusCode>{
+    let target=render::public_url(raw).map_err(|_|StatusCode::FORBIDDEN)?;
+    if target.scheme()!="https" || target.query().is_some() || target.fragment().is_some() || target.port().is_some(){
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(target)
+}
+
 async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
     let req:StaticRequest=match decode(&headers,&body) { Ok(v)=>v,Err(r)=>return r };
     if !valid_static(&req) { return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS"); }
-    let target=match render::public_url(&req.url) {
-        Ok(u)=>u,Err(_)=>return refusal(StatusCode::FORBIDDEN,"DESTINATION_DENIED")
+    let target=match static_target(&req.url) {
+        Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")
     };
-    if target.scheme()!="https" || target.query().is_some() || target.fragment().is_some() || target.port().is_some() {
-        return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_URL");
-    }
     let Ok(_slot)=state.slots.try_acquire() else {
         return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");
     };
-    let budget=Duration::from_millis(req.timeout);
-    let result=tokio::time::timeout(budget,async {
+    match static_document(&state,target,req.timeout).await {
+        Ok(data)=>bounded(json!({"success":true,"data":data})),
+        Err(status)=>refusal(status,"STATIC_SCRAPE_FAILED")
+    }
+}
+
+async fn static_document(state:&CandidateState,target:url::Url,timeout:u64)->Result<Value,StatusCode>{
+    let budget=Duration::from_millis(timeout);
+    tokio::time::timeout(budget,async {
         render::check_dns(&target).await.map_err(|_|StatusCode::FORBIDDEN)?;
-        let opts=ScrapeOptions {timeout:Some(req.timeout),..Default::default()};
+        let opts=ScrapeOptions {timeout:Some(timeout),..Default::default()};
         let mut data=cloud::scrape_with_fallback(&state.auth.engine,&state.auth.cloud,target.as_str(),&opts).await
             .map_err(|e|if e.code=="BLOCKED_TARGET" { StatusCode::FORBIDDEN } else { StatusCode::BAD_GATEWAY })?;
         // Do not promote incomplete, blocked or non-HTML results to success.
@@ -95,13 +110,8 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         render::check_dns(&landed).await.map_err(|_|StatusCode::FORBIDDEN)?;
         // Provenance, not an assertion of source completeness.
         data["researchSourceVerified"]=json!(false);
-        Ok::<_,StatusCode>(json!({"success":true,"data":data}))
-    }).await;
-    match result {
-        Ok(Ok(value))=>bounded(value),
-        Ok(Err(status))=>refusal(status,"STATIC_SCRAPE_FAILED"),
-        Err(_)=>refusal(StatusCode::GATEWAY_TIMEOUT,"CANDIDATE_DEADLINE"),
-    }
+        Ok::<_,StatusCode>(data)
+    }).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)?
 }
 
 async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
@@ -124,7 +134,7 @@ async fn render_route(State(state):State<CandidateState>,headers:HeaderMap,body:
     }
 }
 
-fn router(token:String, search_endpoint:String, render_endpoint:String)->Result<Router,String> {
+fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>)->Result<(Router,CandidateState),String> {
     if !(32..=256).contains(&token.len()) || token.chars().any(|c|c.is_control()||c.is_whitespace()) {
         return Err("invalid candidate token".into());
     }
@@ -137,24 +147,35 @@ fn router(token:String, search_endpoint:String, render_endpoint:String)->Result<
         jobs:Mutex::new(HashMap::new())
     });
     let state=CandidateState{auth:auth.clone(),slots:Arc::new(Semaphore::new(4)),
-        search_endpoint,render_endpoint};
-    Ok(Router::new()
-        .route("/health",get(||async{Json(json!({"status":"ok","engine":"rust-candidate","research":true}))}))
+        search_endpoint,render_endpoint,batch};
+    let app=Router::new()
+        .route("/health",get(|State(state):State<CandidateState>|async move{
+            let job_store=match &state.batch{None=>"disabled",Some(b) if b.ready()=>"ready",Some(_)=>"degraded"};
+            let status=if job_store=="degraded"{StatusCode::SERVICE_UNAVAILABLE}else{StatusCode::OK};
+            (status,Json(json!({"status":if status==StatusCode::OK{"ok"}else{"degraded"},"engine":"rust-candidate","research":true,"jobStore":job_store})))
+        }))
         .route("/v2/scrape",post(static_scrape))
         .route("/v2/search",post(search_route))
         .route("/research/render",post(render_route))
+        .route("/research/batch",post(batch::create))
+        .route("/research/batch/{id}",get(batch::status).delete(batch::cancel))
         .layer(DefaultBodyLimit::max(32*1024))
         .layer(middleware::from_fn_with_state(auth,gate))
-        .with_state(state))
+        .with_state(state.clone());
+    Ok((app,state))
 }
 
 /// Research binary always binds loopback. Secret file is operator configuration.
 pub async fn run_candidate()->Result<(),String> {
     let path=std::env::var("CANDIDATE_TOKEN_FILE").unwrap_or_else(|_|"/run/secrets/firecrawl_candidate_token".into());
     let token=std::fs::read_to_string(path).map_err(|_|"candidate token file unavailable".to_string())?;
-    let app=router(token.trim().to_string(),SEARCH.into(),RENDER.into())?;
+    let batch=std::env::var_os("CANDIDATE_JOB_DB_FILE").map(|path|batch::BatchState::open(std::path::Path::new(&path))).transpose()?;
+    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch)?;
     let listener=tokio::net::TcpListener::bind("127.0.0.1:3002").await.map_err(|e|e.to_string())?;
-    axum::serve(listener,app).with_graceful_shutdown(super::shutdown_signal()).await.map_err(|e|e.to_string())
+    let worker=state.batch.is_some().then(||tokio::spawn(batch::supervise(state)));
+    let result=axum::serve(listener,app).with_graceful_shutdown(super::shutdown_signal()).await.map_err(|e|e.to_string());
+    if let Some(worker)=worker {worker.abort();let _=worker.await;}
+    result
 }
 
 #[cfg(test)]
@@ -176,7 +197,7 @@ mod tests {
                 Json(json!({"content":"<html><body><p>Stock 421.5</p></body></html>",
                     "pageStatusCode":200,"contentType":"text/html","url":body["url"]}))
             }))).await;
-        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape")).unwrap()).await;
+        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape"),None).unwrap().0).await;
         let c=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
         assert_eq!(c.get(format!("{base}/health")).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
         assert_eq!(c.get(format!("{base}/health")).bearer_auth(TOKEN).header("Host","bad.example").send().await.unwrap().status(),StatusCode::FORBIDDEN);

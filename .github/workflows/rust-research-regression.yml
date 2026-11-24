@@ -48,11 +48,11 @@ jobs:
             firecrawl-rust-ocr-ci:review
       - name: Smoke actual isolated candidate server process
         run: |
-          timeout 45s docker run --rm --pull=never --network none --read-only \
+          timeout 75s docker run --rm --pull=never --network none --read-only \
             --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
             --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
-            --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py
+            --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py --batch
 
       - name: Live public-source candidate sample (separate evidence)
         id: live_sample
@@ -78,8 +78,5 @@ jobs:
       - name: Test standalone embedded SQLite research crate
         run: |
           rustc --version
-          cargo test --manifest-path research/job-store/Cargo.toml
+          cargo test --locked --manifest-path research/job-store/Cargo.toml
           cargo tree --manifest-path research/job-store/Cargo.toml --locked
-          echo 'RESEARCH_LOCKFILE_BEGIN'
-          cat research/job-store/Cargo.lock
-          echo 'RESEARCH_LOCKFILE_END'

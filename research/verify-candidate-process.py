@@ -79,6 +79,10 @@ def verify_live(pid):
 with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
     token_path=pathlib.Path(td)/"token"
     env={**os.environ,"CANDIDATE_TOKEN_FILE":str(token_path)}
+    batch_id=None
+    saved_batch=None
+    if "--batch" in sys.argv:
+        env["CANDIDATE_JOB_DB_FILE"]=str(pathlib.Path(td)/"jobs.sqlite")
     bad=subprocess.run([BIN],env=env,capture_output=True,timeout=5)
     assert bad.returncode!=0,"must refuse missing token"
     token_path.write_text(TOKEN)
@@ -109,6 +113,27 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             print("CANDIDATE_PROCESS_SMOKE_PASS: authenticated loopback, unsupported options and private destinations rejected")
             if "--live" in sys.argv:
                 verify_live(proc.pid)
+            if "--batch" in sys.argv:
+                assert json.loads(call("/health")[1])["jobStore"]=="ready"
+                assert call("/research/batch",payload={"urls":["https://127.0.0.1/"]})[0]==403
+                # No egress in this test: a real guarded request must settle as
+                # an explicit per-item failure, not an invented document.
+                status,body=call("/research/batch",payload={"urls":["https://93.184.216.34/report"]})
+                assert status==202
+                batch_id=json.loads(body)["id"]
+                deadline=time.monotonic()+30
+                while time.monotonic()<deadline:
+                    status,body=call("/research/batch/"+batch_id)
+                    assert status==200
+                    saved_batch=json.loads(body)["data"]
+                    if saved_batch["status"]=="completed":
+                        break
+                    time.sleep(.1)
+                else:
+                    raise AssertionError("durable worker did not settle")
+                assert saved_batch["failed"]==1 and saved_batch["completed"]==0
+                assert saved_batch["results"][0]["state"]=="failed"
+                assert call("/research/batch/"+batch_id,token=None)[0]==401
         finally:
             proc.terminate()
             try:
@@ -116,3 +141,29 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+
+    if batch_id:
+        # Reopen the same private DB in a new actual server process.
+        with subprocess.Popen([BIN],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL) as proc:
+            try:
+                for _ in range(50):
+                    assert proc.poll() is None,"restarted candidate exited"
+                    try:
+                        if call("/health")[0]==200:
+                            break
+                    except (OSError,urllib.error.URLError):
+                        pass
+                    time.sleep(.1)
+                else:
+                    raise AssertionError("restarted candidate health unavailable")
+                status,body=call("/research/batch/"+batch_id)
+                assert status==200
+                assert json.loads(body)["data"]==saved_batch
+                print("DURABLE_BATCH_PROCESS_PASS: real worker settled failure; identical status and result after restart")
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)

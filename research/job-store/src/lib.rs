@@ -154,8 +154,25 @@ impl Store {
     /// A requeued read may be repeated, but only its new generation can settle.
     fn recover_after_worker_exit(&mut self) -> Result<usize> {
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // An interrupted request may be repeated at most three times in
+        // total across restarts; ordinary fetch failures are never retried.
+        let exhausted:Vec<(String,String)>={
+            let mut stmt=tx.prepare("SELECT job,key FROM items WHERE state='running' AND generation>=3
+                AND job IN (SELECT id FROM jobs WHERE status='scraping')")?;
+            let rows=stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            rows.collect::<std::result::Result<Vec<_>,_>>()?
+        };
+        for (job,key) in exhausted {
+            let seq:i64=tx.query_row("SELECT COALESCE(MAX(result_seq),0)+1 FROM items WHERE job=?1",
+                [&job],|r|r.get(0))?;
+            tx.execute("UPDATE items SET state='failed',result_seq=?3,payload=?4 WHERE job=?1 AND key=?2",
+                params![job,key,seq,json!({"error":"interrupted attempt budget exhausted"}).to_string()])?;
+        }
         let n = tx.execute("UPDATE items SET state='queued' WHERE state='running'
             AND job IN (SELECT id FROM jobs WHERE status='scraping')", [])?;
+        tx.execute("UPDATE jobs SET status='completed',finished_at=?1 WHERE status='scraping'
+            AND NOT EXISTS (SELECT 1 FROM items WHERE items.job=jobs.id AND state IN ('queued','running'))",
+            [now_secs()?])?;
         tx.commit()?;
         Ok(n)
     }
@@ -189,7 +206,8 @@ impl Store {
         }
         self.purge_expired()?;
         let tx = self.db.transaction()?;
-        let status: String = tx.query_row("SELECT status FROM jobs WHERE id=?1", [id], |r| r.get(0))?;
+        let status: String = tx.query_row("SELECT status FROM jobs WHERE id=?1", [id], |r| r.get(0))
+            .optional()?.ok_or(Error::Invalid("job not found"))?;
         let (total, succeeded, failed, cancelled, last): (i64,i64,i64,i64,i64) = tx.query_row(
             "SELECT COUNT(*),SUM(state='done'),SUM(state='failed'),SUM(state='cancelled'),
              COALESCE(MAX(result_seq),0) FROM items WHERE job=?1", [id],
@@ -284,6 +302,23 @@ mod tests {
         assert_eq!(result["completed"],1);
         assert_eq!(result["cancelled"],2);
         assert_eq!(result["status"],"cancelled");
+    }
+
+    #[test]
+    fn restart_attempt_budget_is_bounded() {
+        let tmp=Temp::new();
+        let mut db=Store::open(&tmp.db()).unwrap();
+        db.create("job",&["a".into()]).unwrap();
+        for _ in 0..3 {
+            assert!(db.claim_next().unwrap().is_some());
+            drop(db);
+            db=Store::open(&tmp.db()).unwrap();
+        }
+        assert!(db.claim_next().unwrap().is_none());
+        let page=db.page("job",0,10).unwrap();
+        assert_eq!(page["status"],"completed");
+        assert_eq!(page["failed"],1);
+        assert_eq!(page["completed"],0);
     }
 
     #[test]
