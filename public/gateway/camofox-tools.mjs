@@ -49,9 +49,17 @@ function isChallenge(snap, status, url) {
   // 5e.tools ships a large SPA skeleton even when the requested chapter never loads.
   return (url.hostname === '5e.tools' || url.hostname.endsWith('.5e.tools')) && /Loading\.\.\./i.test(text) && !/Brimstone Hold|Fire and Darkness|Book of Vile Darkness/i.test(text);
 }
+function trustedSidecarBase(raw, expectedHost) {
+  const url = new URL(String(raw));
+  if (url.protocol !== 'http:' || url.hostname !== expectedHost || url.port !== '9377' ||
+      url.username || url.password || url.pathname !== '/' || url.search || url.hash)
+    throw new Error('Invalid isolated Camoufox upstream');
+  return url.origin;
+}
 async function call(base, key, method, path, body, timeout = 20000) {
-  const response = await fetch(base.replace(/\/$/, '') + path, {
+  const response = await fetch(base + path, {
     method,
+    redirect: 'error',
     headers: { authorization: 'Bearer ' + key, ...(body ? { 'content-type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(timeout),
@@ -89,8 +97,13 @@ export async function callCamofoxTool(args = {}, settings = {}) {
   let target;
   try { target = safeUrl(args.url); } catch { return result({ error: 'invalid public URL' }, true); }
   const maxChars = Math.min(30000, Math.max(1000, Number.isInteger(args.maxChars) ? args.maxChars : 12000));
-  const direct = settings.directUrl || process.env.CAMOFOX_RESEARCH_URL || 'http://camofox-research:9377';
-  const proxy = settings.proxyUrl || process.env.CAMOFOX_RESEARCH_PROXY_URL || 'http://camofox-research-proxy:9377';
+  let direct, proxy;
+  try {
+    direct = trustedSidecarBase(settings.directUrl || process.env.CAMOFOX_RESEARCH_URL || 'http://camofox-research:9377', 'camofox-research');
+    proxy = trustedSidecarBase(settings.proxyUrl || process.env.CAMOFOX_RESEARCH_PROXY_URL || 'http://camofox-research-proxy:9377', 'camofox-research-proxy');
+  } catch {
+    return result({ error: 'invalid isolated Camoufox upstream configuration' }, true);
+  }
   const hosts = settings.proxyHosts || process.env.CAMOFOX_RESEARCH_PROXY_HOSTS || '5e.tools';
   let key;
   try {

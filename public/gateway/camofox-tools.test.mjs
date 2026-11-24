@@ -7,16 +7,16 @@ function stub(t, directStatus, directText, proxyText = null) {
   t.after(() => { globalThis.fetch = old; });
   globalThis.fetch = async (url, opts) => {
     const u = new URL(url);
-    const isProxy = u.hostname === 'camofox-proxy';
-    requests.push({ url: String(url), method: opts.method, auth: opts.headers?.authorization, body: opts.body });
+    const isProxy = u.hostname === 'camofox-research-proxy';
+    requests.push({ url: String(url), method: opts.method, auth: opts.headers?.authorization, redirect: opts.redirect, body: opts.body });
     if (opts.method === 'POST') return new Response(JSON.stringify({ tabId: 'tab_abc', httpStatus: isProxy ? 200 : directStatus }), { status: 200 });
     if (opts.method === 'DELETE') return new Response('{}', { status: 200 });
     return new Response(JSON.stringify({ snapshot: isProxy ? proxyText : directText }), { status: 200 });
   };
   return requests;
 }
-const setup = { accessKey: 'a'.repeat(64), directUrl: 'http://camofox-direct:9377',
-  proxyUrl: 'http://camofox-proxy:9377', wait: async () => {} };
+const setup = { accessKey: 'a'.repeat(64), directUrl: 'http://camofox-research:9377',
+  proxyUrl: 'http://camofox-research-proxy:9377', wait: async () => {} };
 
 test('tool exposed exactly once only for allowlisted callers', () => {
   const m = { result: { tools: [] } };
@@ -36,6 +36,7 @@ test('returns a direct read, cleans session, never touches proxy for successful 
   assert.equal(payload.snapshot, 'A complete public page with main content.');
   assert.equal(calls.length, 3);
   assert.equal(calls[0].auth, 'Bearer ' + 'a'.repeat(64));
+  assert.ok(calls.every(c => c.redirect === 'error'));
   assert.match(calls[2].url, /\/sessions\/firecrawl-read-/);
 });
 
@@ -69,5 +70,21 @@ test('invalid URL is rejected before any HTTP request', async t => {
   globalThis.fetch = async (...args) => { calls.push(args); throw Error('unexpected'); };
   const result = await callCamofoxTool({ url: 'file:///etc/passwd' }, setup);
   assert.equal(result.isError, true);
+  assert.equal(calls.length, 0);
+});
+
+test('refuses untrusted upstreams before sending the bearer token', async t => {
+  const calls = stub(t, 200, 'Public content');
+  for (const settings of [
+    { ...setup, directUrl: 'http://example.com:9377' },
+    { ...setup, proxyUrl: 'http://camofox-research-proxy.example.com:9377' },
+    { ...setup, directUrl: 'http://user@camofox-research:9377' },
+    { ...setup, directUrl: 'http://camofox-research:9378' },
+    { ...setup, directUrl: 'http://camofox-research:9377/other' },
+    { ...setup, proxyUrl: 'http://camofox-research:9377' },
+  ]) {
+    const result = await callCamofoxTool({ url: 'https://example.com' }, settings);
+    assert.equal(result.isError, true);
+  }
   assert.equal(calls.length, 0);
 });
