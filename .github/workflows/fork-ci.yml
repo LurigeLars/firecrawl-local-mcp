@@ -135,7 +135,8 @@ jobs:
           trap 'docker rm -fv "$name" >/dev/null 2>&1 || true' EXIT
           docker run -d --name "$name" --hostname "$name" firecrawl-rabbitmq:review
           for attempt in $(seq 1 30); do
-            if docker exec "$name" rabbitmq-diagnostics -q check_running; then exit 0; fi
+            if docker exec --user rabbitmq "$name" rabbitmq-diagnostics -q check_running; then exit 0; fi
+            echo "Waiting for RabbitMQ ($attempt/30)"
             sleep 2
           done
           docker logs --tail 40 "$name"
