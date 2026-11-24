@@ -15,7 +15,7 @@ fn default_timeout() -> u64 { 60_000 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Request {
+pub(crate) struct Request {
     query: String,
     #[serde(default = "default_limit")]
     limit: usize,
@@ -42,7 +42,7 @@ fn valid_domain(s: &str) -> bool {
 }
 
 impl Request {
-    fn validate(&self) -> Result<(), &'static str> {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if self.query.trim().is_empty() || self.query.len() > 4096 ||
             self.query.chars().any(char::is_control) ||
             !(1..=100).contains(&self.limit) ||
@@ -110,7 +110,7 @@ fn accept_hit(raw: RawHit, req: &Request) -> Option<Hit> {
     Some(Hit { url: url.into(), title, description })
 }
 
-async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'static str> {
+pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'static str> {
     req.validate()?;
     let client = reqwest::Client::builder()
         .no_proxy().redirect(reqwest::redirect::Policy::none())
