@@ -1,0 +1,10 @@
+*.patch text eol=lf
+*.rs text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+Cargo.toml text eol=lf
+Cargo.lock text eol=lf
+Dockerfile* text eol=lf

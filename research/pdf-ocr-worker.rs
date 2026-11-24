@@ -85,7 +85,7 @@ async fn extract(pdf: &[u8], single_block: bool) -> Result<Value, &'static str> 
     // Classification itself is bounded by the external sandbox wall clock.
     let end = tokio::time::Instant::now() + Duration::from_secs(45);
     for (i, p) in parsed.pages.iter().enumerate() {
-        if p.page + 1 != i + 1 || p.markdown.len() > MAX_TEXT {return Err("invalid page order or page text too large");}
+        if p.page as usize != i || p.markdown.len() > MAX_TEXT {return Err("invalid page order or page text too large");}
         let native = p.markdown.as_str();
         let result = if !p.needs_ocr {None}
             else if attempted >= MAX_OCR_PAGES || tokio::time::Instant::now() >= end {
