@@ -1,0 +1,32 @@
+name: Rust research regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/**'
+      - '.github/workflows/rust-research-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-research-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-table-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout research
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check static scrape contract
+        run: node --test research/rust-scrape-contract.test.mjs
+      - name: Build pinned candidate and run Markdown regression tests
+        run: docker build --progress plain -t firecrawl-rust-table-ci:review -f research/Dockerfile.rust-table-ci research
+      - name: Check every captured EIA cell in both cleanup modes
+        run: python3 research/verify-eia-fixture.py
