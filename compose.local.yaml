@@ -31,6 +31,8 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
+      # #231: three workers saved 22% idle RAM in the local benchmark.
+      NUQ_WORKER_COUNT: "3"
       POSTGRES_PASSWORD: ""
     tmpfs:
       - /run/firecrawl-secrets:rw,nosuid,nodev,noexec,size=64k,uid=1000,gid=1000,mode=0700
