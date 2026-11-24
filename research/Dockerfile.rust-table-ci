@@ -7,23 +7,33 @@ RUN git init && git fetch --depth 1 https://github.com/firecrawl/firecrawl.git 2
 COPY nested-label-tables.patch /tmp/nested-label-tables.patch
 RUN git apply --check /tmp/nested-label-tables.patch && git apply /tmp/nested-label-tables.patch
 WORKDIR /src/apps/local
-COPY table-fixture-probe.rs pdf-page-probe.rs local-search-probe.rs local-model-probe.rs local-render-probe.rs composed-api-test.rs /tmp/
+COPY table-fixture-probe.rs pdf-page-probe.rs local-search-probe.rs local-model-probe.rs local-render-probe.rs composed-api-test.rs candidate-api.rs candidate-main.rs /tmp/
 RUN test "$(grep -c '^fn process_html(' src/scrape.rs)" = 1 \
     && sed -i 's/^fn process_html(/pub fn process_html(/' src/scrape.rs \
     && mkdir -p src/bin \
-    && cp /tmp/table-fixture-probe.rs /tmp/pdf-page-probe.rs /tmp/local-search-probe.rs /tmp/local-model-probe.rs /tmp/local-render-probe.rs /tmp/composed-api-test.rs src/bin/
+    && cp /tmp/table-fixture-probe.rs /tmp/pdf-page-probe.rs /tmp/local-search-probe.rs /tmp/local-model-probe.rs /tmp/local-render-probe.rs /tmp/composed-api-test.rs /tmp/candidate-main.rs src/bin/ \
+    && cp /tmp/candidate-api.rs src/candidate-api.rs \
+    && sed 's/use firecrawl_local::/use crate::/' /tmp/local-search-probe.rs > src/local-search-probe.rs \
+    && sed 's/use firecrawl_local::/use crate::/' /tmp/local-render-probe.rs > src/local-render-probe.rs \
+    && printf '\n#[path = "candidate-api.rs"]\nmod candidate_api;\npub use candidate_api::run_candidate;\n' >> src/serve.rs
 # Debug profile without debug symbols shares dependencies across tests and probe,
 # avoiding the release profile's expensive fat LTO for a correctness-only job.
 ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 RUN cargo test --locked --jobs 2 --lib markdown::tests \
     && cargo test --locked --jobs 2 --bin local-search-probe --bin local-model-probe --bin local-render-probe --bin composed-api-test \
-    && cargo build --locked --jobs 2 --bin table-fixture-probe --bin pdf-page-probe
+    && cargo test --locked --jobs 2 --lib serve::candidate_api::tests \
+    && cargo build --locked --jobs 2 --bin table-fixture-probe --bin pdf-page-probe --bin candidate-main
 FROM debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS table-test
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/apps/local/target/debug/table-fixture-probe /usr/local/bin/table-fixture-probe
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/table-fixture-probe"]
+
+# Runnable but isolated candidate; no production Compose/gateway configuration.
+FROM table-test AS candidate-runtime
+COPY --from=build /src/apps/local/target/debug/candidate-main /usr/local/bin/candidate-main
+ENTRYPOINT ["/usr/local/bin/candidate-main"]
 
 # Separate disposable OCR fixture stage; no changes to the production image.
 FROM table-test AS ocr-test
@@ -35,5 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /src/apps/local/target/debug/pdf-page-probe /usr/local/bin/pdf-page-probe
 COPY ocr-benchmark.py /research/ocr_benchmark.py
 COPY verify-selective-ocr.py /research/verify-selective-ocr.py
+COPY --from=candidate-runtime /usr/local/bin/candidate-main /usr/local/bin/candidate-main
+COPY verify-candidate-process.py /research/verify-candidate-process.py
 USER 65532:65532
 ENTRYPOINT ["python3","-B","/research/verify-selective-ocr.py"]

@@ -46,6 +46,14 @@ jobs:
             --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
             firecrawl-rust-ocr-ci:review
+      - name: Smoke actual isolated candidate server process
+        run: |
+          timeout 45s docker run --rm --pull=never --network none --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py
+
   durable-job-store:
     runs-on: ubuntu-latest
     timeout-minutes: 10

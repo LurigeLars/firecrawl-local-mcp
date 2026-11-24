@@ -29,7 +29,7 @@ struct Rendered {
     url: Option<String>,
 }
 
-fn public_url(raw: &str) -> Result<Url, &'static str> {
+pub(crate) fn public_url(raw: &str) -> Result<Url, &'static str> {
     if raw.len() > 8192 { return Err("URL too long"); }
     let url = Url::parse(raw).map_err(|_| "invalid URL")?;
     check_url(&url, NetworkPolicy::PublicOnly).map_err(|_| "destination denied")?;
@@ -39,7 +39,7 @@ fn public_url(raw: &str) -> Result<Url, &'static str> {
 // Match the existing gateway's rule: reject the whole answer set if any
 // address is private. The browser must ALSO enforce this at connection time;
 // this preflight by itself cannot protect against DNS rebinding.
-async fn check_dns(url: &Url) -> Result<(), &'static str> {
+pub(crate) async fn check_dns(url: &Url) -> Result<(), &'static str> {
     let host = url.host_str().ok_or("missing host")?.trim_matches(['[', ']']);
     let port = url.port_or_known_default().ok_or("missing port")?;
     let mut resolved = tokio::net::lookup_host((host, port)).await.map_err(|_| "DNS failed")?.peekable();
