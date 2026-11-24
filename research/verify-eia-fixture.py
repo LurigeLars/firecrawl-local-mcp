@@ -10,10 +10,17 @@ source = (ROOT / "fixtures/eia-stock-table.html").read_text(encoding="utf-8")
 expected = json.loads((ROOT / "fixtures/eia-stock-table.expected.json").read_text(encoding="utf-8"))
 assert len(expected["dates"]) == 6 and len(expected["rows"]) == 39
 assert all(len(row) == 7 for row in expected["rows"])
+# The source labels were captured as HTML text; decode HTML entities once.
+expected["rows"] = [[unescape(row[0]), *row[1:]] for row in expected["rows"]]
 
 def norm(s):
     s = re.sub(r'!?\[([^\]]*)\]\([^)]*\)', r'\1', s)
-    return ' '.join(unescape(s).replace('**', '').replace('\\|', '|').replace('\\_', '_').replace('\u2212', '-').split())
+    s = unescape(s).replace('**', '').replace('\\|', '|').replace('\\_', '_').replace('\u2212', '-').strip()
+    # Markdown escapes a leading > to avoid starting a blockquote. Preserve
+    # the comparison operator itself; do not normalize numeric data away.
+    if s.startswith(r'\>'):
+        s = s[1:]
+    return ' '.join(s.split())
 
 def blocks(md):
     block = []
@@ -38,8 +45,10 @@ def verify(md):
                     continue
                 # Include blank-value rows, not just numeric hits. No
                 # cross-table or cross-row matching; order and multiplicity matter.
-                rows = [[' '.join(x for x in row[:pos] if x), *row[pos:pos+6]]
-                        for row in block[i+1:] if len(row) >= pos+6]
+                body = block[i+1:]
+                if any(len(row) != len(header) for row in body):
+                    raise AssertionError("ragged EIA data row")
+                rows = [[' '.join(x for x in row[:pos] if x), *row[pos:pos+6]] for row in body]
                 matches.append(rows)
     if matches != [expected["rows"]]:
         best = max(matches, key=lambda rows: sum(a == b for a,b in zip(rows, expected["rows"])), default=[])
