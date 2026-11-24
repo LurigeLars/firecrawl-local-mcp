@@ -1,7 +1,10 @@
 diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
 --- a/apps/local/src/markdown.rs
 +++ b/apps/local/src/markdown.rs
-@@ -546,108 +546,170 @@
+@@ -543,114 +543,176 @@
+   normalize_inline(&text)
+ }
+ 
 -fn has_nested_table(node: &NodeRef) -> bool {
 -  node
 -    .descendants()
@@ -280,7 +283,13 @@ diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
 +  }
 +  out
 +}
-@@ -869,2 +931,25 @@
+ 
+ fn render_block(node: &NodeRef, name: &str) -> String {
+   match name {
+@@ -866,8 +928,31 @@
+     );
+   }
+ 
 +  #[test]
 +  fn nested_label_layout_preserves_rectangular_financial_grid() {
 +    let out = md(r#"<table>
@@ -306,3 +315,6 @@ diff --git a/apps/local/src/markdown.rs b/apps/local/src/markdown.rs
 +
    #[test]
    fn layout_tables_are_unwrapped() {
+     let out = md("<table><tr><td><p>First block.</p><p>Second block.</p></td></tr></table>");
+     assert_eq!(out, "First block.\n\nSecond block.");
+   }
