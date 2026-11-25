@@ -99,7 +99,7 @@ function Invoke-McpDocker {
     throw 'Unexpected rollback Docker invocation.'
 }
 try {
-    foreach ($service in @('api','mcp')) { $script:tags["firecrawl-$($service):rust-transition-legacy"]=$legacy[$service].image }
+    foreach ($service in @('api','mcp')) { $script:tags["firecrawl-$($service):rust-transition-backup"]=$legacy[$service].image }
     $script:states.api=@{id=('a'*64);image=$candidate.api;running=$true}
     # Active MCP can have been safely upgraded since initial promotion.
     $script:states.mcp=@{id=('b'*64);image=('sha256:'+('f'*64));running=$true}

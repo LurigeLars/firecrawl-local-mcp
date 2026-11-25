@@ -166,7 +166,7 @@ function Restore-LegacyTransition([string[]]$LegacyCompose,[string]$ProjectRoot,
         Start-OriginalTransitionService -Service $service -Id $legacy[$service].id -Image $legacy[$service].image
     }
     foreach ($service in @('api','mcp')) {
-        $tag="firecrawl-$($service):rust-transition-legacy"
+        $tag="firecrawl-$($service):rust-transition-backup"
         if ((Get-TransitionImageId $tag) -cne $legacy[$service].image) { throw 'Preserved rollback image differs.' }
         Set-TransitionTag -Id $legacy[$service].image -Tag "firecrawl-$($service):latest"
     }
@@ -240,7 +240,7 @@ function Invoke-RustPromotion {
     }
     Set-TransitionTag -Id $candidate.api -Tag 'firecrawl-rust-api:local'
     Set-TransitionTag -Id $candidate['pdf-ocr'] -Tag 'firecrawl-rust-document:local'
-    foreach ($service in @('api','mcp')) { Set-TransitionTag -Id $legacy[$service].image -Tag "firecrawl-$($service):rust-transition-legacy" }
+    foreach ($service in @('api','mcp')) { Set-TransitionTag -Id $legacy[$service].image -Tag "firecrawl-$($service):rust-transition-backup" }
     $j=[ordered]@{schema=1;revision=$Revision;legacy=$legacy;candidate=$candidate}
     $null=New-Item -ItemType Directory -Path (Split-Path -Parent $journalPath) -Force
     $bytes=[Text.Encoding]::UTF8.GetBytes(($j | ConvertTo-Json -Depth 8))
