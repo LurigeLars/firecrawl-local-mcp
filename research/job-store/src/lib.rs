@@ -24,7 +24,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone)]
 pub struct Claim { job: String, item: String, generation: i64, crawl: Option<CrawlClaim> }
 #[derive(Debug, Clone)]
-pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32, pub include_sitemap: bool, pub page_limit: u32 }
+pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32, pub include_sitemap: bool, pub page_limit: u32, pub policy_json: String }
 impl Claim {
     pub fn item(&self) -> &str { &self.item }
     pub fn job(&self)->&str { &self.job }
@@ -57,7 +57,7 @@ impl Store {
         db.busy_timeout(Duration::from_secs(2))?;
         let version:i64=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         let tables:i64=db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0))?;
-        if !matches!(version,1|2|3) && !(version==0 && tables==0) {
+        if !matches!(version,1|2|3|4) && !(version==0 && tables==0) {
             return Err(Error::Invalid("unsupported store schema"));
         }
         db.execute_batch("
@@ -83,7 +83,8 @@ impl Store {
                 job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
                 seed TEXT NOT NULL, page_limit INTEGER NOT NULL CHECK(page_limit BETWEEN 1 AND 100),
                 max_depth INTEGER NOT NULL CHECK(max_depth BETWEEN 0 AND 10),
-                include_sitemap INTEGER NOT NULL DEFAULT 0 CHECK(include_sitemap IN (0,1))
+                include_sitemap INTEGER NOT NULL DEFAULT 0 CHECK(include_sitemap IN (0,1)),
+                policy_json TEXT NOT NULL DEFAULT '{}'
             );")?;
         if version==1 {
             db.execute_batch("ALTER TABLE items ADD COLUMN depth INTEGER NOT NULL DEFAULT 0 CHECK(depth BETWEEN 0 AND 10);")?;
@@ -91,7 +92,10 @@ impl Store {
         if version==2 {
             db.execute_batch("ALTER TABLE crawl_jobs ADD COLUMN include_sitemap INTEGER NOT NULL DEFAULT 0 CHECK(include_sitemap IN (0,1));")?;
         }
-        db.execute_batch("PRAGMA user_version=3; COMMIT;")?;
+        if matches!(version,2|3) {
+            db.execute_batch("ALTER TABLE crawl_jobs ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}';")?;
+        }
+        db.execute_batch("PRAGMA user_version=4; COMMIT;")?;
         let journal:String=db.query_row("PRAGMA journal_mode",[],|r|r.get(0))?;
         if !journal.eq_ignore_ascii_case("wal") {return Err(Error::Invalid("WAL unavailable"));}
         let mut store=Self {db,_owner:owner};
@@ -109,13 +113,20 @@ impl Store {
     }
 
     pub fn create_crawl_with_sitemap(&mut self,id:&str,seed:&str,limit:usize,max_depth:u32,include_sitemap:bool)->Result<()> {
+        self.create_crawl_configured(id,seed,limit,max_depth,include_sitemap,&json!({}))
+    }
+
+    pub fn create_crawl_configured(&mut self,id:&str,seed:&str,limit:usize,max_depth:u32,
+        include_sitemap:bool,policy:&Value)->Result<()> {
         if !(1..=MAX_ITEMS).contains(&limit) || max_depth>10 {
             return Err(Error::Invalid("invalid crawl limits"));
         }
-        self.create_job(id,&[seed.to_owned()],Some((seed,limit,max_depth,include_sitemap)))
+        let raw=serde_json::to_string(policy)?;
+        if !policy.is_object()||raw.len()>8192{return Err(Error::Invalid("invalid crawl policy"));}
+        self.create_job(id,&[seed.to_owned()],Some((seed,limit,max_depth,include_sitemap,&raw)))
     }
 
-    fn create_job(&mut self,id:&str,keys:&[String],crawl:Option<(&str,usize,u32,bool)>)->Result<()> {
+    fn create_job(&mut self,id:&str,keys:&[String],crawl:Option<(&str,usize,u32,bool,&str)>)->Result<()> {
         if id.is_empty() || id.len() > 128 || keys.is_empty() || keys.len() > MAX_ITEMS ||
             keys.iter().any(|k| k.is_empty() || k.len() > 8192) {
             return Err(Error::Invalid("invalid batch"));
@@ -126,8 +137,9 @@ impl Store {
         let count: i64 = tx.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))?;
         if count >= MAX_JOBS { return Err(Error::Invalid("job store full")); }
         tx.execute("INSERT INTO jobs(id,status,created_at) VALUES(?1,'scraping',?2)",params![id,now])?;
-        if let Some((seed,limit,max_depth,include_sitemap))=crawl {
-            tx.execute("INSERT INTO crawl_jobs(job,seed,page_limit,max_depth,include_sitemap) VALUES(?1,?2,?3,?4,?5)",params![id,seed,limit as i64,max_depth,include_sitemap])?;
+        if let Some((seed,limit,max_depth,include_sitemap,policy))=crawl {
+            tx.execute("INSERT INTO crawl_jobs(job,seed,page_limit,max_depth,include_sitemap,policy_json) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![id,seed,limit as i64,max_depth,include_sitemap,policy])?;
         }
         for (i, key) in keys.iter().enumerate() {
             tx.execute("INSERT INTO items(job,key,ordinal,state) VALUES(?1,?2,?3,'queued')",
@@ -153,8 +165,8 @@ impl Store {
              WHERE items.job=?1 AND jobs.status='scraping' AND items.state='queued'
              ORDER BY ordinal LIMIT 1", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let Some((item, old,depth)) = next else { return Ok(None); };
-        let crawl=tx.query_row("SELECT seed,max_depth,include_sitemap,page_limit FROM crawl_jobs WHERE job=?1",[id],
-            |r|Ok(CrawlClaim{seed:r.get(0)?,depth,max_depth:r.get(1)?,include_sitemap:r.get(2)?,page_limit:r.get(3)?})).optional()?;
+        let crawl=tx.query_row("SELECT seed,max_depth,include_sitemap,page_limit,policy_json FROM crawl_jobs WHERE job=?1",[id],
+            |r|Ok(CrawlClaim{seed:r.get(0)?,depth,max_depth:r.get(1)?,include_sitemap:r.get(2)?,page_limit:r.get(3)?,policy_json:r.get(4)?})).optional()?;
         let generation = old.checked_add(1).ok_or(Error::Invalid("claim generation exhausted"))?;
         tx.execute("UPDATE items SET state='running',generation=?3 WHERE job=?1 AND key=?2",
             params![id,item,generation])?;
@@ -522,7 +534,7 @@ mod tests {
         let mut db=Store::open(&tmp.db()).unwrap();
         db.create_crawl("legacy","old",2,1).unwrap();
         // Simulate exact previous schema, without changing existing jobs.
-        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN include_sitemap; PRAGMA user_version=2;").unwrap();
+        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN policy_json; ALTER TABLE crawl_jobs DROP COLUMN include_sitemap; PRAGMA user_version=2;").unwrap();
         drop(db);
         let mut db=Store::open(&tmp.db()).unwrap();
         let old=db.claim("legacy").unwrap().unwrap();
@@ -549,6 +561,31 @@ mod tests {
         assert_eq!(page["data"][0]["researchSitemap"]["status"],"read");
         assert_eq!(page["total"],3);
         assert_eq!(db.crawl_status_v2("legacy",0,10).unwrap()["research"]["sitemap_mode"],"skip");
+    }
+
+    #[test]
+    fn configured_policy_is_durable_and_v3_migrates_without_change(){
+        let tmp=Temp::new();
+        let mut db=Store::open(&tmp.db()).unwrap();
+        db.create_crawl_with_sitemap("old","seed",2,1,true).unwrap();
+        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN policy_json; PRAGMA user_version=3;").unwrap();
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let old=db.claim("old").unwrap().unwrap();
+        assert_eq!(old.crawl().unwrap().policy_json,"{}");
+        assert!(old.crawl().unwrap().include_sitemap);
+        db.settle(&old,true,&json!({})).unwrap();
+        let policy=json!({"includePaths":["/docs/"],"excludePaths":["private"],"delayMs":1250,"onlyMainContent":false});
+        assert!(db.create_crawl_configured("bad","seed",2,1,true,&json!("x")).is_err());
+        assert!(db.create_crawl_configured("huge","seed",2,1,true,&json!({"x":"x".repeat(8192)})).is_err());
+        db.create_crawl_configured("new","seed",2,1,true,&policy).unwrap();
+        let claim=db.claim("new").unwrap().unwrap();
+        db.settle_discovered(&claim,true,&json!({}),&["next".into()]).unwrap();
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let next=db.claim("new").unwrap().unwrap();
+        assert_eq!(next.item(),"next");
+        assert_eq!(serde_json::from_str::<Value>(&next.crawl().unwrap().policy_json).unwrap(),policy);
     }
 
     #[test]

@@ -107,6 +107,10 @@ struct V2CrawlRequest{
     #[serde(default="default_sitemap")] sitemap:String,
     #[serde(default="default_depth")] max_discovery_depth:u32,
     #[serde(default)] scrape_options:Option<V2ScrapeOptions>,
+    #[serde(default)] include_paths:Vec<String>,
+    #[serde(default)] exclude_paths:Vec<String>,
+    #[serde(default)] crawl_entire_domain:bool,
+    #[serde(default)] delay:Option<f64>,
     #[serde(default)] origin:Option<String>,
 }
 #[derive(Deserialize)]
@@ -124,7 +128,16 @@ impl V2CrawlRequest{
     fn valid(&self)->bool{
         (1..=100).contains(&self.limit)&&self.max_concurrency==1&&self.max_discovery_depth<=10&&
         matches!(self.sitemap.as_str(),"include"|"skip")&&self.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))&&
-        self.scrape_options.as_ref().is_none_or(|s|s.formats==["markdown"]&&s.only_main_content&&s.max_age==0&&!s.store_in_cache)
+        self.delay.is_none_or(|d|d.is_finite()&&(0.0..=10.0).contains(&d))&&
+        self.scrape_options.as_ref().is_none_or(|s|s.formats==["markdown"]&&s.max_age==0&&!s.store_in_cache)
+    }
+
+    fn policy(&self)->crawl::Policy{
+        crawl::Policy{include_paths:self.include_paths.clone(),exclude_paths:self.exclude_paths.clone(),
+            crawl_entire_domain:self.crawl_entire_domain,
+            // Firecrawl v2/MCP delay is seconds, never round a positive request down.
+            delay_ms:(self.delay.unwrap_or(0.0)*1000.0).ceil() as u32,
+            only_main_content:self.scrape_options.as_ref().is_none_or(|s|s.only_main_content)}
     }
 }
 
@@ -133,11 +146,15 @@ pub(super) async fn create_v2_crawl(State(state):State<CandidateState>,headers:H
     if !req.valid(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_CRAWL_OPTIONS");}
     let Some(batch)=state.batch else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"JOB_STORE_DISABLED")};
     if !batch.ready(){return refusal(StatusCode::SERVICE_UNAVAILABLE,"WORKER_NOT_READY");}
-    let seed=match crawl::seed(&req.url){Ok(v)=>v.to_string(),Err(s)=>return refusal(s,"DESTINATION_DENIED")};
+    let seed=match crawl::seed(&req.url){Ok(v)=>v,Err(s)=>return refusal(s,"DESTINATION_DENIED")};
+    let policy=req.policy();
+    if policy.scope(&seed).is_err(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_CRAWL_FILTERS");}
+    let policy=match serde_json::to_value(policy){Ok(v)=>v,Err(_)=>return refusal(StatusCode::BAD_REQUEST,"INVALID_CRAWL_POLICY")};
+    let seed=seed.to_string();
     let id=uuid::Uuid::new_v4().to_string();
     let store_id=id.clone();
     let include_sitemap=req.sitemap=="include";
-    match batch.call(move|store|store.create_crawl_with_sitemap(&store_id,&seed,req.limit,req.max_discovery_depth,include_sitemap)).await{
+    match batch.call(move|store|store.create_crawl_configured(&store_id,&seed,req.limit,req.max_discovery_depth,include_sitemap,&policy)).await{
         Ok(())=>{
             batch.notify.notify_one();
             // The candidate is loopback-only. Do not construct next URLs from
@@ -210,6 +227,22 @@ mod v2_tests{
     }
 
     #[test]
+    fn accepts_gateway_path_and_delay_options_without_ignoring_them(){
+        let req:V2CrawlRequest=serde_json::from_value(json!({"url":"https://example.org/docs/","limit":2,
+            "maxConcurrency":1,"includePaths":["^/docs/"],"excludePaths":["private"],"delay":1.25,
+            "crawlEntireDomain":true,"scrapeOptions":{"formats":["markdown"],"onlyMainContent":false}})).unwrap();
+        assert!(req.valid());
+        let policy=req.policy();
+        assert_eq!(policy.delay_ms,1250);
+        assert!(policy.crawl_entire_domain);
+        assert!(!policy.only_main_content);
+        assert_eq!(policy.include_paths,vec!["^/docs/"]);
+        let invalid:V2CrawlRequest=serde_json::from_value(json!({"url":"https://example.org/","limit":1,
+            "maxConcurrency":1,"delay":11})).unwrap();
+        assert!(!invalid.valid());
+    }
+
+    #[test]
     fn v2_status_preserves_counts_and_fixed_loopback_cursor(){
         let page=json!({"status":"scraping","total":3,"completed":1,"data":[{"markdown":"fixture"}],
             "created_at":1700000000,"expires_at":1700086400,"finished_at":null,"next_skip":1,
@@ -261,7 +294,7 @@ async fn work(state:&CandidateState,batch:&BatchState)->Result<(),StoreError>{
         };
         let result=if let Some(info)=claim.crawl(){
             state.crawler.read(&info.seed,claim.item(),info.include_sitemap&&info.depth==0,
-                info.max_depth,info.page_limit).await
+                info.max_depth,info.page_limit,&info.policy_json).await
         } else {
             match static_target(claim.item()){
                 Ok(target)=>static_document(state,target,25000).await.map(|doc|(doc,Vec::new())),

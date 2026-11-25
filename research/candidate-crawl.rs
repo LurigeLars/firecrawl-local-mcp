@@ -4,6 +4,7 @@ use super::{static_target,render,map};
 use crate::{crawl::{CrawlOptions,Scope,ROBOTS_AGENT},fetch::{Fetcher,FetchOptions},
     guard::NetworkPolicy,scrape::{process_html,Format,ScrapeOptions},cloud};
 use axum::http::StatusCode;
+use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 use std::{collections::HashSet,sync::Arc,time::Duration};
 use tokio::sync::Mutex;
@@ -17,6 +18,30 @@ const DISCOVERY_LIMIT:usize=100;
 #[derive(Clone)]
 pub(super) struct Crawler {pub(super) fetcher:Fetcher,pub(super) serial:Arc<Mutex<()>>}
 
+#[derive(Debug,Clone,Serialize,Deserialize)]
+#[serde(default,rename_all="camelCase",deny_unknown_fields)]
+pub(super) struct Policy{
+    pub(super) include_paths:Vec<String>,
+    pub(super) exclude_paths:Vec<String>,
+    pub(super) crawl_entire_domain:bool,
+    pub(super) delay_ms:u32,
+    pub(super) only_main_content:bool,
+}
+impl Default for Policy{
+    fn default()->Self{Self{include_paths:vec![],exclude_paths:vec![],crawl_entire_domain:false,delay_ms:0,only_main_content:true}}
+}
+impl Policy{
+    pub(super) fn scope(&self,seed:&Url)->Result<Scope,StatusCode>{
+        if self.delay_ms>10000 || self.include_paths.len()+self.exclude_paths.len()>16 ||
+            self.include_paths.iter().chain(&self.exclude_paths).any(|p|p.is_empty()||p.len()>256||p.chars().any(char::is_control)){
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Scope::new(seed,&CrawlOptions{include_paths:self.include_paths.clone(),exclude_paths:self.exclude_paths.clone(),
+            crawl_entire_domain:self.crawl_entire_domain,..Default::default()}).map_err(|_|StatusCode::BAD_REQUEST)
+    }
+    pub(super) fn delay(&self)->Duration{Duration::from_millis(u64::from(self.delay_ms))}
+}
+
 pub(super) fn scoped(seed:&Url,target:&Url)->bool {
     seed.origin()==target.origin() &&
         Scope::new(seed,&CrawlOptions::default()).is_ok_and(|scope|scope.allows(target))
@@ -28,7 +53,7 @@ pub(super) fn seed(raw:&str)->Result<Url,StatusCode>{
     Ok(seed)
 }
 
-fn candidates(seed:&Url,links:&[Value])->Vec<String>{
+fn candidates(seed:&Url,scope:&Scope,links:&[Value])->Vec<String>{
     let mut seen=HashSet::new();
     let mut out=Vec::new();
     // Upstream already resolves relative links against the document base.
@@ -37,7 +62,7 @@ fn candidates(seed:&Url,links:&[Value])->Vec<String>{
         let Ok(mut url)=Url::parse(raw) else{continue};
         url.set_fragment(None);
         let Ok(url)=static_target(url.as_str()) else{continue};
-        if scoped(seed,&url) && seen.insert(url.to_string()){
+        if seed.origin()==url.origin() && scope.allows(&url) && seen.insert(url.to_string()){
             out.push(url.to_string());
             if out.len()>=DISCOVERY_LIMIT{break;}
         }
@@ -81,18 +106,22 @@ impl Crawler{
     }
 
     pub(super) async fn read(&self,raw_seed:&str,raw_target:&str,include_sitemap:bool,
-        max_depth:u32,page_limit:u32)->Result<(Value,Vec<String>),StatusCode>{
+        max_depth:u32,page_limit:u32,policy_json:&str)->Result<(Value,Vec<String>),StatusCode>{
         let seed=seed(raw_seed)?;
         let target=static_target(raw_target)?;
-        if !scoped(&seed,&target){return Err(StatusCode::FORBIDDEN);}
+        let policy:Policy=serde_json::from_str(policy_json).map_err(|_|StatusCode::BAD_REQUEST)?;
+        let scope=policy.scope(&seed)?;
+        // Match upstream: the explicitly supplied seed is read even when
+        // includePaths selects only its descendants. All discoveries are filtered.
+        if seed.origin()!=target.origin() || (target!=seed&&!scope.allows(&target)){return Err(StatusCode::FORBIDDEN);}
         let _serial=self.serial.lock().await;
-        let (mut doc,links)=self.read_links(&target,Duration::from_secs(50)).await?;
-        let mut frontier=candidates(&seed,&links);
+        let (mut doc,links)=self.read_links_with_options(&target,Duration::from_secs(50),policy.delay(),policy.only_main_content).await?;
+        let mut frontier=candidates(&seed,&scope,&links);
         if include_sitemap{
             if max_depth==0||page_limit<=1{
                 doc["researchSitemap"]=json!({"status":"skipped_by_crawl_limit"});
             }else{
-                let (sitemap,receipt)=map::crawl_sitemap(self,&seed).await;
+                let (sitemap,receipt)=map::crawl_sitemap(self,&seed,&policy).await;
                 doc["researchSitemap"]=receipt;
                 // Prefer sitemap candidates, then HTML discovery. Both enter
                 // the same atomic, depth- and count-limited SQLite frontier.
@@ -107,13 +136,19 @@ impl Crawler{
     /// Caller holds the shared crawl/map serial lock. The target must already
     /// be validated as a public HTTPS seed or in-scope crawl URL.
     pub(super) async fn read_links(&self,target:&Url,budget:Duration)->Result<(Value,Vec<Value>),StatusCode>{
+        self.read_links_with_options(target,budget,Duration::ZERO,true).await
+    }
+
+    async fn read_links_with_options(&self,target:&Url,budget:Duration,minimum_delay:Duration,
+        only_main_content:bool)->Result<(Value,Vec<Value>),StatusCode>{
         let target=target.clone();
         // Fresh robots check on every claimed page. Fail closed if unavailable.
         // No retries/redirects in either request. Connection-time DNS guard
         // remains in the same upstream Fetcher.
         let fetched=tokio::time::timeout(budget.min(Duration::from_secs(50)),async{
             let (status,body)=self.robots(&target).await?;
-            let (allowed,delay)=robots_decision(status,&body,&target)?;
+            let (allowed,robots_delay)=robots_decision(status,&body,&target)?;
+            let delay=robots_delay.max(minimum_delay);
             tokio::time::sleep(delay).await;
             if !allowed{return Err(StatusCode::FORBIDDEN);}
             let page=self.fetcher.fetch_once(&target,&FetchOptions{
@@ -134,7 +169,7 @@ impl Crawler{
         // parse on async timeout. Overall process memory/wall limits remain
         // required for untrusted document conversion.
         tokio::task::spawn_blocking(move||{
-            let (mut data,mut metadata,markdown)=process_html(fetched,&target,&ScrapeOptions::default(),
+            let (mut data,mut metadata,markdown)=process_html(fetched,&target,&ScrapeOptions{only_main_content,..Default::default()},
                 &[Format::Markdown,Format::Links]).map_err(|_|StatusCode::BAD_GATEWAY)?;
             if markdown.trim().is_empty() || cloud::looks_like_bot_check(&markdown){
                 return Err(StatusCode::BAD_GATEWAY);
@@ -165,8 +200,23 @@ mod tests{
             "https://127.0.0.1/docs/a","https://example.com:8443/docs/a",
             "https://user:pw@example.com/docs/a"
         ]);
-        assert_eq!(candidates(&seed,links.as_array().unwrap()),
+        assert_eq!(candidates(&seed,&Policy::default().scope(&seed).unwrap(),links.as_array().unwrap()),
             vec!["https://example.com/docs/a","https://example.com/docs/a/"]);
+    }
+
+    #[test]
+    fn path_filters_are_bounded_and_never_expand_origin(){
+        let seed=seed("https://example.com/docs/").unwrap();
+        let policy=Policy{include_paths:vec!["^/reports/".into()],exclude_paths:vec!["/private".into()],
+            crawl_entire_domain:true,delay_ms:1250,only_main_content:false};
+        let scope=policy.scope(&seed).unwrap();
+        let links=json!(["https://example.com/reports/a","https://example.com/reports/private",
+            "https://example.com/docs/b","https://other.org/reports/a","https://example.com/reports/a?q=1"]);
+        assert_eq!(candidates(&seed,&scope,links.as_array().unwrap()),vec!["https://example.com/reports/a"]);
+        assert_eq!(policy.delay(),Duration::from_millis(1250));
+        for bad in [Policy{include_paths:vec!["[".into()],..Default::default()},
+            Policy{exclude_paths:vec!["x".repeat(257)],..Default::default()},
+            Policy{delay_ms:10001,..Default::default()}]{assert!(bad.scope(&seed).is_err());}
     }
 
     #[test]

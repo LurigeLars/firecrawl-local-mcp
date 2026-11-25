@@ -158,10 +158,14 @@ try{
     if(mode==='--candidate-live'){
       const offset=traffic.length;
       const start=await rpc('tools/call',{name:'firecrawl_crawl',arguments:{
-        url:'https://www.iana.org/help',limit:2,maxConcurrency:1,scrapeOptions:{formats:['markdown']}}});
+        url:'https://www.iana.org/help',limit:2,maxConcurrency:1,includePaths:['^/help/'],delay:1,
+        scrapeOptions:{formats:['markdown']}}});
       assert.ok(!start.error&&start.result&&!start.result.isError,'MCP crawl creation failed');
       const created=traffic.slice(offset).find(x=>x.path==='/v2/crawl'&&x.status===200)?.response;
       assert.equal(created?.research?.sitemap_mode,'include');
+      const envelope=traffic.slice(offset).find(x=>x.path==='/v2/crawl'&&x.status===200)?.body;
+      assert.deepEqual(envelope?.includePaths,['^/help/']);
+      assert.equal(envelope?.delay,1);
       const jobId=created.id;
       assert.match(jobId,/^[0-9a-f-]{36}$/);
       assert.ok(JSON.stringify(start.result).includes(jobId),'MCP omitted crawl job ID');
@@ -177,6 +181,7 @@ try{
           assert.equal(result.status,'completed');
           assert.equal(result.completed,2);
           assert.equal(result.research.failed,0);
+          assert.ok(result.data.every(d=>d.metadata?.url==='https://www.iana.org/help'||d.metadata?.url?.startsWith('https://www.iana.org/help/')));
           assert.ok(result.data.some(d=>d.researchSitemap?.status),'sitemap outcome missing');
           assert.ok(JSON.stringify(reply.result).includes('completed'),'MCP omitted terminal state');
           console.log(JSON.stringify({actual_candidate:true,tool:'firecrawl_crawl',sitemap_mode:'include',

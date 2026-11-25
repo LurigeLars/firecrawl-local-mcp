@@ -48,16 +48,21 @@ struct Results<'a>{
     scope:Scope,
     seen:HashSet<String>,
     links:Vec<Value>,
+    crawl_policy:bool,
 }
 
 impl<'a> Results<'a>{
     fn new(request:&'a MapRequest,seed:&'a Url)->Result<Self,StatusCode>{
-        let scope=Scope::new(seed,&CrawlOptions{
+        Self::with_policy(request,seed,None)
+    }
+
+    fn with_policy(request:&'a MapRequest,seed:&'a Url,policy:Option<&crawl::Policy>)->Result<Self,StatusCode>{
+        let scope=if let Some(policy)=policy{policy.scope(seed)?}else{Scope::new(seed,&CrawlOptions{
             allow_subdomains:request.include_subdomains,
             crawl_entire_domain:!request.filter_by_path,
             ..Default::default()
-        }).map_err(|_|StatusCode::BAD_REQUEST)?;
-        Ok(Self{request,seed,scope,seen:HashSet::new(),links:Vec::new()})
+        }).map_err(|_|StatusCode::BAD_REQUEST)?};
+        Ok(Self{request,seed,scope,seen:HashSet::new(),links:Vec::new(),crawl_policy:policy.is_some()})
     }
 
     fn full(&self)->bool{self.links.len()>=self.request.limit}
@@ -69,6 +74,7 @@ impl<'a> Results<'a>{
         if url.scheme()!="https"||url.port().is_some(){return;}
         url.set_fragment(None);
         if self.request.ignore_query_parameters{url.set_query(None);}
+        if self.crawl_policy&&url.query().is_some(){return;}
         if (!self.request.include_subdomains && url.origin()!=self.seed.origin()) ||
             !self.scope.allows(&url){return;}
         let key=url.to_string();
@@ -105,8 +111,8 @@ async fn parse_sitemap_into(xml:&str,seed:&Url,results:&mut Results<'_>,seen:&mu
     Ok(skipped)
 }
 
-async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url)->Result<Value,StatusCode>{
-    let mut results=Results::new(req,seed)?;
+async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url,policy:Option<&crawl::Policy>)->Result<Value,StatusCode>{
+    let mut results=Results::with_policy(req,seed,policy)?;
     let end=Instant::now()+Duration::from_millis(req.timeout);
     let mut attempted=0usize;
     let mut read=0usize;
@@ -117,7 +123,8 @@ async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url)->Result<Val
             .map_err(|_|StatusCode::GATEWAY_TIMEOUT)??;
         // Validate robots even for sitemap-only; a forbidden seed need not
         // prohibit a separately allowed sitemap on the same origin.
-        let (_,delay)=crawl::robots_decision(status,&body,seed)?;
+        let (_,robots_delay)=crawl::robots_decision(status,&body,seed)?;
+        let delay=robots_delay.max(policy.map_or(Duration::ZERO,crawl::Policy::delay));
         let mut queue=VecDeque::new();
         let mut seen=HashSet::new();
         if status==200{
@@ -186,17 +193,17 @@ async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url)->Result<Val
 /// Called only by the seed worker while holding the shared serial lock.
 /// A missing/failed sitemap is reported explicitly; a successful seed page
 /// still contributes its HTML links. Never expand scope or bypass robots.
-pub(super) async fn crawl_sitemap(crawler:&crawl::Crawler,seed:&Url)->(Vec<String>,Value){
+pub(super) async fn crawl_sitemap(crawler:&crawl::Crawler,seed:&Url,policy:&crawl::Policy)->(Vec<String>,Value){
     let req=MapRequest{url:seed.to_string(),limit:MAX_LINKS,search:None,sitemap:"only".into(),
         include_subdomains:false,filter_by_path:true,ignore_query_parameters:false,use_index:Some(false),
         timeout:20000,origin:None};
-    match discover(crawler,&req,seed).await{
+    match discover(crawler,&req,seed,Some(policy)).await{
         Ok(data)=>{
             let mut links=Vec::new();
             if let Some(rows)=data["links"].as_array(){
                 for raw in rows.iter().filter_map(|r|r["url"].as_str()){
                     if let Ok(url)=static_target(raw){
-                        if crawl::scoped(seed,&url){links.push(url.to_string());}
+                        if url.origin()==seed.origin(){links.push(url.to_string());}
                     }
                 }
             }
@@ -217,7 +224,7 @@ pub(super) async fn route(State(state):State<CandidateState>,headers:HeaderMap,b
     let result=tokio::spawn(async move{
         let _slot=slot;
         let _serial=serial;
-        discover(&state.crawler,&req,&seed).await
+        discover(&state.crawler,&req,&seed,None).await
     }).await;
     match result{
         Ok(Ok(data))=>bounded(data),

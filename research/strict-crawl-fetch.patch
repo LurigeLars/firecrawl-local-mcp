@@ -63,7 +63,7 @@ diff --git a/apps/local/src/crawl.rs b/apps/local/src/crawl.rs
    seed: Url,
    prefix: String,
    seed_host: String,
-@@ -140,7 +140,7 @@
+@@ -140,15 +140,15 @@
  }
  
  impl Scope {
@@ -72,6 +72,15 @@ diff --git a/apps/local/src/crawl.rs b/apps/local/src/crawl.rs
      let compile = |patterns: &[String]| -> Result<Vec<Regex>, ScrapeError> {
        patterns
          .iter()
+         .map(|p| {
+-          Regex::new(p).map_err(|e| ScrapeError {
++          regex::RegexBuilder::new(p).size_limit(256*1024).dfa_size_limit(256*1024).build().map_err(|e| ScrapeError {
+             status: 400,
+             code: "BAD_REQUEST",
+             message: format!("Invalid path pattern '{p}': {e}"),
+           })
+         })
+         .collect()
 @@ -175,7 +175,7 @@
      self.allow_subdomains && registrable(&host) == self.seed_domain
    }
