@@ -23,17 +23,11 @@ test('one-service refreshes use the running image as baseline instead of hard-co
     const source = readFileSync(new URL(`./${name}.ps1`, import.meta.url), 'utf8');
     assert.match(source, /Get-FirecrawlRunningImage -Container \$Container/, name);
     assert.match(source, /Save-FirecrawlRollbackImage -Container \$Container -BaselineId/, name);
-    // The fixed gateway recovery mapping is historical evidence, never a target or ordinary baseline.
-    // Only that mapping and the existing RabbitMQ target may contain literal image IDs.
     const ids = (source.match(/'sha256:[0-9a-f]{64}'/g) || []).filter(id => !source.includes(`$RabbitTarget = ${id}`));
-    const expected = name === 'refresh-public-gateway'
-      ? ["'sha256:7edfc616ff5f469baeae19f5bc0bdf511239d97c83f010761d31b02b7e43e9bc'"] : [];
-    assert.deepEqual(ids, expected, name + ' contains an unexpected literal image id');
-    if (name === 'refresh-public-gateway') {
-      assert.match(source, /Get-FirecrawlGatewayRollback -Container \$Container -BaselineId \$OldId/);
-      assert.match(source, /\$BaselineId -cne \$KnownMissing/);
-      assert.match(source, /exact_original=false/);
-    }
+    assert.deepEqual(ids, [], name + ' contains an unexpected literal image id');
+    const reservation = source.split('\n').find(line => line.includes('Save-FirecrawlRollbackImage -Container'));
+    if (name === 'refresh-ephemeral') assert.doesNotMatch(reservation, /-AllowMissing/);
+    else assert.match(reservation, /-AllowMissing/);
     assert.doesNotMatch(source, /node:\d+\[?\.\]?\d+\[?\.\]?\d+-alpine@sha256:[0-9a-f]{64}|\^v\d+\[\.\]/, `${name} hard-codes a Node pin`);
   }
 });
