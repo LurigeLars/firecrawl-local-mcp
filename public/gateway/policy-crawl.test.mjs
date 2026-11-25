@@ -5,6 +5,19 @@ import { parseAllowedTools, rememberCrawlRequest, rewriteResponse, urlSafetyReas
 
 const allowedTools = parseAllowedTools();
 
+test('gateway instructions apply to modern discovery and legacy initialization', () => {
+  for (const result of [
+    { supportedVersions: ['2026-07-28'], instructions: 'upstream' },
+    { serverInfo: { name: 'test', version: '1' }, instructions: 'upstream' },
+  ]) {
+    const out = rewriteResponse({ jsonrpc: '2.0', id: 1, result }, {
+      allowedTools, compactIds: new Set(), crawlRequests: new Map(),
+    });
+    assert.ok(out.result.instructions);
+    assert.notEqual(out.result.instructions, 'upstream');
+  }
+});
+
 function rewriteCall(request, payload, structuredContent = payload) {
   const crawlRequests = new Map();
   assert.equal(rememberCrawlRequest(request, crawlRequests), true);
