@@ -111,18 +111,34 @@ async fn extract(pdf: &[u8], single_block: bool) -> Result<Value, &'static str> 
 }
 
 // Use the pinned upstream Office parser only inside the same isolated
-// worker container. Bound the ZIP central-directory claims before parsing;
+// worker container. Bound ZIP claims and actual decompression before parsing;
 // the container memory/CPU/PID/deadline limits remain the real sandbox.
 fn extract_office(input:&[u8])->Result<Value,&'static str>{
     if input.len()>MAX_PDF||!office_magic(input){return Err("invalid office input");}
     if input.starts_with(b"PK\x03\x04"){
         let mut archive=zip::ZipArchive::new(std::io::Cursor::new(input)).map_err(|_|"invalid document archive")?;
         if archive.len()>2048{return Err("document archive entry cap");}
-        let mut total=0u64;
+        let mut remaining=128*1024*1024u64;
+        let mut names=std::collections::HashSet::new();
+        let mut buffer=[0u8;8192];
         for i in 0..archive.len(){
-            let entry=archive.by_index(i).map_err(|_|"invalid document archive entry")?;
-            total=total.checked_add(entry.size()).ok_or("document archive size overflow")?;
-            if total>128*1024*1024{return Err("document archive expansion cap");}
+            let mut entry=archive.by_index(i).map_err(|_|"invalid document archive entry")?;
+            if entry.enclosed_name().is_none()||!names.insert(entry.name().to_owned()){
+                return Err("invalid or duplicate document archive path");
+            }
+            if entry.size()>remaining||entry.size()>32*1024*1024{
+                return Err("document archive expansion cap");
+            }
+            let mut actual=0u64;
+            loop{
+                let n=entry.read(&mut buffer).map_err(|_|"document archive read failed")?;
+                if n==0{break;}
+                if n as u64>remaining{return Err("document archive expansion cap");}
+                remaining-=n as u64;
+                actual+=n as u64;
+                if actual>32*1024*1024{return Err("document archive part cap");}
+            }
+            if actual!=entry.size(){return Err("document archive size mismatch");}
         }
     }
     let markdown=firecrawl_local::document::convert_document_bytes_to_markdown(input,None)
