@@ -55,7 +55,7 @@ jobs:
             --entrypoint /usr/local/bin/pdf-ocr-service firecrawl-rust-ocr-ci:review)
           trap 'docker rm -f "$cid" >/dev/null' EXIT
           timeout 100s docker exec "$cid" python3 -B /research/verify-ocr-service.py
-      - name: Live PDF through isolated OCR sidecar (separate evidence)
+      - name: Live PDF and Office through isolated document sidecar (separate evidence)
         id: live_pdf
         continue-on-error: true
         run: |
@@ -86,7 +86,7 @@ jobs:
           test "$(docker network inspect --format '{{.Internal}}' "$net")" = true
           test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$worker")" = 1
           test "$(docker inspect --format '{{len .Mounts}}' "$worker")" = 0
-          timeout 135s docker exec "$candidate" python3 -B /tmp/verify-pdf-sidecar.py
+          timeout 190s docker exec "$candidate" python3 -B /tmp/verify-pdf-sidecar.py
       - name: Smoke actual isolated candidate server process
         run: |
           timeout 75s docker run --rm --pull=never --network none --read-only \
