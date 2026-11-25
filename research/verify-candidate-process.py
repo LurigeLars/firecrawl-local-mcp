@@ -201,6 +201,21 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
                 assert "RFC 2606" in data["html"] and len(data["links"])>0
                 assert "markdown" not in data
                 print("MCP_SCRAPE_ENVELOPE_LIVE_PASS: minimal request and HTML/link formats")
+                # Explicit write then bounded read; default requests still fetch fresh.
+                cache_request={"url":"https://www.iana.org/help/example-domains","formats":["markdown"],
+                    "maxAge":0,"storeInCache":True}
+                status,raw=call("/v2/scrape",payload=cache_request,timeout=35)
+                assert status==200
+                written=json.loads(raw)
+                assert written["research"]["cache_used"] is False
+                assert written["research"]["cache_stored"] is True
+                status,raw=call("/v2/scrape",payload={**cache_request,"maxAge":60000,"storeInCache":False},timeout=5)
+                assert status==200
+                cached=json.loads(raw)
+                assert cached["research"]["cache_used"] is True
+                assert cached["research"]["cache_age_ms"]<=60000
+                assert cached["data"]==written["data"]
+                print("LIVE_EXPLICIT_CACHE_PASS")
                 status,raw=call("/v2/map",payload={"url":"https://www.iana.org/help","limit":2,
                     "origin":"mcp-candidate-contract@3.40.0"},timeout=65)
                 assert status==200
