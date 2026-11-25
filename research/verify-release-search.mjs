@@ -33,7 +33,7 @@ const diagnostics=Object.fromEntries(counters.map(key=>{
   return [key,value];
 }));
 assert.equal(diagnostics.returned,results.length);
-console.log('RELEASE_SEARXNG_DIAGNOSTICS',JSON.stringify({...diagnostics,source:body.research.source,fallback_status:body.research.fallback_status??'not_attempted'}));
+console.log('RELEASE_SEARXNG_DIAGNOSTICS',JSON.stringify({...diagnostics,source:body.research.source,fallback_status:body.research.fallback_status??'not_attempted',fallback_http_status:body.research.fallback_http_status??null}));
 assert.ok(results.length>=1&&results.length<=2,'no verified search hits');
 for(const hit of results){
   const host=new URL(hit.url).hostname;

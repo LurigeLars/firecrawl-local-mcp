@@ -1,7 +1,8 @@
 # Explicit opt-in, not part of production maintenance. Only this named project
 # is started/stopped. No published ports, legacy restarts or secret import.
 [CmdletBinding()]
-param([switch]$Run)
+param([switch]$Run, [switch]$SearchOnly)
+if ($SearchOnly -and -not $Run) { throw 'SearchOnly requires Run' }
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $root = Split-Path -Parent $PSScriptRoot
@@ -69,19 +70,37 @@ try {
         $expected = if ($service -eq 'rust-api') { '2 0' } else { '1 0' }
         if ($shape.Count -ne 1 -or $shape[0] -cne $expected) { throw "Unsafe canary runtime topology: $service" }
     }
-    # All probes use the existing locked MCP transport; no credential-file reads.
-    foreach ($mode in @('--documents','--search','--browser')) {
-        $lines = @($driver | & docker @compose exec -T mcp node --input-type=module - candidate $mode)
-        $exit = $LASTEXITCODE
+    # SearchOnly compares fixed legacy/candidate/legacy actual MCP requests.
+    $modes = if ($SearchOnly) { @('legacy-before','--search','legacy-after') } else { @('--documents','--search','--browser') }
+    foreach ($mode in $modes) {
+        $backend = if ($mode -like 'legacy-*') { 'legacy' } else { 'candidate' }
+        if ($backend -eq 'legacy') {
+            $legacy = @(Invoke-CanaryDocker -Arguments @('ps','-q','--filter','name=^/firecrawl-mcp-1$'))
+            if ($legacy.Count -ne 1 -or $legacy[0] -notmatch '^[0-9a-f]{12,64}$') { throw 'Legacy MCP unavailable' }
+            $lines = @($driver | & docker exec -i $legacy[0] node --input-type=module - legacy --search)
+            $exit = $LASTEXITCODE
+        } else {
+            $lines = @($driver | & docker @compose exec -T mcp node --input-type=module - candidate $mode)
+            $exit = $LASTEXITCODE
+        }
         try {
             $receipt = ($lines -join [Environment]::NewLine) | ConvertFrom-Json
-            if ($receipt.backend -cne 'candidate' -or $receipt.verdict -notin @('PASS','UNVERIFIED')) { throw 'Invalid receipt' }
-        } catch { $receipt = @{backend='candidate';verdict='UNVERIFIED';reason='missing_or_invalid_receipt'} }
+            if ($receipt.backend -cne $backend -or $receipt.verdict -notin @('PASS','UNVERIFIED')) { throw 'Invalid receipt' }
+        } catch { $receipt = @{backend=$backend;verdict='UNVERIFIED';reason='missing_or_invalid_receipt'} }
         if ($exit -ne 0) { $receipt.verdict = 'UNVERIFIED' }
         $receipts[$mode] = $receipt
     }
+    # This separate raw API query runs only on an actual MCP failure. Its
+    # result never upgrades the MCP verdict, and only fixed counters leave it.
+    $diagnostic = $null
+    if ($receipts['--search'].verdict -ne 'PASS') {
+        $source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-canary-search-diagnostics.mjs')
+        $lines = @($source | & docker @compose exec -T mcp node --input-type=module -)
+        try { $diagnostic = ($lines -join [Environment]::NewLine) | ConvertFrom-Json }
+        catch { $diagnostic = @{verdict='UNVERIFIED';reason='missing_diagnostic'} }
+    }
     $passed = @($receipts.Values | Where-Object {$_.verdict -ne 'PASS'}).Count -eq 0
-    [pscustomobject]@{project=$project;revision=$revision;verdict=$(if($passed){'PASS'}else{'UNVERIFIED'});scope='shared production sidecars, fixed MCP fixtures, no production routing';receipts=$receipts} | ConvertTo-Json -Depth 8
+    [pscustomobject]@{project=$project;revision=$revision;verdict=$(if($passed){'PASS'}else{'UNVERIFIED'});scope=$(if($SearchOnly){'paired MCP search only; no production routing'}else{'shared production sidecars, fixed MCP fixtures, no production routing'});receipts=$receipts;search_diagnostic=$diagnostic} | ConvertTo-Json -Depth 8
     if (-not $passed) { throw 'Canary acceptance incomplete; inspect receipts' }
 } finally {
     if ($attempted) {

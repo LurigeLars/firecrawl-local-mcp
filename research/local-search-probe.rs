@@ -208,13 +208,14 @@ pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'s
 pub(crate) fn fallback_url(req:&Request)->Option<Url>{
     // Do not silently substitute a US locale for an explicit other locale.
     if !req.lang.eq_ignore_ascii_case("en") && !req.lang.eq_ignore_ascii_case("en-us"){return None;}
-    let mut url=Url::parse("https://html.duckduckgo.com/html").ok()?;
+    // Use the slash-terminated public HTML endpoint, without redirects.
+    let mut url=Url::parse("https://html.duckduckgo.com/html/").ok()?;
     url.query_pairs_mut().append_pair("q",&req.proxy_query()).append_pair("kp","1").append_pair("kl","us-en");
     Some(url)
 }
 
 fn fallback_target(raw:&str)->Option<String>{
-    let base=Url::parse("https://html.duckduckgo.com/html").ok()?;
+    let base=Url::parse("https://html.duckduckgo.com/html/").ok()?;
     let url=base.join(raw.trim()).ok()?;
     // Decode exactly once via URL query parsing, only for the provider's
     // own known redirect wrapper. Never fetch the wrapper or result URL.
@@ -412,6 +413,7 @@ mod tests {
         let r=req(json!({"query":"oil & gas","includeDomains":["eia.gov"],"limit":2}));
         let url=fallback_url(&r).unwrap();
         assert_eq!(url.host_str(),Some("html.duckduckgo.com"));
+        assert_eq!(url.path(),"/html/");
         let pairs=url.query_pairs().into_owned().collect::<HashMap<_,_>>();
         assert_eq!(pairs["q"],"oil & gas site:eia.gov");
         assert_eq!(pairs["kp"],"1");
