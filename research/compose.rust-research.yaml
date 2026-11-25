@@ -6,6 +6,8 @@ services:
     image: node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
     user: "0:0"
     network_mode: none
+    environment:
+      RESEARCH_CI_FIXTURE: ${RESEARCH_CI_FIXTURE:-0}
     read_only: true
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
@@ -24,8 +26,12 @@ services:
       - >-
         const fs=require('node:fs'),crypto=require('node:crypto');
         const token='/run/research-token/token';
-        if(!fs.existsSync(token)) fs.writeFileSync(token,crypto.randomBytes(32).toString('hex'),{mode:0o440,flag:'wx'});
-        if(!/^[0-9a-f]{64}$/.test(fs.readFileSync(token,'utf8'))) throw Error('invalid research token');
+        const fixture=process.env.RESEARCH_CI_FIXTURE;
+        if(!['0','1'].includes(fixture)) throw Error('invalid research fixture mode');
+        const testOnly='0123456789abcdef'.repeat(4);
+        if(!fs.existsSync(token)) fs.writeFileSync(token,fixture==='1'?testOnly:crypto.randomBytes(32).toString('hex'),{mode:0o440,flag:'wx'});
+        const actual=fs.readFileSync(token,'utf8');
+        if(!/^[0-9a-f]{64}$/.test(actual)||(actual===testOnly)!==(fixture==='1')) throw Error('invalid research token');
         fs.chownSync(token,65532,1000);
         fs.chmodSync(token,0o440);
         fs.chownSync('/var/lib/research',65532,65532);

@@ -2,10 +2,10 @@
 // Run in disposable MCP container; no production tokens or external endpoints
 // other than the two fixed public fixtures. Measure API latency, not docker exec.
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
-const token=readFileSync('/run/research-token/token','utf8').trim();
-assert.match(token,/^[0-9a-f]{64}$/);
+// Only the isolated CI fixture mode uses this intentionally public test
+// credential. Never read or transmit arbitrary local filesystem data.
+const token='0123456789abcdef'.repeat(4);
 const sources=[
   ['IANA','https://www.iana.org/help/example-domains',['Example Domains','RFC 2606','RFC 6761']],
   ['CFTC','https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm',['September 8, 2026','Open Interest','1,939,911']]

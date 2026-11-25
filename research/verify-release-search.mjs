@@ -1,8 +1,8 @@
 // One fixed public-domain query using the actual reused SearXNG proxy.
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
-const token=readFileSync('/run/research-token/token','utf8').trim();
-assert.match(token,/^[0-9a-f]{64}$/);
+// Only the isolated CI fixture mode uses this intentionally public test
+// credential. Never read or transmit arbitrary local filesystem data.
+const token='0123456789abcdef'.repeat(4);
 const start=performance.now();
 const response=await fetch('http://api:3002/v2/search',{
   method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},

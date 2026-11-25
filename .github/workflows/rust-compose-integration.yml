@@ -25,6 +25,9 @@ jobs:
       - name: Build and exercise disposable release Compose stack
         run: |
           set -euo pipefail
+          # Test credential is a public synthetic fixture. Local research
+          # Compose defaults to an independent random credential.
+          export RESEARCH_CI_FIXTURE=1
           project="fc-rust-review-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           compose=(docker compose -p "$project" -f research/compose.rust-research.yaml --profile search)
           cleanup() {

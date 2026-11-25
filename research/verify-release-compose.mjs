@@ -1,12 +1,12 @@
 // Run only inside the disposable release Compose MCP container.
 // Fixed internal endpoint and fixed public fixtures; never print credentials.
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 
 const BASE='http://api:3002';
-const TOKEN=readFileSync('/run/research-token/token','utf8').trim();
-assert.match(TOKEN,/^[0-9a-f]{64}$/);
+// Only the isolated CI fixture mode uses this intentionally public test
+// credential. Never read or transmit arbitrary local filesystem data.
+const TOKEN='0123456789abcdef'.repeat(4);
 const mode=process.argv[2];
 assert.ok(['create','verify'].includes(mode));
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
