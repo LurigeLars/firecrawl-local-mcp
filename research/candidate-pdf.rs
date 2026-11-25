@@ -283,7 +283,7 @@ mod tests{
         too_short["total_pages"]=json!(12);
         assert_eq!(v2_document(&source,&source,too_short,range).unwrap_err().status(),StatusCode::RANGE_NOT_SATISFIABLE);
     }
-    use axum::{Router,routing::post};
+    use axum::{Json,Router,routing::post};
     #[test]
     fn v2_pdf_preserves_page_order_and_evidence(){
         let receipt=json!({"pages":[{"page":1,"source":"native","text":"Native 42","warning":null},
