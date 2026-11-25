@@ -21,7 +21,8 @@ try{
 assert.equal(response.status,200,'search response failed');
 const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
 assert.equal(body.success,true);
-assert.equal(body.research.source,'local-searxng');
+assert.ok(['local-searxng','local-duckduckgo'].includes(body.research.source));
+if(body.research.source==='local-duckduckgo')assert.equal(body.research.fallback_status,'ok');
 assert.equal(body.research.catalogue_available,false);
 const results=body.data.web;
 assert.ok(Array.isArray(results));
@@ -32,7 +33,7 @@ const diagnostics=Object.fromEntries(counters.map(key=>{
   return [key,value];
 }));
 assert.equal(diagnostics.returned,results.length);
-console.log('RELEASE_SEARXNG_DIAGNOSTICS',JSON.stringify(diagnostics));
+console.log('RELEASE_SEARXNG_DIAGNOSTICS',JSON.stringify({...diagnostics,source:body.research.source,fallback_status:body.research.fallback_status??'not_attempted'}));
 assert.ok(results.length>=1&&results.length<=2,'no verified search hits');
 for(const hit of results){
   const host=new URL(hit.url).hostname;

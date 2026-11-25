@@ -674,7 +674,33 @@ async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:
     let result=tokio::spawn(async move{
         let _slot=slot;
         let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout_ms());
-        let mut value=search::search_at(&state.search_endpoint,req).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+        let mut value=search::search_at(&state.search_endpoint,req.clone()).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+        if value["data"]["web"].as_array().is_some_and(Vec::is_empty){
+            // One bounded, fixed public fallback already used by legacy.
+            // No fallback on proxy transport/security errors or provider blocks.
+            let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).min(Duration::from_secs(10));
+            if let Some(url)=search::fallback_url(&req).filter(|_|!remaining.is_zero()){
+                value["research"]["fallback_status"]=json!("unavailable");
+                let fetch_options=crate::fetch::FetchOptions{
+                    timeout:Some(remaining),..Default::default()
+                };
+                let fetch=state.crawler.fetcher.fetch_once_limited(&url,&fetch_options,512*1024);
+                match tokio::time::timeout(remaining,fetch).await{
+                    Ok(Ok(res)) if res.status==200&&res.final_url==url&&res.mime().as_deref()==Some("text/html")=>{
+                        let html=res.text();
+                        let work=tokio::task::spawn_blocking(move||{
+                            let status=search::apply_fallback(&mut value,&req,&html);
+                            if let Err(code)=status{value["research"]["fallback_status"]=json!(code);}
+                            value
+                        });
+                        // Keep the admission slot until bounded parsing completes.
+                        value=work.await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+                    },
+                    Ok(Ok(res)) if matches!(res.status,401|403|429|503)=>value["research"]["fallback_status"]=json!("provider_unavailable"),
+                    _=>{}
+                }
+            }
+        }
         if let Some(opts)=options{
             let reader=&state;
             enrich_search(&mut value,opts,deadline,|target,opts|async move{

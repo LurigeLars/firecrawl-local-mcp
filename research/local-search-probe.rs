@@ -13,7 +13,7 @@ fn default_limit() -> usize { 10 }
 fn default_lang() -> String { "en".into() }
 fn default_timeout() -> u64 { 60_000 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
     query: String,
@@ -202,6 +202,65 @@ pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'s
     }).await.map_err(|_| "search deadline exceeded")?
 }
 
+// Legacy uses DuckDuckGo HTML after an empty SearXNG result. Keep the
+// fallback fixed and limited to one GET, with no retries, cookies, redirects,
+// or challenge handling. The caller uses the existing guarded fetcher.
+pub(crate) fn fallback_url(req:&Request)->Option<Url>{
+    // Do not silently substitute a US locale for an explicit other locale.
+    if !req.lang.eq_ignore_ascii_case("en") && !req.lang.eq_ignore_ascii_case("en-us"){return None;}
+    let mut url=Url::parse("https://html.duckduckgo.com/html").ok()?;
+    url.query_pairs_mut().append_pair("q",&req.proxy_query()).append_pair("kp","1").append_pair("kl","us-en");
+    Some(url)
+}
+
+fn fallback_target(raw:&str)->Option<String>{
+    let base=Url::parse("https://html.duckduckgo.com/html").ok()?;
+    let url=base.join(raw.trim()).ok()?;
+    // Decode exactly once via URL query parsing, only for the provider's
+    // own known redirect wrapper. Never fetch the wrapper or result URL.
+    if url.scheme()=="https" && matches!(url.host_str(),Some("duckduckgo.com"|"html.duckduckgo.com")) &&
+        url.path()=="/l/" && url.username().is_empty() && url.password().is_none() && url.port().is_none(){
+        let mut values=url.query_pairs().filter(|(k,_)|k=="uddg").map(|(_,v)|v.into_owned());
+        let target=values.next()?;
+        if values.next().is_some(){return None;}
+        return Url::parse(&target).ok().map(|u|u.to_string());
+    }
+    // Do not treat a relative provider navigation link as a web result.
+    if !raw.trim().starts_with("https://") && !raw.trim().starts_with("http://"){return None;}
+    Some(url.to_string())
+}
+
+pub(crate) fn apply_fallback(value:&mut Value,req:&Request,html:&str)->Result<(), &'static str>{
+    use kuchikiki::traits::TendrilSink;
+    let document=kuchikiki::parse_html().one(html).document_node;
+    if document.select(".anomaly-modal__modal, #challenge-form").map_err(|_|"parse_failed")?.next().is_some(){
+        return Err("provider_challenge");
+    }
+    let mut hits=Vec::new();let mut seen=HashSet::new();let mut omitted=0usize;
+    for block in document.select(".result.web-result").map_err(|_|"parse_failed")?{
+        let node=block.as_node();
+        let Ok(title)=node.select_first(".result__a") else{continue;};
+        let Ok(snippet)=node.select_first(".result__snippet") else{continue;};
+        let Some(raw)=title.attributes.borrow().get("href").and_then(fallback_target) else{omitted+=1;continue;};
+        let title=title.text_contents().trim().to_string();
+        let content=snippet.text_contents().trim().to_string();
+        if title.is_empty()||content.is_empty(){omitted+=1;continue;}
+        let Some(mut hit)=accept_hit(RawHit{url:raw,title:Some(title),content:Some(content)},req) else{omitted+=1;continue;};
+        if seen.insert(hit.url.clone()){
+            hit.position=hits.len()+1;hits.push(hit);
+        }
+        if hits.len()>=req.limit{break;}
+    }
+    value["research"]["fallback_omitted"]=json!(omitted);
+    value["research"]["fallback_status"]=json!(if hits.is_empty(){"no_hits"}else{"ok"});
+    if !hits.is_empty(){
+        value["research"]["source"]=json!("local-duckduckgo");
+        value["research"]["returned"]=json!(hits.len());
+        value["data"]["web"]=json!(hits);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), &'static str> {
     let mut bytes = Vec::new();
@@ -346,6 +405,32 @@ mod tests {
         assert!(req(json!({"query":"x","sources":["alexandria"]})).validate().is_err());
         assert!(req(json!({"query":"x","sources":["web","news"]})).validate().is_err());
         task.abort();
+    }
+
+    #[test]
+    fn fallback_is_fixed_bounded_and_preserves_domain_filters(){
+        let r=req(json!({"query":"oil & gas","includeDomains":["eia.gov"],"limit":2}));
+        let url=fallback_url(&r).unwrap();
+        assert_eq!(url.host_str(),Some("html.duckduckgo.com"));
+        let pairs=url.query_pairs().into_owned().collect::<HashMap<_,_>>();
+        assert_eq!(pairs["q"],"oil & gas site:eia.gov");
+        assert_eq!(pairs["kp"],"1");
+        assert!(fallback_url(&req(json!({"query":"x","lang":"sv-SE"}))).is_none());
+        let mut value=json!({"data":{"web":[]},"research":{"source":"local-searxng","returned":0,"proxy_hits_observed":0}});
+        let html=r#"<div class="result web-result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.eia.gov%2Fa%3Fx%3D1%25202">Report A</a><div class="result__snippet">First</div></div>
+        <div class="result web-result"><a class="result__a" href="https://www.eia.gov/a?x=1%202">Duplicate</a><div class="result__snippet">Same</div></div>
+        <div class="result web-result"><a class="result__a" href="https://eia.gov.example.org/b">Wrong</a><div class="result__snippet">Other</div></div>
+        <div class="result web-result"><a class="result__a" href="http://127.0.0.1/">Private</a><div class="result__snippet">Denied</div></div>
+        <div class="result web-result"><a class="result__a" href="https://eia.gov/b">Report B</a><div class="result__snippet">Second</div></div>"#;
+        apply_fallback(&mut value,&r,html).unwrap();
+        assert_eq!(value["research"]["source"],"local-duckduckgo");
+        assert_eq!(value["research"]["returned"],2);
+        assert_eq!(value["research"]["proxy_hits_observed"],0);
+        assert_eq!(value["data"]["web"][0]["url"],"https://www.eia.gov/a?x=1%202");
+        assert_eq!(value["data"]["web"][1]["url"],"https://eia.gov/b");
+        assert_eq!(value["data"]["web"][1]["position"],2);
+        assert_eq!(apply_fallback(&mut value,&r,"<form id='challenge-form'></form>").unwrap_err(),"provider_challenge");
+        assert!(fallback_target("//duckduckgo.com/l/?uddg=https%3A%2F%2Feia.gov&uddg=https%3A%2F%2Fexample.org").is_none());
     }
 
     #[test]
