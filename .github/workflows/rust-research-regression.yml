@@ -121,23 +121,33 @@ jobs:
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
             --mount type=bind,source="$PWD/research/locked-mcp-http-contract.mjs",target=/tmp/locked-mcp-http-contract.mjs,readonly \
             --entrypoint node firecrawl-locked-mcp:research /tmp/locked-mcp-http-contract.mjs --candidate
-      - name: Actual locked MCP client live source sample (separate evidence)
+      - name: Actual locked MCP client live source sample (separate network evidence)
         id: live_mcp
         continue-on-error: true
         run: |
-          cid=$(docker run -d --pull=never --network bridge --read-only \
+          set -euo pipefail
+          net="fc-mcp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cid=""
+          cleanup() {
+            if [ -n "$cid" ]; then docker rm -f "$cid" >/dev/null || true; fi
+            docker network rm "$net" >/dev/null || true
+          }
+          docker network create --internal "$net" >/dev/null
+          trap cleanup EXIT
+          cid=$(docker create --pull=never --network "$net" --network-alias api --read-only \
             --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
             --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
-            --entrypoint sh firecrawl-rust-ocr-ci:review -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_JOB_DB_FILE=/tmp/jobs.sqlite; exec /usr/local/bin/candidate-main')
-          trap 'docker rm -f "$cid" >/dev/null' EXIT
-          timeout 15s docker exec "$cid" python3 -B -c 'import time,urllib.request; r=urllib.request.Request("http://127.0.0.1:3002/health",headers={"Authorization":"Bearer synthetic-ci-token-not-a-real-secret-0123456789"}); exec("for i in range(50):\n try:\n  assert urllib.request.urlopen(r,timeout=1).status==200; break\n except OSError: time.sleep(.1)\nelse: raise RuntimeError(\"candidate not ready\")")'
-          timeout 210s docker run --rm --pull=never --network "container:$cid" --read-only \
+            --entrypoint sh firecrawl-rust-ocr-ci:review -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_JOB_DB_FILE=/tmp/jobs.sqlite CANDIDATE_NETWORK_MODE=internal-api; exec /usr/local/bin/candidate-main')
+          docker network connect bridge "$cid"
+          docker start "$cid" >/dev/null
+          timeout 15s docker exec "$cid" python3 -B -c 'import time,urllib.request; r=urllib.request.Request("http://127.0.0.1:3002/health",headers={"Authorization":"Bearer synthetic-ci-token-not-a-real-secret-0123456789"}); exec("for i in range(50):\\n try:\\n  assert urllib.request.urlopen(r,timeout=1).status==200; break\\n except OSError: time.sleep(.1)\\nelse: raise RuntimeError(\\"candidate not ready\\")")'
+          timeout 210s docker run --rm --pull=never --network "$net" --read-only \
             --cap-drop ALL --security-opt no-new-privileges \
             --memory 512m --memory-swap 512m --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
             --mount type=bind,source="$PWD/research/locked-mcp-http-contract.mjs",target=/tmp/locked-mcp-http-contract.mjs,readonly \
-            --entrypoint node firecrawl-locked-mcp:research /tmp/locked-mcp-http-contract.mjs --candidate-live
+            --entrypoint node firecrawl-locked-mcp:research /tmp/locked-mcp-http-contract.mjs --candidate-network-live
 
       - name: Live public-source candidate sample (separate evidence)
         id: live_sample

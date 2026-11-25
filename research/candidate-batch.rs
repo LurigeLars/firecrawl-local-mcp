@@ -149,6 +149,7 @@ impl V2CrawlRequest{
 pub(super) async fn create_v2_crawl(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response{
     let req:V2CrawlRequest=match decode(&headers,&body){Ok(v)=>v,Err(r)=>return r};
     if !req.valid(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_CRAWL_OPTIONS");}
+    let api_base=state.network.base(&headers);
     let Some(batch)=state.batch else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"JOB_STORE_DISABLED")};
     if !batch.ready(){return refusal(StatusCode::SERVICE_UNAVAILABLE,"WORKER_NOT_READY");}
     let seed=match crawl::seed(&req.url){Ok(v)=>v,Err(s)=>return refusal(s,"DESTINATION_DENIED")};
@@ -163,9 +164,9 @@ pub(super) async fn create_v2_crawl(State(state):State<CandidateState>,headers:H
     match batch.call(move|store|store.create_crawl_parallel(&store_id,&seed,req.limit,req.max_discovery_depth,include_sitemap,&policy,max_concurrency)).await{
         Ok(())=>{
             batch.notify.notify_waiters();
-            // The candidate is loopback-only. Do not construct next URLs from
-            // a caller-supplied Host or forwarded header.
-            Json(json!({"success":true,"id":id,"url":format!("http://127.0.0.1:3002/v2/crawl/{id}"),
+            // Only the two fixed operator-supported bases can be selected.
+            // Never concatenate caller-supplied host/forwarded values.
+            Json(json!({"success":true,"id":id,"url":format!("{api_base}/v2/crawl/{id}"),
                 "warning":"Bounded local same-origin crawl; no cache; site coverage unverified. Sitemap scan is bounded and seed-dependent.",
                 "research":{"sitemap_mode":if include_sitemap{"include"}else{"skip"},
                     "requested_max_concurrency":max_concurrency,"worker_concurrency_cap":max_concurrency.min(WORKERS as u32),
@@ -188,9 +189,9 @@ fn timestamp(value:&Value)->Result<String,StatusCode>{
         .map(|t|t.to_rfc3339()).ok_or(StatusCode::BAD_GATEWAY)
 }
 
-fn v2_envelope(id:&str,limit:usize,page:Value)->Result<Value,StatusCode>{
+fn v2_envelope(id:&str,limit:usize,page:Value,api_base:&'static str)->Result<Value,StatusCode>{
     let next=page["next_skip"].as_u64().map(|skip|
-        format!("http://127.0.0.1:3002/v2/crawl/{id}?skip={skip}&limit={limit}"));
+        format!("{api_base}/v2/crawl/{id}?skip={skip}&limit={limit}"));
     let mut out=json!({"success":true,"status":page["status"],"total":page["total"],"completed":page["completed"],
         "creditsUsed":0,"expiresAt":timestamp(&page["expires_at"])?,"createdAt":timestamp(&page["created_at"])?,
         "data":page["data"],"research":page["research"],
@@ -208,7 +209,7 @@ pub(super) async fn status_v2_crawl(State(state):State<CandidateState>,Path(id):
     let store_id=id.clone();
     let limit=q.limit;
     match batch.call(move|store|store.crawl_status_v2(&store_id,q.skip,limit)).await{
-        Ok(page)=>match v2_envelope(&id,limit,page){Ok(v)=>bounded(v),Err(s)=>refusal(s,"INVALID_JOB_RECEIPT")},
+        Ok(page)=>match v2_envelope(&id,limit,page,state.network.base(&headers)){Ok(v)=>bounded(v),Err(s)=>refusal(s,"INVALID_JOB_RECEIPT")},
         Err(e)=>store_refusal(e)
     }
 }
@@ -275,7 +276,9 @@ mod v2_tests{
         let page=json!({"status":"scraping","total":3,"completed":1,"data":[{"markdown":"fixture"}],
             "created_at":1700000000,"expires_at":1700086400,"finished_at":null,"next_skip":1,
             "research":{"failed":1,"site_coverage_verified":false}});
-        let v=v2_envelope("fixture",2,page).unwrap();
+        let internal=v2_envelope("fixture",2,page.clone(),"http://api:3002").unwrap();
+        assert_eq!(internal["next"],"http://api:3002/v2/crawl/fixture?skip=1&limit=2");
+        let v=v2_envelope("fixture",2,page,"http://127.0.0.1:3002").unwrap();
         assert_eq!(v["completed"],1);
         assert_eq!(v["next"],"http://127.0.0.1:3002/v2/crawl/fixture?skip=1&limit=2");
         assert_eq!(v["research"]["failed"],1);
