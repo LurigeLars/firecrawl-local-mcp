@@ -163,7 +163,7 @@ fn valid_pdf_options(req:&StaticRequest)->bool{
         (1..=110000).contains(&req.timeout.unwrap_or(110000))
 }
 fn pdf_request(req:&StaticRequest,target:&url::Url)->bool{
-    valid_pdf_options(req)&&target.path().to_ascii_lowercase().ends_with(".pdf")
+    valid_pdf_options(req)&&(target.path().to_ascii_lowercase().ends_with(".pdf")||req.parsers.as_ref().is_some_and(|p|p.as_slice()==["pdf"]))
 }
 
 // Single-page HTML accepts public HTTP(S), including query strings and
@@ -196,16 +196,19 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
     }
     if is_pdf{
-        // Preserve the existing no-query/no-fragment PDF subset. No
-        // silently narrowed document request or native PDF parser fallback.
-        if static_target(target.as_str()).is_err(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_PDF_URL");}
+        if let Err(status)=pdf::target(target.as_str()){return refusal(status,"UNSUPPORTED_PDF_URL");}
         if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
-        let Ok(_slot)=state.slots.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
-        let result=pdf::document(&state,&target,Duration::from_millis(req.timeout.unwrap_or(110000))).await
-            .and_then(|receipt|pdf::v2_document(&target,receipt));
+        let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
+        let budget=Duration::from_millis(req.timeout.unwrap_or(110000));
+        let result=tokio::spawn(async move{
+            let _slot=slot;
+            let (landed,receipt)=pdf::document(&state,&target,budget).await?;
+            pdf::v2_document(&target,&landed,receipt).map_err(|s|(s,"PDF_INCOMPLETE"))
+        }).await;
         return match result{
-            Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
-            Err(status)=>refusal(status,"PDF_EXTRACTION_FAILED")
+            Ok(Ok(data))=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+            Ok(Err((status,code)))=>refusal(status,code),
+            Err(_)=>refusal(StatusCode::BAD_GATEWAY,"PDF_TASK_FAILED")
         };
     }
     if let Some(formats)=render_formats{
