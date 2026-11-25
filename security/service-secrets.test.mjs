@@ -441,3 +441,9 @@ test('last two stale Firecrawl Node 26.10 containers are upgraded individually',
   assert.match(compose, /llm-proxy:\s*\n\s*image: firecrawl-node-runtime:local/);
   assert.doesNotMatch(source, /down -v|docker volume rm|--remove-orphans|docker compose down/);
 });
+
+test('explicit Rust transitions use the existing real runtime secret hooks', () => {
+  assert.match(launcher, /\$TransitionAction = \$Action -in @\('rust-promote','rust-rollback'\)/);
+  assert.match(launcher, /if \(\$TransitionAction -or \$Action -in \$composeActions\)/);
+  assert.match(launcher, /if \(\$TransitionAction -or \$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng"\)/);
+});

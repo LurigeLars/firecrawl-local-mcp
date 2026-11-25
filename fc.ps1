@@ -629,7 +629,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("rust-promote", "rust-rollback", "refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres")
+$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -643,10 +643,10 @@ $proxyPasswordOriginal = if ($proxyPasswordWasSet) { $env:FIRECRAWL_PUBLIC_PROXY
 $playwrightUrlWasSet = Test-Path Env:PLAYWRIGHT_MICROSERVICE_URL
 $playwrightUrlOriginal = if ($playwrightUrlWasSet) { $env:PLAYWRIGHT_MICROSERVICE_URL } else { $null }
 try {
-    if ($Action -in $composeActions) {
+    if ($TransitionAction -or $Action -in $composeActions) {
         # Only the public proxy deployment needs the existing DPAPI-backed
         # post_start hook; preserve all other reviewed secret boundaries.
-        if ($Action -in @("rust-promote", "rust-rollback", "deploy-proxy", "deploy-api", "refresh-searxng") -or $Action -eq "migrate-nuq-postgres" -or
+        if ($TransitionAction -or $Action -in @("deploy-proxy", "deploy-api", "refresh-searxng") -or $Action -eq "migrate-nuq-postgres" -or
             ($Action -eq "maintain-stateless" -and $Service -in @("api", "playwright-public-proxy-service"))) {
             Set-RuntimeHookSecrets -UseRealSecrets $true
         } else {

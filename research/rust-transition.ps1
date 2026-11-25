@@ -134,6 +134,12 @@ function Restore-LegacyTransition([string[]]$LegacyCompose,[string]$ProjectRoot,
     $legacy=$Journal.legacy
     $candidate=$Journal.candidate
     $mcpBefore=Get-TransitionService mcp
+    $gatewayBefore=Get-TransitionService gateway
+    $active=(Get-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Raw).Trim() -ceq 'rust-active-v1'
+    if ($null -eq $gatewayBefore) { throw 'Gateway identity unavailable; rollback refused.' }
+    if (-not $active -and ($gatewayBefore.id -cne $legacy.gateway.id -or $gatewayBefore.image -cne $legacy.gateway.image)) { throw 'Original gateway changed during promotion.' }
+    # Gateway is shared, and reviewed maintenance may have replaced it
+    # after promotion. Retain the exact instance observed at rollback.
     Stop-TransitionService gateway
     Stop-TransitionService mcp
     $api=Get-TransitionService api
@@ -145,12 +151,12 @@ function Restore-LegacyTransition([string[]]$LegacyCompose,[string]$ProjectRoot,
         if (-not $idle) {
             # Preserve durable jobs and let the same engine finish. Never
             # remove its volume or pretend the other engine can read its jobs.
-            if ((Get-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Raw).Trim() -ceq 'rust-active-v1') {
+            if ($active) {
                 $null = Invoke-McpDocker -Arguments @('start',$api.id)
                 $mcp=Get-TransitionService mcp
                 if ($null -eq $mcpBefore -or $null -eq $mcp -or $mcp.id -cne $mcpBefore.id -or $mcp.image -cne $mcpBefore.image) { throw 'Rust MCP identity unavailable.' }
                 $null = Invoke-McpDocker -Arguments @('start',$mcp.id)
-                Start-OriginalTransitionService -Service gateway -Id $legacy.gateway.id -Image $legacy.gateway.image
+                Start-OriginalTransitionService -Service gateway -Id $gatewayBefore.id -Image $gatewayBefore.image
             }
             throw 'Rust durable jobs are not verified idle; rollback refused.'
         }
@@ -185,7 +191,7 @@ function Restore-LegacyTransition([string[]]$LegacyCompose,[string]$ProjectRoot,
         if ($null -eq $state -or -not $state.running -or $state.image -cne $legacy[$service].image) { throw 'Legacy image recovery not verified.' }
     }
     Invoke-TransitionMcpProbe -ProjectRoot $ProjectRoot -Backend legacy -Mode ''
-    Start-OriginalTransitionService -Service gateway -Id $legacy.gateway.id -Image $legacy.gateway.image
+    Start-OriginalTransitionService -Service gateway -Id $gatewayBefore.id -Image $gatewayBefore.image
     # Clear marker only after successful original engine/MCP verification.
     $journalPath=Get-TransitionPath 'rust-transition.json'
     $archive=Get-TransitionPath ('rust-transition-last-'+[guid]::NewGuid().ToString('N')+'.json')

@@ -103,6 +103,7 @@ try {
     $script:states.api=@{id=('a'*64);image=$candidate.api;running=$true}
     # Active MCP can have been safely upgraded since initial promotion.
     $script:states.mcp=@{id=('b'*64);image=('sha256:'+('f'*64));running=$true}
+    $script:states.gateway=@{id=('f'*64);image=('sha256:'+('9'*64));running=$true}
     $script:states['pdf-ocr']=@{id=('c'*64);image=$candidate['pdf-ocr'];running=$true}
     foreach ($service in @('redis','rabbitmq','nuq-postgres')) { $script:states[$service].running=$false }
     Set-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Value 'rust-active-v1'
