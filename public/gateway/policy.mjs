@@ -5,7 +5,7 @@ import { lookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
 
 export const DEFAULT_ALLOWED_TOOLS =
-  'firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status';
+  'tool_usage,firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status';
 
 export function parseAllowedTools(value) {
   return new Set((value ?? DEFAULT_ALLOWED_TOOLS).split(',').map(s => s.trim()).filter(Boolean));
