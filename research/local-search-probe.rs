@@ -104,6 +104,8 @@ struct RawHit { url: String, title: Option<String>, content: Option<String> }
 #[derive(Deserialize)]
 struct Page {
     results: Vec<RawHit>,
+    #[serde(default)]
+    unresponsive_engines: Option<Vec<Value>>,
 }
 
 #[derive(Serialize)]
@@ -143,6 +145,10 @@ pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'s
         let mut web = Vec::new();
         let mut seen = HashSet::new();
         let mut omitted = 0usize;
+        let mut pages_read = 0usize;
+        let mut proxy_hits = 0usize;
+        let mut engine_reports = 0usize;
+        let mut duplicates = 0usize;
         // Same 20-result page budget as the legacy SearXNG adapter.
         // No automatic extra pages or retries for low-result queries.
         for page in 1..=req.limit.div_ceil(20) {
@@ -162,13 +168,18 @@ pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'s
                 body.extend_from_slice(&chunk);
             }
             let results: Page = serde_json::from_slice(&body).map_err(|_| "invalid search proxy response")?;
+            pages_read += 1;
+            proxy_hits += results.results.len();
+            // Count reports, not distinct failed engines. Never expose upstream
+            // engine error text, URLs or other untrusted diagnostic payloads.
+            engine_reports += results.unresponsive_engines.as_ref().map_or(0, Vec::len);
             if results.results.is_empty() { break; }
             for raw in results.results {
                 if let Some(mut hit) = accept_hit(raw, &req) {
                     if seen.insert(hit.url.clone()) {
                         hit.position=web.len()+1;
                         web.push(hit);
-                    }
+                    } else { duplicates += 1; }
                 } else { omitted += 1; }
                 if web.len() >= req.limit { break; }
             }
@@ -179,6 +190,8 @@ pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'s
         let catalogue_requested=req.catalogue_requested();
         let mut value=json!({"success": true, "data": {"web": web}, "research": {
             "requested": req.limit, "returned": web.len(), "omitted": omitted,
+            "pages_read": pages_read, "proxy_hits_observed": proxy_hits,
+            "engine_failure_reports": engine_reports, "duplicate_hits": duplicates,
             "source": "local-searxng", "catalogue_requested":catalogue_requested,
             "catalogue_available":false
         }});
@@ -265,6 +278,27 @@ mod tests {
         assert_eq!(result["data"]["web"][0]["description"], "first");
         assert_eq!(result["data"]["web"][1]["url"], "https://eia.gov/b");
         assert_eq!(result["research"]["omitted"], 3);
+        assert_eq!(result["research"]["pages_read"], 2);
+        assert_eq!(result["research"]["proxy_hits_observed"], 6);
+        assert_eq!(result["research"]["duplicate_hits"], 1);
+        assert_eq!(result["research"]["engine_failure_reports"], 0);
+    }
+
+    #[tokio::test]
+    async fn empty_search_preserves_bounded_engine_failure_evidence() {
+        let router = Router::new().route("/search", get(|| async {
+            Json(json!({"results":[], "unresponsive_engines":[
+                ["google","fixture refusal detail"],["bing","fixture timeout detail"]]}))
+        }));
+        let (url, task) = spawn(router).await;
+        let result = search_at(&url, req(json!({"query":"test","limit":2}))).await.unwrap();
+        task.abort();
+        assert_eq!(result["data"]["web"], json!([]));
+        assert_eq!(result["research"]["pages_read"], 1);
+        assert_eq!(result["research"]["proxy_hits_observed"], 0);
+        assert_eq!(result["research"]["engine_failure_reports"], 2);
+        assert!(!result.to_string().contains("fixture refusal detail"));
+        assert!(!result.to_string().contains("fixture timeout detail"));
     }
 
     #[tokio::test]

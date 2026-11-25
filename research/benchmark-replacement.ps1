@@ -12,6 +12,7 @@ $project = 'fc-rust-bench-' + ([Guid]::NewGuid().ToString('N').Substring(0,12))
 if ($project -notmatch '^fc-rust-bench-[0-9a-f]{12}$') { throw 'Unsafe project name.' }
 $compose = @('compose','-p',$project,'-f',(Join-Path $PSScriptRoot 'compose.rust-research.yaml'),'--profile','search')
 $load = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-mcp-load.mjs')
+$searchProbe = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-search.mjs')
 
 function Invoke-Docker {
     param([string[]]$Arguments)
@@ -144,12 +145,20 @@ try {
     $old = Measure-Backend 'legacy' $legacy @('api','rabbitmq','nuq-postgres','redis')
     $new = Measure-Backend 'candidate' $candidate @('api','pdf-ocr')
     if ($old.sampled_peak_bytes -le 0) { throw 'Invalid legacy sample.' }
+    # External search is a separate acceptance receipt, not part of the HTML
+    # benchmark. Execute only against the disposable candidate container.
+    $searchOutput = @($searchProbe | & docker exec -i $candidate.mcp node --input-type=module - --local)
+    $searchExit = $LASTEXITCODE
+    $searchEvidence = [pscustomobject]@{
+        verdict = $(if ($searchExit -eq 0 -and ($searchOutput -match '^RELEASE_SEARXNG_LIVE_PASS ')) {'PASS'} else {'UNVERIFIED'})
+        evidence = @($searchOutput | Where-Object { $_ -match '^RELEASE_SEARXNG_(DIAGNOSTICS|LIVE_PASS) ' })
+    }
     [pscustomobject]@{
         revision=$revision;project=$project
         scope='same host, actual MCP HTTP, bounded HTML workload, replaceable subsystem only; production remains active'
         limits='sampled Docker CLI memory, not exact peak; concurrent production traffic and other services may confound; not full feature parity'
         sampled_peak_reduction_pct=[Math]::Round(100*(1-$new.sampled_peak_bytes/$old.sampled_peak_bytes),2)
-        legacy=$old;candidate=$new
+        legacy=$old;candidate=$new;candidate_search=$searchEvidence
     } | ConvertTo-Json -Depth 12
 } finally {
     if ($attempted -and $project -match '^fc-rust-bench-[0-9a-f]{12}$') {
