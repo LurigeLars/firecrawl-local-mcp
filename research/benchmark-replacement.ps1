@@ -43,7 +43,7 @@ function Get-MemoryBytes {
 
 function Get-ContainerForService {
     param([string]$ProjectName,[string]$Service)
-    $ids = @(Invoke-Docker -Arguments @('ps','-q','--filter',"label=com.docker.compose.project=$ProjectName",'--filter',"label=com.docker.compose.service=$Service"))
+    $ids = @(Invoke-Docker -Arguments @('ps','-q','--no-trunc','--filter',"label=com.docker.compose.project=$ProjectName",'--filter',"label=com.docker.compose.service=$Service"))
     if ($ids.Count -ne 1 -or $ids[0] -notmatch '^[0-9a-f]{12,64}$') {
         throw "Expected one running container: $ProjectName/$Service"
     }
@@ -57,7 +57,11 @@ function Get-Sample {
     $rows = @{}
     foreach ($line in $lines) {
         $v = $line | ConvertFrom-Json
-        $service = @($Containers.Keys | Where-Object { $Containers[$_] -eq $v.ID -or $Containers[$_] -eq $v.Container })
+        $service = @($Containers.Keys | Where-Object {
+            $id = [string]$Containers[$_]
+            $seen = [string]$v.ID
+            $id -eq $v.Container -or ($seen -match '^[0-9a-f]{12,64}$' -and $id.StartsWith($seen,[StringComparison]::Ordinal))
+        })
         if ($service.Count -ne 1) { throw 'Unexpected Docker stats container.' }
         $rows[$service[0]] = @{memory_bytes=(Get-MemoryBytes $v.MemUsage);cpu=$v.CPUPerc;pids=$v.PIDs}
     }
@@ -125,6 +129,7 @@ foreach ($volume in $config.volumes.PSObject.Properties) {
 }
 
 $attempted = $false
+$oldFixtureMode = [Environment]::GetEnvironmentVariable('RESEARCH_CI_FIXTURE','Process')
 try {
     $attempted = $true
     # Local mode always uses a random credential, not the public CI fixture.
@@ -151,4 +156,5 @@ try {
         & docker @compose down --volumes --timeout 10
         if ($LASTEXITCODE -ne 0) { Write-Warning "Disposable project cleanup failed: $project" }
     }
+    [Environment]::SetEnvironmentVariable('RESEARCH_CI_FIXTURE',$oldFixtureMode,'Process')
 }
