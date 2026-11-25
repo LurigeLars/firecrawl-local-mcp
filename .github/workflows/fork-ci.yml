@@ -72,7 +72,7 @@ jobs:
 
       - name: Run secret isolation tests
         shell: bash
-        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
+        run: node --test public/mcp-api-env.test.mjs llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
 
       - name: Verify runtime secret stays in tmpfs
         shell: bash
@@ -192,7 +192,7 @@ jobs:
 
       - name: Run secret isolation tests
         shell: bash
-        run: node --test llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
+        run: node --test public/mcp-api-env.test.mjs llm/gemini-secret.test.mjs security/service-secrets.test.mjs security/resource-guardrails.test.mjs security/dependency-pins.test.mjs
 
       - name: Run browser security regression
         shell: bash

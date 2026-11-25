@@ -7,10 +7,13 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { ensureLockedRuntime } from './locked-runtime.mjs';
+import { candidateApiEnvironment } from '../public/mcp-api-env.mjs';
 import {
   parseAllowedTools, checkRequest, urlSafetyReason, wantsCompactResult, rememberCrawlRequest, rewriteResponse, rpcError, rpcToolError,
 } from '../public/gateway/policy.mjs';
 import { BROWSER_TOOL_NAMES, appendBrowserTools, callBrowserTool, isBrowserTool } from '../public/gateway/browser-tools.mjs';
+
+const childEnv = candidateApiEnvironment(process.env, 'http://127.0.0.1:3002', 'http://127.0.0.1:3002');
 
 // The exact firecrawl-mcp tree locked in public/package.json + public/package-lock.json.
 const { entry: mcpEntry } = ensureLockedRuntime(
@@ -24,7 +27,7 @@ const crawlRequests = new Map();
 const ctx = { allowedTools, compactIds, crawlRequests };
 
 const child = spawn(process.execPath, [mcpEntry],
-  { env: { ...process.env, FIRECRAWL_API_URL: process.env.FIRECRAWL_API_URL ?? 'http://127.0.0.1:3002' }, stdio: ['pipe', 'pipe', 'inherit'] });
+  { env: childEnv, stdio: ['pipe', 'pipe', 'inherit'] });
 
 const toClient = obj => process.stdout.write(JSON.stringify(obj) + '\n');
 
