@@ -13,6 +13,37 @@ const doc={markdown:'Synthetic source fixture 42',metadata:{
   title:'Fixture',url:fixtureUrl,sourceURL:fixtureUrl,statusCode:200,contentType:'text/html'
 }};
 const traffic=[];
+const mode=process.argv[2]??'fixture';
+assert.ok(['fixture','--candidate','--candidate-live'].includes(mode));
+const candidateMode=mode!=='fixture';
+const candidateToken='synthetic-ci-token-not-a-real-secret-0123456789';
+const fixtureToken='fc-synthetic-ci-not-a-real-key';
+// In candidate modes the relay only observes the locked client's real HTTP
+// contract. Forward the exact JSON body and auth to the fixed loopback Rust
+// listener, never a caller-supplied host; no redirect or fabricated response.
+async function relay(req,res,u,raw,record){
+  if(!['/v2/scrape','/v2/map','/v2/crawl'].includes(u.pathname) ||
+      u.search || req.method!=='POST' ||
+      req.headers.authorization!=='Bearer '+candidateToken){
+    res.writeHead(400).end();return;
+  }
+  const upstream=await fetch('http://127.0.0.1:3002'+u.pathname,{
+    method:'POST',body:raw,headers:{authorization:req.headers.authorization,
+      'content-type':'application/json'},redirect:'manual',
+    signal:AbortSignal.timeout(35000)
+  });
+  const chunks=[];let size=0;
+  for await(const part of upstream.body){
+    size+=part.length;
+    if(size>2*1024*1024)throw Error('candidate response exceeds test bound');
+    chunks.push(part);
+  }
+  const body=Buffer.concat(chunks);
+  record.status=upstream.status;
+  record.response=JSON.parse(body.toString('utf8'));
+  res.writeHead(upstream.status,{'content-type':'application/json'});
+  res.end(body);
+}
 const server=http.createServer(async(req,res)=>{
   try {
     const parts=[]; let bytes=0;
@@ -21,9 +52,12 @@ const server=http.createServer(async(req,res)=>{
       if(bytes>65536){res.writeHead(413).end();return;}
       parts.push(part);
     }
-    const body=bytes?JSON.parse(Buffer.concat(parts)):null;
+    const raw=Buffer.concat(parts);
+    const body=bytes?JSON.parse(raw):null;
     const u=new URL(req.url,'http://127.0.0.1');
-    traffic.push({method:req.method,path:u.pathname,query:u.search,body});
+    const record={method:req.method,path:u.pathname,query:u.search,body};
+    traffic.push(record);
+    if(candidateMode){await relay(req,res,u,raw,record);return;}
     const origin='http://127.0.0.1:'+server.address().port;
     let data;
     if(req.method==='POST'&&u.pathname==='/v2/scrape'){
@@ -60,7 +94,7 @@ const child=spawn(process.execPath,['/app/node_modules/firecrawl-mcp/dist/index.
   // Do not inherit proxy credentials, remote URLs, or HTTP transport mode.
   env:{PATH:process.env.PATH,HOME:'/tmp',TMPDIR:'/tmp',
     FIRECRAWL_API_URL:'http://127.0.0.1:'+server.address().port,
-    FIRECRAWL_API_KEY:'fc-synthetic-ci-not-a-real-key'},
+    FIRECRAWL_API_KEY:candidateMode?candidateToken:fixtureToken},
   stdio:['pipe','pipe','pipe']
 });
 let stderr='',nextId=1;
@@ -78,7 +112,7 @@ const notify=(method,params)=>child.stdin.write(JSON.stringify({jsonrpc:'2.0',me
 function rpc(method,params){
   const id=nextId++;
   return new Promise((resolve,reject)=>{
-    const timer=setTimeout(()=>{pending.delete(id);reject(new Error('MCP response deadline: '+method));},20000);
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error('MCP response deadline: '+method));},candidateMode?45000:20000);
     pending.set(id,{resolve,reject,timer});
     child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');
   });
@@ -89,6 +123,40 @@ try{
   notify('notifications/initialized');
   const listed=await rpc('tools/list',{});
   const tools=listed.result?.tools??[];
+  if(candidateMode){
+    const cases=mode==='--candidate'?[
+      {name:'firecrawl_scrape',args:{url:'https://127.0.0.1/',formats:['markdown']},path:'/v2/scrape',status:403},
+      {name:'firecrawl_map',args:{url:'https://127.0.0.1/',limit:2},path:'/v2/map',status:403},
+      {name:'firecrawl_crawl',args:{url:fixtureUrl,limit:2,maxConcurrency:1,scrapeOptions:{formats:['markdown']}},path:'/v2/crawl',status:400}
+    ]:[
+      {name:'firecrawl_scrape',args:{url:'https://www.iana.org/help/example-domains',formats:['markdown']},path:'/v2/scrape',status:200,markers:['Example Domains','RFC 2606','RFC 6761']},
+      {name:'firecrawl_scrape',args:{url:'https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm',formats:['markdown']},path:'/v2/scrape',status:200,markers:['September 8, 2026','Open Interest','1,939,911']}
+    ];
+    for(const tc of cases){
+      assert.ok(tools.some(t=>t.name===tc.name),tc.name+' unavailable');
+      const offset=traffic.length;
+      const reply=await rpc('tools/call',{name:tc.name,arguments:tc.args});
+      const captured=traffic.slice(offset);
+      const exchange=captured.find(x=>x.path===tc.path&&x.status===tc.status);
+      assert.ok(exchange,tc.name+' did not reach actual candidate with expected HTTP status');
+      const output=JSON.stringify(reply.result??reply.error??{});
+      if(tc.status===200){
+        assert.equal(exchange.response?.success,true);
+        assert.ok(!reply.error&&reply.result&&!reply.result.isError);
+        const md=String(exchange.response?.data?.markdown??'').replace(/\s+/g,' ').toLowerCase();
+        const visible=output.replace(/\\n|\\r|\\t/g,' ').replace(/\s+/g,' ').toLowerCase();
+        assert.ok(tc.markers.every(m=>md.includes(m.toLowerCase())&&visible.includes(m.toLowerCase())),
+          tc.name+' lost source markers in HTTP or MCP result');
+      }else{
+        assert.equal(exchange.response?.success,false);
+        assert.ok(reply.error||reply.result?.isError||/error|failed|denied|unsupported|forbidden|bad request/i.test(output),
+          tc.name+' refusal not visible to MCP caller');
+      }
+      console.log(JSON.stringify({actual_candidate:true,mode,tool:tc.name,http_status:exchange.status,
+        markers:tc.markers?.length??0,mcp_error:!!reply.error||reply.result?.isError===true}));
+    }
+    console.log('LOCKED_MCP_ACTUAL_CANDIDATE_PASS '+mode);
+  }else{
   const calls=[
     ['firecrawl_scrape',{url:fixtureUrl,formats:['markdown']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['summary']},'POST','/v2/scrape'],
@@ -115,6 +183,7 @@ try{
   }
   console.log(JSON.stringify({locked_mcp:pkg.version,outcomes}));
   assert.ok(outcomes.every(x=>x.ok),'locked client transport differs from expected API fixture');
+  }
 }finally{
   lines.close();child.stdin.end();child.kill();
   server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
