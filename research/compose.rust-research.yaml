@@ -1,6 +1,6 @@
 # Opt-in disposable research stack. Never merge this with production Compose.
 # Run only with an explicitly distinct project name; no published ports,
-# external networks, production data or paid providers. Only api has egress.
+# external networks, production data or paid providers. Only api/search backend have egress.
 services:
   init:
     image: node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
@@ -17,6 +17,7 @@ services:
     volumes:
       - candidate-token:/run/research-token
       - candidate-jobs:/var/lib/research
+      - search-token:/run/research-search-token
     command:
       - node
       - -e
@@ -29,6 +30,11 @@ services:
         fs.chmodSync(token,0o440);
         fs.chownSync('/var/lib/research',65532,65532);
         fs.chmodSync('/var/lib/research',0o700);
+        const search='/run/research-search-token/secret';
+        if(!fs.existsSync(search)) fs.writeFileSync(search,crypto.randomBytes(32).toString('hex'),{mode:0o400,flag:'wx'});
+        if(!/^[0-9a-f]{64}$/.test(fs.readFileSync(search,'utf8'))) throw Error('invalid research search secret');
+        fs.chownSync(search,977,977);
+        fs.chmodSync(search,0o400);
     restart: "no"
 
   api:
@@ -81,6 +87,57 @@ services:
     cpus: 2.0
     restart: "no"
 
+  searxng:
+    profiles: ["search"]
+    image: searxng/searxng@sha256:0e824adf440b3c3c5020e85bc819e6580a79a5cf5b23f14bc2b0180fe64a5779
+    user: "977:977"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        test -s /run/research-search-token/secret || exit 1;
+        export SEARXNG_SECRET="$$(cat /run/research-search-token/secret)";
+        exec /usr/local/searxng/entrypoint.sh
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      FORCE_OWNERSHIP: "false"
+    volumes:
+      - search-token:/run/research-search-token:ro
+      - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ../searxng/limiter.toml:/etc/searxng/limiter.toml:ro
+    networks: [private, egress]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 96
+    cpus: 1.0
+    restart: "no"
+
+  searxng-proxy:
+    profiles: ["search"]
+    build:
+      context: ../security
+      dockerfile: Dockerfile.searxng-proxy
+    user: node
+    environment:
+      UPSTREAM: http://searxng:8080
+    volumes:
+      - ../searxng/lang-proxy.mjs:/app/lang-proxy.mjs:ro
+    depends_on: [searxng]
+    networks: [private]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    cpus: 0.5
+    restart: "no"
+
   mcp:
     build:
       context: ../public
@@ -118,3 +175,4 @@ networks:
 volumes:
   candidate-token:
   candidate-jobs:
+  search-token:

@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           project="fc-rust-review-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          compose=(docker compose -p "$project" -f research/compose.rust-research.yaml)
+          compose=(docker compose -p "$project" -f research/compose.rust-research.yaml --profile search)
           cleanup() {
             "${compose[@]}" down --volumes --remove-orphans --timeout 10 >/dev/null || true
           }
@@ -53,4 +53,14 @@ jobs:
           replacement=$("${compose[@]}" ps -q api)
           test -n "$replacement" && test "$replacement" != "$api"
           timeout 35s "${compose[@]}" exec -T mcp node --input-type=module - verify "$job" "$digest" < research/verify-release-compose.mjs
-          docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}} {{.PIDs}}' "$replacement" "$mcp" "$pdf"
+          search=$("${compose[@]}" ps -q searxng)
+          proxy=$("${compose[@]}" ps -q searxng-proxy)
+          test -n "$search" && test -n "$proxy"
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$proxy")" = 1
+          # Search engines can refuse CI egress. Record that separately.
+          if timeout 75s "${compose[@]}" exec -T mcp node --input-type=module - < research/verify-release-search.mjs; then
+            echo 'Release SearXNG integration: PASS (external evidence)' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Release SearXNG integration: UNVERIFIED (external evidence)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}} {{.PIDs}}' "$replacement" "$mcp" "$pdf" "$search" "$proxy"
