@@ -211,25 +211,41 @@ struct QueryFormat{
     mode:String,
 }
 
-fn model_format(req:&StaticRequest)->Option<(model::Mode,Option<String>)>{
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonFormat{
+    #[serde(rename="type")] kind:String,
+    prompt:String,
+    schema:Value,
+}
+
+fn model_format(req:&StaticRequest)->Option<(model::Mode,Option<String>,Option<Value>)>{
     if !valid_common(req)||req.wait_for!=0||req.parsers.is_some()||req.formats.len()!=1||!(1..=180000).contains(&req.timeout.unwrap_or(180000)){return None;}
     let f=&req.formats[0];
-    if f=="summary"{return Some((model::Mode::Summary,None));}
+    if f=="summary"{return Some((model::Mode::Summary,None,None));}
+    if f.get("type").and_then(Value::as_str)==Some("json"){
+        let j:JsonFormat=serde_json::from_value(f.clone()).ok()?;
+        if j.kind!="json"||j.prompt.trim().is_empty()||j.prompt.len()>2048||!model::valid_schema(&j.schema){return None;}
+        return Some((model::Mode::Json,Some(j.prompt),Some(j.schema)));
+    }
     let q:QueryFormat=serde_json::from_value(f.clone()).ok()?;
     if q.kind!="query"||q.prompt.trim().is_empty()||q.prompt.len()>2048{return None;}
     let mode=match q.mode.as_str(){"freeform"=>model::Mode::Query,"directQuote"=>model::Mode::DirectQuote,_=>return None};
-    Some((mode,Some(q.prompt)))
+    Some((mode,Some(q.prompt),None))
 }
 
-async fn add_model_result(data:&mut Value,mode:model::Mode,prompt:Option<String>,endpoint:&str,
+async fn add_model_result(data:&mut Value,mode:model::Mode,prompt:Option<String>,schema:Option<Value>,endpoint:&str,
     model_name:&str,budget:Duration)->Result<(),StatusCode>{
     let markdown=data["markdown"].as_str().ok_or(StatusCode::BAD_GATEWAY)?.to_owned();
-    let key=if matches!(mode,model::Mode::Summary){"summary"}else{"answer"};
+    let key=match &mode{model::Mode::Summary=>"summary",model::Mode::Json=>"json",_=>"answer"};
     let direct=matches!(mode,model::Mode::DirectQuote);
-    let result=model::extract_at(endpoint,model::Request{mode,markdown,prompt,schema:None},
+    let structured=matches!(mode,model::Mode::Json);
+    let result=model::extract_at(endpoint,model::Request{mode,markdown,prompt,schema},
         model_name,budget).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
-    let value=result["candidate"].as_str().ok_or(StatusCode::BAD_GATEWAY)?;
-    data[key]=json!(value);
+    data[key]=if structured{
+        if result["research"]["schema_validated"]!=true{return Err(StatusCode::BAD_GATEWAY);}
+        result.get("candidate").ok_or(StatusCode::BAD_GATEWAY)?.clone()
+    }else{json!(result["candidate"].as_str().ok_or(StatusCode::BAD_GATEWAY)?)};
     data["researchModel"]=result["research"].clone();
     data["warning"]=json!(if direct{
         "Selected original Markdown lines; quotation text is source-matched, but relevance and page completeness are unverified."
@@ -339,20 +355,13 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     // caller disconnects. Model and automatic browser dispatch share it.
     let result=tokio::spawn(async move{
     let _slot=slot;
-    if let Some((mode,prompt))=model_req{
+    if let Some((mode,prompt,schema))=model_req{
         let Some(name)=state.model_name.as_deref()else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"MODEL_DISABLED")};
         let Ok(_model_slot)=state.model_slot.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"MODEL_BUSY")};
-        let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(180000));
-        let mut data=match static_document_with_options(&state,target,ScrapeOptions{
-            timeout:Some(req.timeout.unwrap_or(180000).min(45000)),only_main_content:req.only_main_content,
-            include_tags:req.include_tags,exclude_tags:req.exclude_tags,..Default::default()
-        }).await{Ok(data)=>data,Err(status)=>return refusal(status,"STATIC_SCRAPE_FAILED")};
-        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero(){return refusal(StatusCode::GATEWAY_TIMEOUT,"MODEL_DEADLINE");}
-        if let Err(status)=add_model_result(&mut data,mode,prompt,model::ENDPOINT,name,remaining).await{
-            return refusal(status,"MODEL_EXTRACTION_FAILED");
-        }
-        return bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}));
+        return match model_html_request(&state,target,req,(mode,prompt,schema),name).await{
+            Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+            Err(status)=>refusal(status,"MODEL_EXTRACTION_FAILED")
+        };
     }
     match static_html_request(&state,target,req).await {
         Ok(mut data)=>{
@@ -367,6 +376,21 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         Ok(response)=>response,
         Err(_)=>refusal(StatusCode::BAD_GATEWAY,"SCRAPE_TASK_FAILED")
     }
+}
+
+// Shared model route: caller holds global admission and the one model slot.
+// The search caller clamps the requested deadline to its own remaining budget.
+async fn model_html_request(state:&CandidateState,target:url::Url,req:StaticRequest,
+    (mode,prompt,schema):(model::Mode,Option<String>,Option<Value>),name:&str)->Result<Value,StatusCode>{
+    let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(180000));
+    let mut data=static_document_with_options(state,target,ScrapeOptions{
+        timeout:Some(req.timeout.unwrap_or(180000).min(45000)),only_main_content:req.only_main_content,
+        include_tags:req.include_tags,exclude_tags:req.exclude_tags,..Default::default()
+    }).await?;
+    let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero(){return Err(StatusCode::GATEWAY_TIMEOUT);}
+    add_model_result(&mut data,mode,prompt,schema,model::ENDPOINT,name,remaining).await?;
+    Ok(data)
 }
 
 // Shared single-page HTML path for direct scrape and search enrichment.
@@ -470,7 +494,7 @@ fn search_options(raw:Value)->Result<(search::Request,Option<StaticRequest>),Sta
         // destination is independently derived and guarded for each hit.
         fields.insert("url".into(),json!(""));
         let opts:StaticRequest=serde_json::from_value(Value::Object(fields)).map_err(|_|StatusCode::BAD_REQUEST)?;
-        if !valid_static(&opts)||!valid_common(&opts){return Err(StatusCode::BAD_REQUEST);}
+        if !valid_common(&opts)||(!valid_static(&opts)&&model_format(&opts).is_none()){return Err(StatusCode::BAD_REQUEST);}
         Some(opts)
     }else{None};
     Ok((req,options))
@@ -485,13 +509,15 @@ where F:FnMut(url::Url,StaticRequest)->Fut,
     let mut succeeded=0usize;
     let mut failed=0usize;
     for hit in hits.iter_mut(){
-        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().min(45000) as u64;
+        let model_requested=model_format(&opts).is_some();
+        let cap=if model_requested{180000}else{45000};
+        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().min(cap) as u64;
         let target=hit["url"].as_str().ok_or(StatusCode::BAD_GATEWAY).and_then(scrape_target);
         let result=match target{
             Ok(_) if remaining==0=>Err(StatusCode::GATEWAY_TIMEOUT),
             Ok(target)=>{
                 let mut options=opts.clone();
-                options.timeout=Some(options.timeout.unwrap_or(30000).min(remaining));
+                options.timeout=Some(options.timeout.unwrap_or(if model_requested{180000}else{30000}).min(remaining));
                 // The inner reader bounds network work and retains parser
                 // admission until completion. Do not cancel a blocking parser.
                 read(target,options).await
@@ -509,7 +535,8 @@ where F:FnMut(url::Url,StaticRequest)->Fut,
             Ok(doc)=>{
                 // Preserve original search URL, rank, title and snippet.
                 // Only requested document fields and source evidence may be merged.
-                for key in ["markdown","html","rawHtml","links","metadata","researchBrowser","researchSourceVerified"]{
+                for key in ["markdown","html","rawHtml","links","metadata","researchBrowser","researchSourceVerified",
+                    "answer","summary","json","researchModel","warning"]{
                     if let Some(field)=doc.get(key){object.insert(key.into(),field.clone());}
                 }
                 object.insert("researchScrape".into(),json!({"status":"completed","source_verified":false}));
@@ -533,6 +560,9 @@ where F:FnMut(url::Url,StaticRequest)->Fut,
 async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
     let raw:Value=match decode(&headers,&body){Ok(v)=>v,Err(r)=>return r};
     let (req,options)=match search_options(raw){Ok(v)=>v,Err(status)=>return refusal(status,"UNSUPPORTED_OPTIONS")};
+    if options.as_ref().is_some_and(|opts|model_format(opts).is_some())&&state.model_name.is_none(){
+        return refusal(StatusCode::SERVICE_UNAVAILABLE,"MODEL_DISABLED");
+    }
     let Ok(slot)=state.slots.clone().try_acquire_owned() else {return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");};
     let result=tokio::spawn(async move{
         let _slot=slot;
@@ -540,7 +570,13 @@ async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:
         let mut value=search::search_at(&state.search_endpoint,req).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
         if let Some(opts)=options{
             let reader=&state;
-            enrich_search(&mut value,opts,deadline,|target,opts|static_html_request(reader,target,opts)).await?;
+            enrich_search(&mut value,opts,deadline,|target,opts|async move{
+                if let Some(model)=model_format(&opts){
+                    let name=reader.model_name.as_deref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+                    let _model_slot=reader.model_slot.try_acquire().map_err(|_|StatusCode::TOO_MANY_REQUESTS)?;
+                    model_html_request(reader,target,opts,model,name).await
+                }else{static_html_request(reader,target,opts).await}
+            }).await?;
         }
         Ok::<Value,StatusCode>(value)
     }).await;
@@ -757,7 +793,7 @@ mod tests {
         for input in [
             json!({"query":"test","limit":6,"scrapeOptions":{}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"url":"https://example.org/"}}),
-            json!({"query":"test","limit":1,"scrapeOptions":{"formats":["summary"]}}),
+            json!({"query":"test","limit":1,"scrapeOptions":{"formats":["summary","markdown"]}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"maxAge":1}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"waitFor":1}}),
             json!({"query":"test","limit":1,"scrapeOptions":null})
@@ -813,11 +849,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_model_enrichment_preserves_evidence_and_partial_failures(){
+        let raw=json!({"query":"stock","limit":2,"scrapeOptions":{"formats":[{"type":"query","prompt":"Stock?","mode":"freeform"}]}});
+        let (_,opts)=search_options(raw.clone()).unwrap();
+        let mut too_many=raw;too_many["limit"]=json!(6);
+        assert!(search_options(too_many).is_err());
+        let mut value=json!({"data":{"web":[{"url":"https://example.org/a","title":"Original","description":"Snippet","position":1},
+            {"url":"https://example.org/b","title":"Second","description":"Other","position":2}]},"research":{}});
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(3);
+        enrich_search(&mut value,opts.unwrap(),deadline,|target,opts|async move{
+            assert!(model_format(&opts).is_some());
+            assert!(opts.timeout.unwrap()<=3000);
+            if target.path()=="/b"{return Err(StatusCode::TOO_MANY_REQUESTS);}
+            Ok(json!({"answer":"421.5","researchModel":{"source_verified":false},"warning":"Model output",
+                "metadata":{"url":target.as_str()},"title":"Do not overwrite"}))
+        }).await.unwrap();
+        assert_eq!(value["data"]["web"][0]["title"],"Original");
+        assert_eq!(value["data"]["web"][0]["answer"],"421.5");
+        assert_eq!(value["data"]["web"][0]["researchModel"]["source_verified"],false);
+        assert_eq!(value["data"]["web"][1]["researchScrape"]["http_status"],429);
+        assert_eq!(value["research"]["scrape"]["complete"],false);
+    }
+
+    #[tokio::test]
+    async fn captured_json_format_requires_supported_schema_and_returns_structured_value(){
+        let schema=json!({"type":"object","properties":{"change":{"type":"number"}},"required":["change"],"additionalProperties":false});
+        let payload=json!({"url":"https://example.org/","formats":[{"type":"json","prompt":"Extract change","schema":schema}]});
+        let req:StaticRequest=serde_json::from_value(payload.clone()).unwrap();
+        let (mode,prompt,validated_schema)=model_format(&req).unwrap();
+        let mut bad=payload;
+        bad["formats"][0]["schema"]["$ref"]=json!("https://example.org/schema");
+        assert!(model_format(&serde_json::from_value(bad).unwrap()).is_none());
+        let (base,task)=spawn(Router::new().route("/v1/responses",post(move|Json(body):Json<Value>|{
+            let schema=schema.clone();
+            async move{
+                assert_eq!(body["text"]["format"]["schema"],schema);
+                ([("x-firecrawl-model-contract","strict-v1"),("x-firecrawl-input-trimmed","false"),
+                    ("x-firecrawl-model-provider","gemini")],
+                    Json(json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":"{\"change\":-1.2}"}]}]})))
+            }
+        }))).await;
+        let mut data=json!({"markdown":"Change -1.2","metadata":{"url":"https://example.org/"}});
+        add_model_result(&mut data,mode,prompt,validated_schema,&format!("{base}/v1/responses"),"fixture",Duration::from_secs(3)).await.unwrap();
+        assert_eq!(data["json"]["change"],-1.2);
+        assert_eq!(data["researchModel"]["schema_validated"],true);
+        assert_eq!(data["researchModel"]["source_verified"],false);
+        assert!(data.get("markdown").is_none());
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn captured_model_format_and_strict_quote_result(){
         let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
             "formats":[{"type":"query","prompt":"Quote the value","mode":"directQuote"}],
             "origin":"mcp-candidate-contract@3.40.0"})).unwrap();
-        let (mode,prompt)=model_format(&req).unwrap();
+        let (mode,prompt,schema)=model_format(&req).unwrap();
         let (base,task)=spawn(Router::new().route("/v1/responses",post(|Json(body):Json<Value>|async move{
             assert_eq!(body["input"][0]["content"][0]["text"],"0: Header\n1: Stock 421.5");
             ([("x-firecrawl-model-contract","strict-v1"),("x-firecrawl-input-trimmed","false"),
@@ -826,7 +913,7 @@ mod tests {
                     "content":[{"type":"output_text","text":"[1]"}]}]})))
         }))).await;
         let mut data=json!({"markdown":"Header\nStock 421.5","metadata":{"url":"https://example.org/"}});
-        add_model_result(&mut data,mode,prompt,&format!("{base}/v1/responses"),"fixture",Duration::from_secs(3)).await.unwrap();
+        add_model_result(&mut data,mode,prompt,schema,&format!("{base}/v1/responses"),"fixture",Duration::from_secs(3)).await.unwrap();
         assert_eq!(data["answer"],"Stock 421.5");
         assert_eq!(data["researchModel"]["quote_spans_verified"],true);
         assert!(data.get("markdown").is_none());

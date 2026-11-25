@@ -50,6 +50,102 @@ fn resolve_quote(markdown:&str,indices:&Value)->Result<String,&'static str>{
     Ok(out.join("\n\n"))
 }
 
+// Explicit, closed subset of JSON Schema for ordinary extraction records.
+// Unsupported keywords (including references, combinators and regex) are
+// refused before invoking a model. Never claim full JSON Schema support.
+const MAX_SCHEMA_DEPTH:usize=12;
+const MAX_SCHEMA_NODES:usize=128;
+
+fn types(schema:&Value)->Option<Vec<&str>>{
+    let t=schema.get("type")?;
+    let list=if let Some(v)=t.as_str(){vec![v]}else{
+        let arr=t.as_array()?;
+        if arr.len()!=2||!arr.iter().any(|v|v=="null"){return None;}
+        arr.iter().map(Value::as_str).collect::<Option<Vec<_>>>()?
+    };
+    if list.iter().any(|t|!matches!(*t,"object"|"array"|"string"|"number"|"integer"|"boolean"|"null"))||
+        list.len()==2&&list[0]==list[1]{return None;}
+    Some(list)
+}
+
+fn kind_matches(kind:&str,value:&Value)->bool{
+    match kind{
+        "object"=>value.is_object(),"array"=>value.is_array(),"string"=>value.is_string(),
+        "number"=>value.is_number(),"integer"=>value.as_i64().is_some()||value.as_u64().is_some()||
+            value.as_f64().is_some_and(|v|v.fract()==0.0),
+        "boolean"=>value.is_boolean(),"null"=>value.is_null(),_=>false
+    }
+}
+
+fn schema_node(schema:&Value,depth:usize,nodes:&mut usize)->bool{
+    *nodes+=1;
+    if depth>MAX_SCHEMA_DEPTH||*nodes>MAX_SCHEMA_NODES{return false;}
+    let Some(obj)=schema.as_object()else{return false;};
+    let Some(kinds)=types(schema)else{return false;};
+    let object=kinds.contains(&"object");
+    let array=kinds.contains(&"array");
+    for (key,value) in obj{
+        match key.as_str(){
+            "type"=>{},
+            "description"|"title" if value.as_str().is_some()=>{},
+            "enum" if value.as_array().is_some_and(|arr|!arr.is_empty()&&arr.len()<=64&&
+                arr.iter().all(|v|!v.is_object()&&!v.is_array()&&kinds.iter().any(|t|kind_matches(t,v))))=>{},
+            "properties" if object=>{
+                let Some(props)=value.as_object()else{return false;};
+                if props.len()>64||props.iter().any(|(k,v)|k.len()>256||!schema_node(v,depth+1,nodes)){
+                    return false;
+                }
+            },
+            "required" if object=>{
+                let Some(names)=value.as_array()else{return false;};
+                let Some(props)=schema.get("properties").and_then(Value::as_object)else{return false;};
+                let mut seen=std::collections::HashSet::new();
+                if names.iter().any(|v|v.as_str().is_none_or(|name|!props.contains_key(name)||!seen.insert(name))){return false;}
+            },
+            "additionalProperties" if object&&value.is_boolean()=>{},
+            "items" if array=>{if !schema_node(value,depth+1,nodes){return false;}},
+            _=>return false,
+        }
+    }
+    (!array||schema.get("items").is_some())&&(!object||schema.get("properties").is_some())
+}
+
+pub(crate) fn valid_schema(schema:&Value)->bool{
+    schema.is_object()&&schema.to_string().len()<=8192&&schema_node(schema,0,&mut 0)
+}
+
+fn value_matches(schema:&Value,value:&Value)->bool{
+    let Some(kinds)=types(schema)else{return false;};
+    if !kinds.iter().any(|t|kind_matches(t,value)){return false;}
+    if let Some(enums)=schema.get("enum").and_then(Value::as_array){
+        // Exact JSON equality is preferred. Only permit integer/float
+        // equivalence within the IEEE-754 safe-integer interval; never
+        // collapse two different large integers through an f64 conversion.
+        if !enums.iter().any(|v|v==value||{
+            let safe=9_007_199_254_740_991.0;
+            match (v.as_f64(),value.as_f64()){
+                (Some(a),Some(b))=>a.abs()<=safe&&b.abs()<=safe&&a==b,
+                _=>false
+            }
+        }){return false;}
+    }
+    if let Some(obj)=value.as_object(){
+        let Some(props)=schema.get("properties").and_then(Value::as_object)else{return false;};
+        if let Some(req)=schema.get("required").and_then(Value::as_array){
+            if req.iter().any(|v|v.as_str().is_none_or(|k|!obj.contains_key(k))){return false;}
+        }
+        for (k,v) in obj{
+            if let Some(sub)=props.get(k){if !value_matches(sub,v){return false;}}
+            else if schema.get("additionalProperties")==Some(&Value::Bool(false)){return false;}
+        }
+    }
+    if let Some(arr)=value.as_array(){
+        let Some(items)=schema.get("items")else{return false;};
+        if arr.iter().any(|v|!value_matches(items,v)){return false;}
+    }
+    true
+}
+
 fn prepare(req: &Request, model: &str) -> Result<Value, &'static str> {
     if req.markdown.trim().is_empty() || model.trim().is_empty() || model.len() > 128 {
         return Err("missing document or configured model");
@@ -91,11 +187,11 @@ fn prepare(req: &Request, model: &str) -> Result<Value, &'static str> {
     });
     if matches!(req.mode, Mode::Json) {
         let schema = req.schema.as_ref().ok_or("JSON schema required")?;
-        if !schema.is_object() || schema.to_string().len() > 8192 {
-            return Err("invalid or oversized JSON schema");
+        if !valid_schema(schema) {
+            return Err("unsupported or oversized extraction schema");
         }
-        // This is transport research, NOT an implementation of AJV or the
-        // legacy schema normalizer. Preserve the original schema unchanged.
+        // Preserve the explicitly supported schema unchanged. Its subset is
+        // validated again against the returned data, independently of provider.
         body["text"] = json!({"format":{"type":"json_schema","name":"extraction","schema":schema}});
     }
     if matches!(req.mode,Mode::DirectQuote){
@@ -171,6 +267,12 @@ pub(crate) async fn extract_at(endpoint: &str, req: Request, model: &str, deadli
             decoded["research"]["quote_spans_verified"]=json!(true);
             decoded["research"]["quote_unit"]=json!("source_line");
         }
+        if matches!(req.mode,Mode::Json){
+            let schema=req.schema.as_ref().ok_or("missing extraction schema")?;
+            if !value_matches(schema,&decoded["candidate"]){return Err("model output violates extraction schema");}
+            decoded["research"]["schema_validated"]=json!(true);
+            decoded["research"]["schema_contract"]=json!("bounded-typed-subset-v1");
+        }
         decoded["research"]["provider"]=json!(provider);
         decoded["research"]["provider_reported_complete"]=json!(true);
         decoded["research"]["input_proxy_truncated"]=json!(false);
@@ -234,6 +336,44 @@ mod tests {
         assert!(body["instructions"].as_str().unwrap().contains("untrusted data"));
         assert_eq!(body["stream"], false);
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn closed_schema_subset_checks_nested_types_required_and_enum(){
+        let schema=json!({"type":"object","additionalProperties":false,"required":["stock","rows"],
+            "properties":{"stock":{"type":"number"},"rows":{"type":"array","items":{"type":"object",
+                "required":["change","status"],"additionalProperties":false,"properties":{
+                    "change":{"type":["number","null"]},"status":{"type":"string","enum":["reported","missing"]}}}}}});
+        assert!(valid_schema(&schema));
+        assert!(value_matches(&schema,&json!({"stock":421.5,"rows":[{"change":-1.2,"status":"reported"},
+            {"change":null,"status":"missing"}]})));
+        for bad in [json!({"stock":"421.5","rows":[]}),json!({"stock":421.5}),
+            json!({"stock":421.5,"rows":[{"change":false,"status":"reported"}]}),
+            json!({"stock":421.5,"rows":[{"change":null,"status":"invented"}]}),
+            json!({"stock":421.5,"rows":[],"extra":1})]{assert!(!value_matches(&schema,&bad));}
+        for bad in [json!({"$ref":"https://example.org/schema"}),
+            json!({"type":"string","pattern":".*"}),json!({"type":"array"}),
+            json!({"type":"object","properties":{},"required":["unknown"]}),
+            json!({"type":"integer","enum":[1.2]}),json!({"type":["string","boolean"]})]{
+            assert!(!valid_schema(&bad));
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_json_response_must_match_schema(){
+        for (text,valid) in [("{\"stock\":421.5}",true),("{\"stock\":\"421.5\"}",false)]{
+            let router=Router::new().route("/v1/responses",post(move||async move{(strict_headers(),Json(answer(text)))}));
+            let (url,task)=spawn(router).await;
+            let out=extract_at(&url,req(json!({"mode":"json","markdown":"Stock 421.5","prompt":"Extract stock",
+                "schema":{"type":"object","properties":{"stock":{"type":"number"}},"required":["stock"]}})),
+                "fixture",Duration::from_secs(3)).await;
+            if valid{
+                let data=out.unwrap();assert_eq!(data["candidate"]["stock"],421.5);
+                assert_eq!(data["research"]["schema_validated"],true);
+                assert_eq!(data["research"]["source_verified"],false);
+            }else{assert_eq!(out.unwrap_err(),"model output violates extraction schema");}
+            task.abort();
+        }
     }
 
     #[test]
