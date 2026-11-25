@@ -45,14 +45,25 @@ else:
     raise AssertionError("candidate or isolated worker unavailable")
 
 started = time.monotonic()
-body = request(CANDIDATE + "/v2/scrape", auth=True, timeout=115, payload={
-    "url": URL, "formats": ["markdown"], "parsers": ["pdf"],
-    "maxAge": 0, "storeInCache": False, "timeout": 110000,
-})
+try:
+    body = request(CANDIDATE + "/v2/scrape", auth=True, timeout=115, payload={
+        "url": URL, "formats": ["markdown"], "parsers": ["pdf"],
+        "maxAge": 0, "storeInCache": False, "timeout": 110000,
+    })
+except urllib.error.HTTPError as error:
+    # Print only candidate's fixed failure envelope, never remote HTML or headers.
+    try:
+        result = json.loads(error.read(4096))
+        code = result.get("code", result.get("error", "unknown"))
+    except (ValueError, TypeError):
+        code = "invalid-envelope"
+    print("LIVE_PDF_SIDECAR_FAIL", json.dumps({"status": error.code, "stage": code}))
+    raise
 doc = body["data"]
 receipt = doc["researchPdf"]
 assert body["success"] is True
-assert doc["metadata"]["url"] == URL
+assert doc["metadata"]["sourceURL"] == URL
+assert doc["metadata"]["url"].startswith("https://")
 assert doc["metadata"]["contentType"] == "application/pdf"
 assert doc["metadata"]["numPages"] == 1
 assert doc["researchSourceVerified"] is False
