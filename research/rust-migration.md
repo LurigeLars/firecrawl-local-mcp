@@ -270,3 +270,5 @@ Reuse pinned upstream anydoc conversion inside the isolated PDF/OCR worker, not 
 Strengthen the existing Office implementation rather than introduce a parallel converter: reject unsafe/duplicate ZIP entry names and validate actual decompressed bytes against aggregate 128 MiB and per-part 32 MiB limits, using a fixed 8 KiB buffer. No filesystem extraction. The broader existing extensionless and legacy-format dispatch remains intact; real format fidelity still requires verification.
 
 Rebased the Office/Compose increment onto the synchronized JSON/model-search branch; preserve model search, strict JSON validation and unrelated maintenance changes. No production changes.
+
+Release Compose additionally runs the same bounded 10-request IANA/CFTC static workload as the earlier candidate-only sample (6 serial, 4 concurrency-two), checks all markers and per-source hash stability, and records per-container cgroup memory.current/peak and CPU counters before/after. These are lifetime per-container peaks, not simultaneous aggregate peak or a paired Windows measurement. No extra build or paid provider.

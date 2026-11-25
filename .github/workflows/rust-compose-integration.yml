@@ -63,4 +63,15 @@ jobs:
           else
             echo 'Release SearXNG integration: UNVERIFIED (external evidence)' >> "$GITHUB_STEP_SUMMARY"
           fi
+          # Record per-container cgroup counters as separate evidence; the
+          # lifetime peaks are not a simultaneous stack peak or paired baseline.
+          metrics() {
+            for service in api mcp pdf-ocr searxng searxng-proxy; do
+              echo "CGROUP service=$service phase=$1"
+              "${compose[@]}" exec -T "$service" sh -c 'for f in memory.current memory.peak cpu.stat; do if test -r "/sys/fs/cgroup/$f"; then printf "%s\n" "$f"; cat "/sys/fs/cgroup/$f"; fi; done' || true
+            done
+          }
+          metrics before_html
+          timeout 120s "${compose[@]}" exec -T mcp node --input-type=module - < research/verify-release-load.mjs
+          metrics after_html
           docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}} {{.PIDs}}' "$replacement" "$mcp" "$pdf" "$search" "$proxy"
