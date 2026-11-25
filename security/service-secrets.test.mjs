@@ -86,7 +86,11 @@ test('runtime recovery restores tmpfs secrets without rebuilding the stack', () 
   assert.match(launcher, /StandardInput\.Write\(\$InputText\)/);
   assert.match(launcher, /Invoke-DockerWithExactStdin -InputText \$postgres/);
   assert.match(launcher, /Invoke-DockerWithExactStdin -InputText \$searxng/);
-  assert.match(launcher, /'recover' \{\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets\s*if \(-not \(Test-PostgresRuntimePassword\)\)/s);
+  assert.match(launcher, /'recover' \{\s*if \(\$RustMode\) \{\s*Import-SearchRuntimeSecret\s*Import-AvailableRuntimeSecrets\s*'Rust shared runtime secrets: restored'\s*break\s*\}\s*Import-ServiceRuntimeSecrets\s*Import-AvailableRuntimeSecrets\s*if \(-not \(Test-PostgresRuntimePassword\)\)/s);
+  const shared = launcher.slice(launcher.indexOf('function Import-SearchRuntimeSecret {'), launcher.indexOf('function Import-ServiceRuntimeSecrets {'));
+  assert.match(shared, /Invoke-DockerWithExactStdin -InputText \$searxng/);
+  assert.doesNotMatch(shared, /postgres|nuq-postgres/i);
+  assert.match(launcher, /function Import-ServiceRuntimeSecrets \{[\s\S]+?Import-SearchRuntimeSecret\s*\}/s);
 });
 
 test('exact stdin helper does not append a host newline to runtime secrets', () => {

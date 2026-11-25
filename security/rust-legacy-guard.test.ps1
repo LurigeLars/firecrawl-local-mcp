@@ -52,3 +52,37 @@ try {
     if ($script:calls -ne $before) { throw 'Marker/readonly branch must not invoke Docker' }
     'RUST_LEGACY_LAUNCHER_GUARD_PASS'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+
+# Test active-mode decision independently of existing legacy fallback checks.
+$definition = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RustMaintenanceMode'},$true)
+. ([scriptblock]::Create($definition.Extent.Text))
+$root = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $root
+function docker {
+    $global:LASTEXITCODE=0
+    if ($args[0] -cne 'inspect' -or $args[-1] -cne 'firecrawl-api-1') { throw 'Unexpected active mode invocation' }
+    return $script:shape
+}
+function Expect-ModeRefusal([string]$ActionName,[string]$ServiceName='') {
+    try { Get-RustMaintenanceMode -ActionName $ActionName -ServiceName $ServiceName -StateRoot $root; throw 'Unsafe action allowed.' }
+    catch { if ($_.Exception.Message -notlike '*maintenance refused*') { throw } }
+}
+try {
+    if (Get-RustMaintenanceMode -ActionName up -StateRoot $root) { throw 'Unexpected mode without marker.' }
+    $marker=Join-Path $root 'rust-transition.lock'
+    Set-Content -LiteralPath $marker -Value 'rust-pending-v1'
+    if (Get-RustMaintenanceMode -ActionName up -StateRoot $root) { throw 'Pending mode permitted.' }
+    Set-Content -LiteralPath $marker -Value 'rust-active-v1'
+    $script:shape='firecrawl-rust-api:local|firecrawl|api|true|firecrawl_rust-jobs:true'
+    foreach ($action in @('refresh-searxng','refresh-gateway','refresh-llm-proxy','refresh-search-proxy','refresh-playwright-router','recover','import-gemini','redeploy-mcp','status')) {
+        if (-not (Get-RustMaintenanceMode -ActionName $action -StateRoot $root)) { throw 'Expected shared sidecar action refused.' }
+    }
+    if (-not (Get-RustMaintenanceMode -ActionName maintain-stateless -ServiceName mcp -StateRoot $root)) { throw 'Expected MCP action refused.' }
+    foreach ($action in @('up','redeploy','down','test','stage-api','deploy-api','refresh-redis','refresh-rabbitmq','repair-postgres-auth','migrate-nuq-postgres','sync-upstream')) { Expect-ModeRefusal $action }
+    Expect-ModeRefusal maintain-stateless api
+    $script:shape='firecrawl-rust-api:local|firecrawl|api|false|firecrawl_rust-jobs:true'
+    Expect-ModeRefusal refresh-gateway
+    $script:shape='firecrawl-api|firecrawl|api|true|'
+    Expect-ModeRefusal recover
+    'RUST_SHARED_MAINTENANCE_MODE_FIXTURE_PASS'
+} finally { Remove-Item -LiteralPath $root -Recurse -Force }

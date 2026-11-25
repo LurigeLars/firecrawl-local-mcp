@@ -63,7 +63,33 @@ function Assert-LegacyEngineAction {
     }
 }
 
-Assert-LegacyEngineAction -ActionName $Action -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+# Active Rust is an explicit state, never inferred solely from a container
+# name. A pending/invalid marker continues to block every legacy mutation.
+function Get-RustMaintenanceMode {
+    param([string]$ActionName,[string]$ServiceName,[string]$StateRoot)
+    $marker = Join-Path $StateRoot 'rust-transition.lock'
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf -ErrorAction Stop)) { return $false }
+    if ((Get-Content -LiteralPath $marker -Raw -ErrorAction Stop).Trim() -cne 'rust-active-v1') { return $false }
+    $format = '{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{range .Mounts}}{{if eq .Destination "/var/lib/research"}}{{.Name}}:{{.RW}}{{end}}{{end}}'
+    $shape = @(& docker inspect --format $format 'firecrawl-api-1' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $shape.Count -ne 1 -or
+        $shape[0] -cne 'firecrawl-rust-api:local|firecrawl|api|true|firecrawl_rust-jobs:true') {
+        throw 'Active Rust production identity unavailable; maintenance refused.'
+    }
+    $allowed = @('status','logs','url','recover','import-gemini','refresh-searxng','refresh-search-proxy',
+        'refresh-gateway','refresh-playwright-router','refresh-llm-proxy','build-mcp','redeploy-mcp',
+        'stage-playwright','stage-browser','stage-proxy','deploy-playwright','deploy-browser','deploy-proxy')
+    if ($ActionName -in $allowed) { return $true }
+    if ($ActionName -eq 'maintain-stateless' -and $ServiceName -cin @('mcp','playwright-service','browser-session-service','playwright-public-proxy-service')) { return $true }
+    throw 'Action is not reviewed for active Rust; maintenance refused.'
+}
+$RustMode = Get-RustMaintenanceMode -ActionName $Action -ServiceName $Service -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+if ($RustMode) {
+    if (-not $public -or -not $PublicProxyConfigured) { throw 'Reviewed Rust production profiles are unavailable.' }
+    $compose += @('-f',"$root\research\compose.rust-production-plan.yaml")
+} else {
+    Assert-LegacyEngineAction -ActionName $Action -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+}
 
 function Assert-UpstreamFirecrawlPin([switch]$AllowHeadMismatch) {
     $pinPath = Join-Path $root "upstream\firecrawl.json"
@@ -396,59 +422,45 @@ function Test-LegacyGeminiKey {
     return -not [string]::IsNullOrWhiteSpace($value)
 }
 
-function Import-ServiceRuntimeSecrets {
-    $postgres = Get-DpapiSecretValue -Path $PostgresDpapiPath -Label "PostgreSQL"
+function Import-SearchRuntimeSecret {
     $searxng = Get-DpapiSecretValue -Path $SearxngDpapiPath -Label "SearXNG"
-
     try {
-        foreach ($service in @("api", "nuq-postgres")) {
-            $serviceId = (& docker @compose ps -q $service).Trim()
-            if (-not $serviceId) {
-                throw "$service is not running; cannot restore PostgreSQL runtime secret."
-            }
-
-            $secretArgs = $compose + @(
-                "exec", "-T", $service,
-                "sh", "-c",
-                "umask 077; cat > /run/firecrawl-secrets/postgres_password"
-            )
-            $secretExit = Invoke-DockerWithExactStdin -InputText $postgres -Arguments $secretArgs
-            if ($secretExit -ne 0) {
-                throw "PostgreSQL runtime secret import failed for $service."
-            }
-        }
-
         $searxngId = (& docker @compose ps -q searxng).Trim()
-        if (-not $searxngId) {
-            throw 'searxng is not running; cannot restore SearXNG runtime secret.'
-        }
-
+        if (-not $searxngId) { throw 'searxng is not running; cannot restore SearXNG runtime secret.' }
         $searxArgs = $compose + @(
             "exec", "-T", "searxng",
             "sh", "-c",
             "umask 077; cat > /run/firecrawl-secrets/searxng_secret"
         )
         $searxExit = Invoke-DockerWithExactStdin -InputText $searxng -Arguments $searxArgs
-        if ($searxExit -ne 0) {
-            throw 'SearXNG runtime secret import failed.'
+        if ($searxExit -ne 0) { throw 'SearXNG runtime secret import failed.' }
+    }
+    finally { $searxng = $null }
+    & docker @compose exec -T searxng sh -c 'test -s /run/firecrawl-secrets/searxng_secret'
+    if ($LASTEXITCODE -ne 0) { throw 'SearXNG runtime secret verification failed.' }
+}
+
+function Import-ServiceRuntimeSecrets {
+    $postgres = Get-DpapiSecretValue -Path $PostgresDpapiPath -Label "PostgreSQL"
+    try {
+        foreach ($service in @("api", "nuq-postgres")) {
+            $serviceId = (& docker @compose ps -q $service).Trim()
+            if (-not $serviceId) { throw "$service is not running; cannot restore PostgreSQL runtime secret." }
+            $secretArgs = $compose + @(
+                "exec", "-T", $service,
+                "sh", "-c",
+                "umask 077; cat > /run/firecrawl-secrets/postgres_password"
+            )
+            $secretExit = Invoke-DockerWithExactStdin -InputText $postgres -Arguments $secretArgs
+            if ($secretExit -ne 0) { throw "PostgreSQL runtime secret import failed for $service." }
         }
     }
-    finally {
-        $postgres = $null
-        $searxng = $null
-    }
-
+    finally { $postgres = $null }
     foreach ($service in @("api", "nuq-postgres")) {
         & docker @compose exec -T $service sh -c 'test -s /run/firecrawl-secrets/postgres_password'
-        if ($LASTEXITCODE -ne 0) {
-            throw "PostgreSQL runtime secret verification failed for $service."
-        }
+        if ($LASTEXITCODE -ne 0) { throw "PostgreSQL runtime secret verification failed for $service." }
     }
-
-    & docker @compose exec -T searxng sh -c 'test -s /run/firecrawl-secrets/searxng_secret'
-    if ($LASTEXITCODE -ne 0) {
-        throw 'SearXNG runtime secret verification failed.'
-    }
+    Import-SearchRuntimeSecret
 }
 
 function Test-PostgresRuntimePassword {
@@ -940,6 +952,12 @@ switch ($Action) {
         docker @compose down
     }
     'recover' {
+        if ($RustMode) {
+            Import-SearchRuntimeSecret
+            Import-AvailableRuntimeSecrets
+            'Rust shared runtime secrets: restored'
+            break
+        }
         Import-ServiceRuntimeSecrets
         Import-AvailableRuntimeSecrets
         if (-not (Test-PostgresRuntimePassword)) {
