@@ -1,11 +1,12 @@
 //! Conservative durable crawl research path. No caller headers, cookies,
-//! sitemap fetches, cross-origin links or redirect following.
+//! cross-origin crawl requests or redirect following.
 use super::{static_target,render};
 use crate::{crawl::{CrawlOptions,Scope,ROBOTS_AGENT},fetch::{Fetcher,FetchOptions},
     guard::NetworkPolicy,scrape::{process_html,Format,ScrapeOptions},cloud};
 use axum::http::StatusCode;
 use serde_json::{json,Value};
-use std::{collections::HashSet,time::Duration};
+use std::{collections::HashSet,sync::Arc,time::Duration};
+use tokio::sync::Mutex;
 use texting_robots::Robot;
 use url::Url;
 
@@ -14,7 +15,7 @@ const HTML_LIMIT:usize=2*1024*1024;
 const DISCOVERY_LIMIT:usize=100;
 
 #[derive(Clone)]
-pub(super) struct Crawler {pub(super) fetcher:Fetcher}
+pub(super) struct Crawler {pub(super) fetcher:Fetcher,pub(super) serial:Arc<Mutex<()>>}
 
 pub(super) fn scoped(seed:&Url,target:&Url)->bool {
     seed.origin()==target.origin() &&
@@ -44,7 +45,7 @@ fn candidates(seed:&Url,links:&[Value])->Vec<String>{
     out
 }
 
-fn robots_decision(status:u16,body:&[u8],target:&Url)->Result<(bool,Duration),StatusCode>{
+pub(super) fn robots_decision(status:u16,body:&[u8],target:&Url)->Result<(bool,Duration),StatusCode>{
     let default=Duration::from_secs(1);
     match status{
         404|410=>Ok((true,default)),
@@ -63,26 +64,41 @@ fn robots_decision(status:u16,body:&[u8],target:&Url)->Result<(bool,Duration),St
 
 impl Crawler{
     pub(super) fn new()->Result<Self,String>{
-        Ok(Self{fetcher:Fetcher::new_no_redirect(NetworkPolicy::PublicOnly)?})
+        Ok(Self{fetcher:Fetcher::new_no_redirect(NetworkPolicy::PublicOnly)?,serial:Arc::new(Mutex::new(()))})
+    }
+
+    pub(super) async fn robots(&self,target:&Url)->Result<(u16,bytes::Bytes),StatusCode>{
+        render::check_dns(target).await.map_err(|_|StatusCode::FORBIDDEN)?;
+        let url=target.join("/robots.txt").map_err(|_|StatusCode::BAD_REQUEST)?;
+        let res=self.fetcher.fetch_once(&url,&FetchOptions{
+            timeout:Some(Duration::from_secs(8)),..Default::default()
+        }).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+        if res.status==200 && (res.mime().as_deref()!=Some("text/plain") ||
+            res.body.len()>ROBOTS_LIMIT || std::str::from_utf8(&res.body).is_err()){
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Ok((res.status,res.body))
     }
 
     pub(super) async fn read(&self,raw_seed:&str,raw_target:&str)->Result<(Value,Vec<String>),StatusCode>{
         let seed=seed(raw_seed)?;
         let target=static_target(raw_target)?;
         if !scoped(&seed,&target){return Err(StatusCode::FORBIDDEN);}
+        let _serial=self.serial.lock().await;
+        let (doc,links)=self.read_links(&target,Duration::from_secs(50)).await?;
+        Ok((doc,candidates(&seed,&links)))
+    }
+
+    /// Caller holds the shared crawl/map serial lock. The target must already
+    /// be validated as a public HTTPS seed or in-scope crawl URL.
+    pub(super) async fn read_links(&self,target:&Url,budget:Duration)->Result<(Value,Vec<Value>),StatusCode>{
+        let target=target.clone();
         // Fresh robots check on every claimed page. Fail closed if unavailable.
         // No retries/redirects in either request. Connection-time DNS guard
         // remains in the same upstream Fetcher.
-        let fetched=tokio::time::timeout(Duration::from_secs(50),async{
-            render::check_dns(&target).await.map_err(|_|StatusCode::FORBIDDEN)?;
-            let robots=target.join("/robots.txt").map_err(|_|StatusCode::BAD_REQUEST)?;
-            let res=self.fetcher.fetch_once(&robots,&FetchOptions{
-                timeout:Some(Duration::from_secs(8)),..Default::default()
-            }).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
-            if res.status==200 && (res.mime().as_deref()!=Some("text/plain") || std::str::from_utf8(&res.body).is_err()){
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
-            }
-            let (allowed,delay)=robots_decision(res.status,&res.body,&target)?;
+        let fetched=tokio::time::timeout(budget.min(Duration::from_secs(50)),async{
+            let (status,body)=self.robots(&target).await?;
+            let (allowed,delay)=robots_decision(status,&body,&target)?;
             tokio::time::sleep(delay).await;
             if !allowed{return Err(StatusCode::FORBIDDEN);}
             let page=self.fetcher.fetch_once(&target,&FetchOptions{
@@ -109,14 +125,13 @@ impl Crawler{
                 return Err(StatusCode::BAD_GATEWAY);
             }
             let links=data.remove("links").and_then(|v|v.as_array().cloned()).unwrap_or_default();
-            let discovered=candidates(&seed,&links);
             metadata.insert("url".into(),json!(target.as_str()));
             metadata.insert("statusCode".into(),json!(200));
             metadata.insert("contentType".into(),json!("text/html"));
             data.insert("metadata".into(),Value::Object(metadata));
             data.insert("source".into(),json!("local"));
             data.insert("researchSourceVerified".into(),json!(false));
-            Ok((Value::Object(data),discovered))
+            Ok((Value::Object(data),links))
         }).await.map_err(|_|StatusCode::BAD_GATEWAY)?
     }
 }

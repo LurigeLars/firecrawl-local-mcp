@@ -96,6 +96,125 @@ pub(super) async fn create_crawl(State(state):State<CandidateState>,headers:Head
     }
 }
 
+// A v2-compatible subset, deliberately requiring explicit sitemap skip and
+// one worker. Do not turn an ordinary sitemap-inclusive crawl into a narrower
+// crawl without the caller's knowledge.
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct V2CrawlRequest{
+    url:String,
+    limit:usize,
+    max_concurrency:usize,
+    sitemap:String,
+    #[serde(default="default_depth")] max_discovery_depth:u32,
+    #[serde(default)] scrape_options:Option<V2ScrapeOptions>,
+    #[serde(default)] origin:Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct V2ScrapeOptions{
+    #[serde(default="super::default_formats")] formats:Vec<String>,
+    #[serde(default="super::default_main")] only_main_content:bool,
+    #[serde(default)] max_age:u64,
+    #[serde(default)] store_in_cache:bool,
+}
+fn default_depth()->u32{10}
+
+impl V2CrawlRequest{
+    fn valid(&self)->bool{
+        (1..=100).contains(&self.limit)&&self.max_concurrency==1&&self.max_discovery_depth<=10&&
+        self.sitemap=="skip"&&self.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))&&
+        self.scrape_options.as_ref().is_none_or(|s|s.formats==["markdown"]&&s.only_main_content&&s.max_age==0&&!s.store_in_cache)
+    }
+}
+
+pub(super) async fn create_v2_crawl(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response{
+    let req:V2CrawlRequest=match decode(&headers,&body){Ok(v)=>v,Err(r)=>return r};
+    if !req.valid(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_CRAWL_OPTIONS");}
+    let Some(batch)=state.batch else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"JOB_STORE_DISABLED")};
+    if !batch.ready(){return refusal(StatusCode::SERVICE_UNAVAILABLE,"WORKER_NOT_READY");}
+    let seed=match crawl::seed(&req.url){Ok(v)=>v.to_string(),Err(s)=>return refusal(s,"DESTINATION_DENIED")};
+    let id=uuid::Uuid::new_v4().to_string();
+    let store_id=id.clone();
+    match batch.call(move|store|store.create_crawl(&store_id,&seed,req.limit,req.max_discovery_depth)).await{
+        Ok(())=>{
+            batch.notify.notify_one();
+            // The candidate is loopback-only. Do not construct next URLs from
+            // a caller-supplied Host or forwarded header.
+            Json(json!({"success":true,"id":id,"url":format!("http://127.0.0.1:3002/v2/crawl/{id}"),
+                "warning":"Bounded local same-origin crawl; no sitemap or cache; site coverage unverified."})).into_response()
+        },
+        Err(e)=>store_refusal(e)
+    }
+}
+
+fn default_v2_limit()->usize{100}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct V2PageRequest{
+    #[serde(default)] skip:usize,
+    #[serde(default="default_v2_limit")] limit:usize,
+}
+
+fn timestamp(value:&Value)->Result<String,StatusCode>{
+    value.as_i64().and_then(|s|chrono::DateTime::<chrono::Utc>::from_timestamp(s,0))
+        .map(|t|t.to_rfc3339()).ok_or(StatusCode::BAD_GATEWAY)
+}
+
+fn v2_envelope(id:&str,limit:usize,page:Value)->Result<Value,StatusCode>{
+    let next=page["next_skip"].as_u64().map(|skip|
+        format!("http://127.0.0.1:3002/v2/crawl/{id}?skip={skip}&limit={limit}"));
+    let mut out=json!({"success":true,"status":page["status"],"total":page["total"],"completed":page["completed"],
+        "creditsUsed":0,"expiresAt":timestamp(&page["expires_at"])?,"createdAt":timestamp(&page["created_at"])?,
+        "data":page["data"],"research":page["research"],
+        "warning":"Bounded local job; no external credits charged; site coverage unverified. See research counts for failed pages."});
+    if let Some(next)=next{out["next"]=json!(next);}
+    if !page["finished_at"].is_null(){out["completedAt"]=json!(timestamp(&page["finished_at"])?);}
+    Ok(out)
+}
+
+pub(super) async fn status_v2_crawl(State(state):State<CandidateState>,Path(id):Path<String>,
+    Query(q):Query<V2PageRequest>,headers:HeaderMap)->Response{
+    if from_a_web_page(&headers){return refusal(StatusCode::FORBIDDEN,"WEB_PAGE_DENIED");}
+    if uuid::Uuid::parse_str(&id).is_err(){return refusal(StatusCode::BAD_REQUEST,"INVALID_JOB_ID");}
+    let Some(batch)=state.batch else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"JOB_STORE_DISABLED")};
+    let store_id=id.clone();
+    let limit=q.limit;
+    match batch.call(move|store|store.crawl_status_v2(&store_id,q.skip,limit)).await{
+        Ok(page)=>match v2_envelope(&id,limit,page){Ok(v)=>bounded(v),Err(s)=>refusal(s,"INVALID_JOB_RECEIPT")},
+        Err(e)=>store_refusal(e)
+    }
+}
+
+#[cfg(test)]
+mod v2_tests{
+    use super::*;
+    #[test]
+    fn requires_explicit_supported_crawl_scope(){
+        let base=json!({"url":"https://example.org/docs/","limit":2,"maxConcurrency":1,
+            "sitemap":"skip","scrapeOptions":{"formats":["markdown"]},"origin":"mcp-candidate-contract@3.40.0"});
+        assert!(serde_json::from_value::<V2CrawlRequest>(base.clone()).unwrap().valid());
+        let mut unknown=base.clone();unknown["ignoreRobotsTxt"]=json!(true);
+        assert!(serde_json::from_value::<V2CrawlRequest>(unknown).is_err());
+        let mut sitemap=base.clone();sitemap["sitemap"]=json!("include");
+        assert!(!serde_json::from_value::<V2CrawlRequest>(sitemap).unwrap().valid());
+        let mut concurrency=base;concurrency["maxConcurrency"]=json!(2);
+        assert!(!serde_json::from_value::<V2CrawlRequest>(concurrency).unwrap().valid());
+    }
+
+    #[test]
+    fn v2_status_preserves_counts_and_fixed_loopback_cursor(){
+        let page=json!({"status":"scraping","total":3,"completed":1,"data":[{"markdown":"fixture"}],
+            "created_at":1700000000,"expires_at":1700086400,"finished_at":null,"next_skip":1,
+            "research":{"failed":1,"site_coverage_verified":false}});
+        let v=v2_envelope("fixture",2,page).unwrap();
+        assert_eq!(v["completed"],1);
+        assert_eq!(v["next"],"http://127.0.0.1:3002/v2/crawl/fixture?skip=1&limit=2");
+        assert_eq!(v["research"]["failed"],1);
+        assert_eq!(v["expiresAt"],"2023-11-15T22:13:20+00:00");
+    }
+}
+
 fn default_limit()->usize{10}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

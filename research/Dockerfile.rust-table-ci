@@ -9,12 +9,12 @@ COPY job-store /tmp/job-store
 RUN git apply --check /tmp/nested-label-tables.patch /tmp/job-store-lock.patch /tmp/strict-crawl-fetch.patch /tmp/document-isolation.patch \
     && git apply /tmp/nested-label-tables.patch /tmp/job-store-lock.patch /tmp/strict-crawl-fetch.patch /tmp/document-isolation.patch
 WORKDIR /src/apps/local
-COPY table-fixture-probe.rs pdf-page-probe.rs local-search-probe.rs local-model-probe.rs local-render-probe.rs composed-api-test.rs candidate-api.rs candidate-batch.rs candidate-crawl.rs candidate-main.rs pdf-ocr-worker.rs pdf-ocr-service.rs candidate-pdf.rs pdf-result.rs /tmp/
+COPY table-fixture-probe.rs pdf-page-probe.rs local-search-probe.rs local-model-probe.rs local-render-probe.rs composed-api-test.rs candidate-api.rs candidate-batch.rs candidate-crawl.rs candidate-map.rs candidate-main.rs pdf-ocr-worker.rs pdf-ocr-service.rs candidate-pdf.rs pdf-result.rs /tmp/
 RUN test "$(grep -c '^fn process_html(' src/scrape.rs)" = 1 \
     && sed -i 's/^fn process_html(/pub fn process_html(/' src/scrape.rs \
     && mkdir -p src/bin \
     && cp /tmp/table-fixture-probe.rs /tmp/pdf-page-probe.rs /tmp/local-search-probe.rs /tmp/local-model-probe.rs /tmp/local-render-probe.rs /tmp/composed-api-test.rs /tmp/candidate-main.rs /tmp/pdf-ocr-worker.rs /tmp/pdf-ocr-service.rs src/bin/ \
-    && cp /tmp/candidate-api.rs /tmp/candidate-batch.rs /tmp/candidate-crawl.rs /tmp/candidate-pdf.rs /tmp/pdf-result.rs src/ \
+    && cp /tmp/candidate-api.rs /tmp/candidate-batch.rs /tmp/candidate-crawl.rs /tmp/candidate-map.rs /tmp/candidate-pdf.rs /tmp/pdf-result.rs src/ \
     && sed -i '/^\[dependencies\]$/a firecrawl-job-store-research = { path = "/tmp/job-store" }' Cargo.toml \
     && sed 's/use firecrawl_local::/use crate::/' /tmp/local-search-probe.rs > src/local-search-probe.rs \
     && sed 's/use firecrawl_local::/use crate::/' /tmp/local-render-probe.rs > src/local-render-probe.rs \

@@ -21,6 +21,8 @@ mod batch;
 mod crawl;
 #[path = "candidate-pdf.rs"]
 mod pdf;
+#[path = "candidate-map.rs"]
+mod map;
 
 const MAX_OUTPUT: usize = 2 * 1024 * 1024;
 const SEARCH: &str = "http://searxng-proxy:8081/search";
@@ -193,6 +195,9 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         }))
         .route("/v2/scrape",post(static_scrape))
         .route("/v2/search",post(search_route))
+        .route("/v2/map",post(map::route))
+        .route("/v2/crawl",post(batch::create_v2_crawl))
+        .route("/v2/crawl/{id}",get(batch::status_v2_crawl).delete(batch::cancel))
         .route("/research/render",post(render_route))
         .route("/research/batch",post(batch::create))
         .route("/research/crawl",post(batch::create_crawl))
@@ -314,7 +319,9 @@ mod tests {
         assert_eq!(c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&unsupported)
             .send().await.unwrap().status(),StatusCode::BAD_REQUEST);
         assert_eq!(c.post(format!("{base}/v2/crawl")).bearer_auth(TOKEN).json(&json!({}))
-            .send().await.unwrap().status(),StatusCode::NOT_FOUND);
+            .send().await.unwrap().status(),StatusCode::BAD_REQUEST);
+        assert_eq!(c.post(format!("{base}/v2/map")).bearer_auth(TOKEN).json(&json!({"url":"https://127.0.0.1/","limit":2}))
+            .send().await.unwrap().status(),StatusCode::FORBIDDEN);
         server.abort();worker.abort();
     }
 }

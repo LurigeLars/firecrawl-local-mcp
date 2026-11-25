@@ -253,6 +253,53 @@ impl Store {
         Ok(self.db.execute("DELETE FROM jobs WHERE status!='scraping' AND finished_at<=?1",[cutoff])?)
     }
 
+    /// Firecrawl v2 status uses an offset over successful documents, not
+    /// over every settled claim. Keep that view separate from the research
+    /// cursor (which includes failures). All counts and documents use one
+    /// read transaction so a newly committed result cannot shift the page.
+    pub fn crawl_status_v2(&mut self,id:&str,skip:usize,limit:usize)->Result<Value>{
+        if skip>MAX_ITEMS||!(1..=MAX_ITEMS).contains(&limit){
+            return Err(Error::Invalid("invalid cursor"));
+        }
+        self.purge_expired()?;
+        let tx=self.db.transaction()?;
+        let (status,created,finished):(String,i64,Option<i64>)=tx.query_row(
+            "SELECT jobs.status,created_at,finished_at FROM jobs JOIN crawl_jobs ON crawl_jobs.job=jobs.id WHERE jobs.id=?1",
+            [id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(Error::Invalid("job not found"))?;
+        let (total,succeeded,failed,cancelled,attempts):(i64,i64,i64,i64,i64)=tx.query_row(
+            "SELECT COUNT(*),SUM(state='done'),SUM(state='failed'),SUM(state='cancelled'),COALESCE(SUM(generation),0)
+             FROM items WHERE job=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        if skip as i64>succeeded{return Err(Error::Invalid("cursor exceeds committed results"));}
+        let mut docs=Vec::new();
+        let mut bytes=2;
+        {
+            let mut stmt=tx.prepare("SELECT payload FROM items WHERE job=?1 AND state='done'
+                ORDER BY result_seq LIMIT ?2 OFFSET ?3")?;
+            let mut rows=stmt.query(params![id,limit as i64,skip as i64])?;
+            while let Some(row)=rows.next()?{
+                let raw:String=row.get(0)?;
+                let size=raw.len()+usize::from(!docs.is_empty());
+                if bytes+size>MAX_PAGE{
+                    if docs.is_empty(){return Err(Error::Invalid("single result exceeds page bound"));}
+                    break;
+                }
+                bytes+=size;
+                docs.push(serde_json::from_str::<Value>(&raw)?);
+            }
+        }
+        let offset=skip+docs.len();
+        let next=if status=="scraping"||(offset as i64)<succeeded{Some(offset)}else{None};
+        // An all-failed crawl is not reported as successfully completed.
+        let api_status=if status=="completed"&&succeeded==0&&failed>0{"failed"}else{status.as_str()};
+        let expiry=finished.unwrap_or(now_secs()?).saturating_add(RETENTION_SECS);
+        let value=json!({"status":api_status,"completed":succeeded,"total":total-failed-cancelled,
+            "data":docs,"next_skip":next,"created_at":created,"finished_at":finished,
+            "expires_at":expiry,"research":{"discovered":total,"failed":failed,"cancelled":cancelled,
+            "page_attempts":attempts,"site_coverage_verified":false,"cache_used":false}});
+        tx.commit()?;
+        Ok(value)
+    }
+
     /// Stable completion-order cursor, including per-item failures. No result
     /// is silently dropped when the response byte budget is reached.
     pub fn page(&mut self, id: &str, after: i64, limit: usize) -> Result<Value> {
@@ -429,6 +476,34 @@ mod tests {
         assert_eq!(result["crawl"]["page_attempts"],5);
         assert_eq!(result["crawl"]["page_attempt_limit"],12);
         assert_eq!(result["crawl"]["site_coverage_verified"],false);
+    }
+
+    #[test]
+    fn v2_crawl_status_offsets_only_successful_documents(){
+        let tmp=Temp::new();
+        let mut db=Store::open(&tmp.db()).unwrap();
+        db.create_crawl("crawl","seed",4,2).unwrap();
+        let seed=db.claim_next().unwrap().unwrap();
+        db.settle_discovered(&seed,true,&json!({"markdown":"seed"}),&["a".into(),"b".into()]).unwrap();
+        let a=db.claim_next().unwrap().unwrap();
+        db.settle(&a,false,&json!({"error":"fixture"})).unwrap();
+        let p=db.crawl_status_v2("crawl",0,1).unwrap();
+        assert_eq!(p["status"],"scraping");
+        assert_eq!(p["completed"],1);
+        assert_eq!(p["next_skip"],1);
+        let b=db.claim_next().unwrap().unwrap();
+        db.settle(&b,true,&json!({"markdown":"second"})).unwrap();
+        let first=db.crawl_status_v2("crawl",0,1).unwrap();
+        assert_eq!(first["status"],"completed");
+        assert_eq!(first["completed"],2);
+        assert_eq!(first["research"]["discovered"],3);
+        assert_eq!(first["research"]["failed"],1);
+        assert_eq!(first["next_skip"],1);
+        let second=db.crawl_status_v2("crawl",1,1).unwrap();
+        assert_eq!(second["data"][0]["markdown"],"second");
+        assert!(second["next_skip"].is_null());
+        db.create("batch",&["a".into()]).unwrap();
+        assert!(db.crawl_status_v2("batch",0,1).is_err());
     }
 
     #[test]

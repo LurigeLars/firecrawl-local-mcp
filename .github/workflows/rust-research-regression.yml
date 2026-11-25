@@ -67,7 +67,7 @@ jobs:
         id: live_sample
         continue-on-error: true
         run: |
-          timeout 80s docker run --rm --pull=never --network bridge --read-only \
+          timeout 210s docker run --rm --pull=never --network bridge --read-only \
             --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
             --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \

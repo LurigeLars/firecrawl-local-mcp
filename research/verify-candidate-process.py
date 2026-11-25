@@ -76,9 +76,9 @@ def verify_live(pid):
     if not all_pass:
         raise SystemExit("LIVE_CANDIDATE_NOT_VERIFIED")
 
-def settled_job(route,payload,seconds=65):
+def settled_job(route,payload,seconds=65,expected_status=202):
     status,raw=call(route,payload=payload)
-    assert status==202,(route,status)
+    assert status==expected_status,(route,status)
     job_id=json.loads(raw)["id"]
     deadline=time.monotonic()+seconds
     while time.monotonic()<deadline:
@@ -110,7 +110,8 @@ def verify_live_jobs():
     print("LIVE_BATCH_PASS",json.dumps({"pages":2,"markers":6,"elapsed_ms":round((time.monotonic()-started)*1000)}))
     started=time.monotonic()
     seed="https://www.iana.org/help"
-    crawl_id,crawl=settled_job("/research/crawl",{"url":seed,"limit":2,"maxDiscoveryDepth":1},115)
+    crawl_id,crawl=settled_job("/v2/crawl",{"url":seed,"limit":2,"maxConcurrency":1,"sitemap":"skip",
+        "maxDiscoveryDepth":1,"scrapeOptions":{"formats":["markdown"]},"origin":"mcp-candidate-contract@3.40.0"},115,200)
     assert crawl["total"]==2 and crawl["completed"]==2 and crawl["failed"]==0,(
         "bounded live crawl not verified",crawl["total"],crawl["completed"],crawl["failed"])
     assert crawl["crawl"]["page_attempts"]==2 and crawl["crawl"]["page_attempt_limit"]==6
@@ -122,7 +123,22 @@ def verify_live_jobs():
         assert row["key"]==seed or row["key"].startswith(seed+"/")
     print("LIVE_CRAWL_PASS",json.dumps({"pages":2,"attempts":2,"site_coverage_verified":False,
         "elapsed_ms":round((time.monotonic()-started)*1000)}))
+    verify_v2_pages(crawl_id,crawl)
     return {batch_id:batch,crawl_id:crawl}
+
+def verify_v2_pages(job_id,crawl):
+    status,body=call("/v2/crawl/"+job_id+"?limit=1")
+    assert status==200
+    first=json.loads(body)
+    assert first["status"]=="completed" and first["completed"]==2 and first["total"]==2
+    assert first["data"]==[crawl["results"][0]["data"]]
+    assert first["next"]==BASE+"/v2/crawl/"+job_id+"?skip=1&limit=1"
+    status,body=call("/v2/crawl/"+job_id+"?skip=1&limit=1")
+    assert status==200
+    second=json.loads(body)
+    assert second["data"]==[crawl["results"][1]["data"]] and "next" not in second
+    assert second["expiresAt"]==first["expiresAt"]
+    print("V2_CRAWL_PAGINATION_PASS")
 
 with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
     token_path=pathlib.Path(td)/"token"
@@ -157,7 +173,9 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             assert call("/v2/scrape",payload={**static,"headers":{"Cookie":"synthetic"}})[0]==400
             assert call("/v2/search",payload={"query":"test","endpoint":"http://localhost"})[0]==400
             assert call("/research/render",payload={"url":"https://169.254.169.254/","onlyMainContent":True})[0]==403
-            assert call("/v2/crawl",payload={})[0]==404
+            assert call("/v2/crawl",payload={})[0]==400
+            assert call("/v2/map",payload={"url":"https://127.0.0.1/","limit":2})[0]==403
+            assert call("/v2/map",payload={"url":"https://www.iana.org/help","limit":101})[0]==400
             assert call("/research/pdf",payload={"url":"https://www.iana.org/report.pdf"})[0]==503
             assert call("/research/pdf",payload={"url":"https://127.0.0.1/x.pdf"})[0]==403
             print("CANDIDATE_PROCESS_SMOKE_PASS: authenticated loopback, unsupported options and private destinations rejected")
@@ -178,6 +196,13 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
                 assert "RFC 2606" in data["html"] and len(data["links"])>0
                 assert "markdown" not in data
                 print("MCP_SCRAPE_ENVELOPE_LIVE_PASS: minimal request and HTML/link formats")
+                status,raw=call("/v2/map",payload={"url":"https://www.iana.org/help","limit":2,
+                    "origin":"mcp-candidate-contract@3.40.0"},timeout=65)
+                assert status==200
+                result=json.loads(raw)
+                assert result["success"] and len(result["links"])==2
+                assert result["research"]["site_coverage_verified"] is False
+                print("V2_MAP_LIVE_PASS",json.dumps(result["research"]))
             if "--batch" in sys.argv or "--live-jobs" in sys.argv:
                 assert json.loads(call("/health")[1])["jobStore"]=="ready"
                 assert call("/research/crawl",payload={"url":"https://127.0.0.1/","limit":2,"maxDiscoveryDepth":1})[0]==403
@@ -220,6 +245,8 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
                     status,body=call("/research/batch/"+job_id)
                     assert status==200
                     assert json.loads(body)["data"]==saved
+                    if "crawl" in saved:
+                        verify_v2_pages(job_id,saved)
                 print("DURABLE_JOB_RESTART_PASS",json.dumps({"jobs":len(saved_jobs),"live":"--live-jobs" in sys.argv}))
                 if "--batch" in sys.argv:
                     print("DURABLE_BATCH_PROCESS_PASS: real worker settled failure; identical status and result after restart")
