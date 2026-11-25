@@ -179,7 +179,7 @@ try{
     if(mode==='--candidate-live'){
       const offset=traffic.length;
       const start=await rpc('tools/call',{name:'firecrawl_crawl',arguments:{
-        url:'https://www.iana.org/help',limit:2,maxConcurrency:2,includePaths:['^/help/'],delay:1,
+        url:'https://www.iana.org/help',limit:3,maxConcurrency:2,includePaths:['^/help/'],delay:1,
         scrapeOptions:{formats:['markdown']}}});
       assert.ok(!start.error&&start.result&&!start.result.isError,'MCP crawl creation failed');
       const created=traffic.slice(offset).find(x=>x.path==='/v2/crawl'&&x.status===200)?.response;
@@ -203,7 +203,7 @@ try{
         assert.equal(result?.research?.requested_max_concurrency,2);
         if(result.status==='completed'||result.status==='failed'){
           assert.equal(result.status,'completed');
-          assert.equal(result.completed,2);
+          assert.equal(result.completed,3);
           assert.equal(result.research.failed,0);
           assert.ok(result.data.every(d=>d.metadata?.url==='https://www.iana.org/help'||d.metadata?.url?.startsWith('https://www.iana.org/help/')));
           assert.ok(result.data.some(d=>d.researchSitemap?.status),'sitemap outcome missing');

@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{fs::{File,OpenOptions}, path::Path, time::{Duration,SystemTime,UNIX_EPOCH}};
 
 const MAX_JOBS: i64 = 16;
-const MAX_WORKERS: i64 = 3;
+pub const MAX_WORKERS: i64 = 3;
 const MAX_ITEMS: usize = 100;
 const MAX_DOC: usize = 64 * 1024;
 const MAX_PAGE: usize = 128 * 1024;

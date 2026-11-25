@@ -4,7 +4,7 @@ use super::{CandidateState, bounded, decode, refusal, static_document, static_ta
 use crate::serve::from_a_web_page;
 use axum::{body::Bytes, extract::{Path, Query, State}, http::{HeaderMap,StatusCode},
     response::{IntoResponse,Response},Json};
-use firecrawl_job_store_research::{Error as StoreError,Store};
+use firecrawl_job_store_research::{Error as StoreError,Store,MAX_WORKERS};
 use serde::Deserialize;
 use serde_json::{json,Value};
 use std::{collections::HashSet, sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}}};
@@ -313,7 +313,7 @@ pub(super) async fn cancel(State(state):State<CandidateState>,Path(id):Path<Stri
 
 // Reserve at least one of the four candidate permits for foreground work.
 // This is an upper bound; per-domain pacing can reduce effective concurrency.
-const WORKERS:usize=3;
+const WORKERS:usize=MAX_WORKERS as usize;
 
 async fn work(state:&CandidateState,batch:&BatchState)->Result<(),StoreError>{
     loop {
