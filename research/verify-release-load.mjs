@@ -4,18 +4,23 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
-const token=readFileSync('/run/research-token/token','utf8').trim();
-assert.match(token,/^[0-9a-f]{64}$/);
+const modeArg=process.argv[2]??'candidate';
+assert.ok(['legacy','candidate'].includes(modeArg));
+const token=modeArg==='candidate'?readFileSync('/run/research-token/token','utf8').trim():null;
+if(token!==null)assert.match(token,/^[0-9a-f]{64}$/);
+const deadline=performance.now()+120000;
 const sources=[
   ['IANA','https://www.iana.org/help/example-domains',['Example Domains','RFC 2606','RFC 6761']],
   ['CFTC','https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm',['September 8, 2026','Open Interest','1,939,911']]
 ];
 async function sample([source,url,markers],mode){
   const start=performance.now();
+  const remaining=Math.floor(deadline-start);
+  assert.ok(remaining>0,'benchmark deadline exceeded');
   const response=await fetch('http://api:3002/v2/scrape',{
-    method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},
+    method:'POST',headers:{...(token===null?{}:{authorization:'Bearer '+token}),'content-type':'application/json'},
     body:JSON.stringify({url,formats:['markdown'],onlyMainContent:true,maxAge:0,storeInCache:false,timeout:25000}),
-    redirect:'error',signal:AbortSignal.timeout(35000)
+    redirect:'error',signal:AbortSignal.timeout(Math.min(35000,remaining))
   });
   assert.equal(response.status,200);
   const reader=response.body.getReader();
@@ -29,7 +34,7 @@ async function sample([source,url,markers],mode){
   const data=JSON.parse(Buffer.concat(chunks).toString('utf8'));
   const elapsed_ms=Math.round((performance.now()-start)*10)/10;
   assert.equal(data.success,true);assert.equal(data.data.metadata.statusCode,200);
-  assert.equal(data.research.cache_used,false);
+  if(modeArg==='candidate')assert.equal(data.research.cache_used,false);
   const md=data.data.markdown;
   const normalized=md.replace(/\s+/g,' ').toLowerCase();
   assert.ok(markers.every(marker=>normalized.includes(marker.toLowerCase())),source+' content lost');
@@ -51,5 +56,5 @@ for(const mode of ['serial','concurrent_2']){
   }
 }
 for(const [source] of sources)assert.equal(new Set(samples.filter(x=>x.source===source).map(x=>x.sha256)).size,1,source+' content varied');
-console.log(JSON.stringify({verdict:'PASS',scope:'isolated release Compose, HTML workload only; not matched legacy or full production parity',
+console.log(JSON.stringify({verdict:'PASS',backend:modeArg,scope:'fixed HTML workload only; not full production parity',
   requests:samples.length,markers:samples.reduce((n,x)=>n+x.markers,0),wall_ms:Math.round(performance.now()-started),groups,samples}));
