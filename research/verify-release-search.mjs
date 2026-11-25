@@ -1,14 +1,9 @@
 // One fixed public-domain query using the actual reused SearXNG proxy.
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
-// The local mode is only for the disposable candidate Compose project.
-// Read its already-mounted fixed token; never print it or accept a file/URL
-// argument. The production MCP container must not run local mode.
-const fixture='0123456789abcdef'.repeat(4);
-const mode=process.argv[2];
-assert.ok(mode===undefined||mode==='--local','unsupported search probe mode');
-const token=mode==='--local'?readFileSync('/run/research-token/token','utf8').trim():fixture;
-assert.ok(/^[a-f0-9]{64}$/.test(token)&&((token===fixture)===(mode===undefined)),'invalid isolated search token');
+// Only the isolated CI fixture mode uses this intentionally public test
+// credential. The paired local workload uses the actual SDK instead.
+const token='0123456789abcdef'.repeat(4);
+assert.equal(process.argv[2],undefined,'unsupported search probe mode');
 const start=performance.now();
 const response=await fetch('http://api:3002/v2/search',{
   method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},
