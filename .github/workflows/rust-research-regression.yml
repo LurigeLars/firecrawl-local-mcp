@@ -201,6 +201,47 @@ jobs:
           # Verify the paired benchmark driver through the same actual MCP service.
           timeout 135s docker exec -i "$mcp" node --input-type=module - candidate < research/verify-mcp-load.mjs
 
+      - name: Actual model proxy with private deterministic provider (separate evidence)
+        id: live_model_proxy
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          net="fc-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate=""
+          proxy=""
+          mock=""
+          cleanup() {
+            for cid in "$candidate" "$proxy" "$mock"; do
+              if [ -n "$cid" ]; then docker rm -f "$cid" >/dev/null || true; fi
+            done
+            docker network rm "$net" >/dev/null || true
+          }
+          docker network create --internal "$net" >/dev/null
+          trap cleanup EXIT
+          mock=$(docker run -d --pull=never --network "$net" --network-alias host.docker.internal --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --memory 128m --memory-swap 128m --pids-limit 32 --cpus 0.5 \
+            --mount type=bind,source="$PWD/research/verify-model-sidecar.mjs",target=/tmp/verify-model-sidecar.mjs,readonly \
+            --entrypoint node firecrawl-locked-mcp:research /tmp/verify-model-sidecar.mjs mock)
+          proxy=$(docker run -d --pull=never --network "$net" --network-alias llm-proxy --read-only \
+            -e PORT=11435 \
+            --cap-drop ALL --security-opt no-new-privileges --memory 128m --memory-swap 128m --pids-limit 32 --cpus 0.5 \
+            --mount type=bind,source="$PWD/llm/trim-proxy.mjs",target=/tmp/trim-proxy.mjs,readonly \
+            --entrypoint node firecrawl-locked-mcp:research /tmp/trim-proxy.mjs)
+          candidate=$(docker create --pull=never --network "$net" --network-alias api --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint sh firecrawl-rust-ocr-ci:review -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_MODEL_NAME=fixture CANDIDATE_NETWORK_MODE=internal-api; exec /usr/local/bin/candidate-main')
+          docker network connect bridge "$candidate"
+          docker start "$candidate" >/dev/null
+          test "$(docker network inspect --format '{{.Internal}}' "$net")" = true
+          for cid in "$mock" "$proxy"; do
+            test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$cid")" = 1
+            test "$(docker inspect --format '{{len .Mounts}}' "$cid")" = 1
+            test "$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$cid")" = 0
+          done
+          timeout 100s docker exec "$mock" node /tmp/verify-model-sidecar.mjs verify
+
       - name: Live public-source candidate sample (separate evidence)
         id: live_sample
         continue-on-error: true
@@ -237,6 +278,7 @@ jobs:
             echo 'Live durable jobs outcome = ${{ steps.live_jobs.outcome }} (not offline acceptance)'
             echo 'Live actual HTTP MCP file-credential outcome = ${{ steps.live_mcp_http.outcome }} (not offline acceptance)'
             echo 'Live locked MCP outcome = ${{ steps.live_mcp.outcome }} (not offline acceptance)'
+            echo 'Actual model proxy fixture outcome = ${{ steps.live_model_proxy.outcome }} (not live model acceptance)'
             echo 'Live isolated PDF sidecar outcome = ${{ steps.live_pdf.outcome }} (not offline acceptance)'
           } >> "$GITHUB_STEP_SUMMARY"
 
