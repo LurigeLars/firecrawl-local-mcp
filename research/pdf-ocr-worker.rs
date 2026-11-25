@@ -2,6 +2,8 @@
 //! filesystem path or provider. Run in a disposable network-none sandbox.
 #[path="../pdf-result.rs"]
 mod contract;
+#[path="../pdf-ocr-layout.rs"]
+mod layout;
 use contract::{office_magic,MAX_OFFICE_MARKDOWN,MAX_PAGES};
 use serde_json::{json, Value};
 use std::{io::{self, Read}, process::Stdio, time::Duration};
@@ -10,6 +12,7 @@ use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command};
 const MAX_PDF: usize = 32 * 1024 * 1024;
 const MAX_PGM: usize = 5 * 1024 * 1024;
 const MAX_TEXT: usize = 256 * 1024;
+const MAX_TSV: usize = 1024 * 1024;
 const MAX_OUTPUT: usize = 2 * 1024 * 1024;
 const MAX_OCR_PAGES: usize = 4;
 
@@ -50,16 +53,49 @@ async fn run_fixed(program: &str, args: &[&str], input: &[u8], cap: usize,
     }
 }
 
-async fn read_page(pdf: &[u8], number: usize, single_block: bool) -> Result<String, &'static str> {
+fn white_raster(pgm: &[u8]) -> bool {
+    // Poppler emits an 8-bit PGM with a three-line header.
+    let mut parts = pgm.splitn(4, |byte| *byte == b'\n');
+    let (Some(b"P5"), Some(size), Some(b"255"), Some(pixels)) =
+        (parts.next(), parts.next(), parts.next(), parts.next()) else { return false; };
+    let dimensions = std::str::from_utf8(size).ok().and_then(|size| {
+        let (width, height) = size.split_once(' ')?;
+        width.parse::<usize>().ok()?.checked_mul(height.parse().ok()?)
+    });
+    !pixels.is_empty() && dimensions == Some(pixels.len()) && pixels.iter().all(|&byte| byte == 255)
+}
+
+enum RasterText {
+    Blank,
+    Recognized(String),
+}
+
+async fn read_page(pdf: &[u8], number: usize, single_block: bool, end: tokio::time::Instant)
+    -> Result<RasterText, &'static str> {
     let page = number.to_string();
     let pgm = run_fixed("/usr/bin/pdftoppm",
         &["-f", &page, "-l", &page, "-scale-to", "2200", "-singlefile", "-gray", "-"],
         pdf, MAX_PGM, Duration::from_secs(15)).await?;
     if !pgm.starts_with(b"P5") { return Err("invalid rendered image"); }
+    if white_raster(&pgm) { return Ok(RasterText::Blank); }
     let psm = if single_block { "6" } else { "3" };
     let text = run_fixed("/usr/bin/tesseract", &["stdin", "stdout", "-l", "eng", "--psm", psm],
         &pgm, MAX_TEXT, Duration::from_secs(15)).await?;
-    String::from_utf8(text).map_err(|_| "OCR output not UTF-8")
+    let text = String::from_utf8(text).map_err(|_| "OCR output not UTF-8")?;
+    if !single_block && layout::has_detached_numbers(&text) {
+        let time = end.saturating_duration_since(tokio::time::Instant::now())
+            .saturating_sub(Duration::from_millis(100)).min(Duration::from_secs(4));
+        if !time.is_zero() {
+            if let Ok(tsv) = run_fixed("/usr/bin/tesseract", &["stdin", "stdout", "-l", "eng", "--psm", psm, "tsv"],
+                &pgm, MAX_TSV, time).await {
+                if let Some(repaired) = std::str::from_utf8(&tsv).ok()
+                    .and_then(|tsv| layout::restore_numeric_columns(&text, tsv)) {
+                    return Ok(RasterText::Recognized(repaired));
+                }
+            }
+        }
+    }
+    Ok(RasterText::Recognized(text))
 }
 
 fn page_value(page: usize, native: &str, ocr: Option<Result<String, &'static str>>) -> Value {
@@ -85,9 +121,10 @@ async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>) -> Res
     // existing hard page cap, then apply the requested output/OCR bound.
     let total_pages=parsed.pages.len();
     let selected=max_pages.unwrap_or(total_pages).min(total_pages);
-    let classified:Vec<_>=classified.into_iter().filter(|p|(*p as usize)<=selected).collect();
+    let mut classified = Vec::new();
     let mut output = Vec::new();
     let mut attempted = 0;
+    let mut blank = 0;
     // Bound the entire OCR stage, not just each renderer/recognizer call.
     // Classification itself is bounded by the external sandbox wall clock.
     let end = tokio::time::Instant::now() + Duration::from_secs(45);
@@ -99,14 +136,24 @@ async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>) -> Res
                 Some(Err("OCR page budget exceeded"))
             } else {
                 attempted += 1;
-                Some(tokio::time::timeout_at(end, read_page(pdf, i + 1, single_block))
-                    .await.unwrap_or(Err("OCR total deadline exceeded")))
+                match tokio::time::timeout_at(end, read_page(pdf, i + 1, single_block, end)).await {
+                    Ok(Ok(RasterText::Blank)) if native.trim().is_empty() => {
+                        blank += 1;
+                        output.push(json!({"page":i+1,"text":"","source":"native","warning":null,"blank":true}));
+                        continue;
+                    }
+                    Ok(Ok(RasterText::Recognized(text))) => Some(Ok(text)),
+                    Ok(Ok(RasterText::Blank)) => Some(Err("blank raster conflicts with native text")),
+                    Ok(Err(error)) => Some(Err(error)),
+                    Err(_) => Some(Err("OCR total deadline exceeded")),
+                }
             };
+        if result.is_some() { classified.push(i+1); }
         output.push(page_value(i+1,native,result));
     }
     let unresolved = output.iter().filter(|p|p["source"]=="unresolved").count();
     let result = json!({"pages":output,"pages_needing_ocr":classified,
-        "ocr_attempted":attempted,"unresolved_pages":unresolved,
+        "ocr_attempted":attempted - blank,"unresolved_pages":unresolved,
         "total_pages":total_pages,"requested_max_pages":max_pages,
         "source_verified":false,"layout":if single_block {"single_block"} else {"auto"}});
     if serde_json::to_vec(&result).map_err(|_|"PDF result encoding failed")?.len()>MAX_OUTPUT {
@@ -177,6 +224,14 @@ async fn main() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_a_complete_white_raster_is_blank() {
+        assert!(white_raster(b"P5\n2 1\n255\n\xff\xff"));
+        assert!(!white_raster(b"P5\n2 1\n255\n\xff\xfe"));
+        assert!(!white_raster(b"P5\n2 1\n255\n\xff"));
+        assert!(!white_raster(b"P5\n0 0\n255\n"));
+    }
+
     #[test]
     fn unresolved_keeps_native_text_and_ocr_retains_separate_native_text() {
         assert_eq!(page_value(1,"native",None)["source"],"native");

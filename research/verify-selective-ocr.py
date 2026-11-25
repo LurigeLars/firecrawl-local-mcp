@@ -38,6 +38,14 @@ def main():
         assert auto["pages"][0]==output["pages"][0]
         assert auto["pages_needing_ocr"]==[2,3] and auto["ocr_attempted"]==2
         assert all(p["warning"] for p in auto["pages"][1:])
+        fixture(pdf, include_blank=True)
+        with_blank=pdf.read_bytes()
+        assert 4 in run("/usr/local/bin/pdf-page-probe",with_blank)["pages_needing_ocr"]
+        refined=run("/usr/local/bin/pdf-ocr-worker",with_blank)
+        assert refined["pages"][-1]=={"page":4,"text":"","source":"native","warning":None,"blank":True}
+        assert refined["ocr_attempted"]==auto["ocr_attempted"]
+        assert refined["pages_needing_ocr"]==auto["pages_needing_ocr"]
+        assert refined["unresolved_pages"]==auto["unresolved_pages"]
         bad=subprocess.run(["/usr/local/bin/pdf-ocr-worker"],input=b"not a PDF",
             capture_output=True,timeout=5)
         assert bad.returncode!=0 and not bad.stdout
