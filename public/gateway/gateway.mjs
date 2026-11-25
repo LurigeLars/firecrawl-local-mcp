@@ -279,7 +279,7 @@ http
       const compactIds = new Set(),
         crawlRequests = new Map();
       for (const m of msgs) {
-        if (m?.method === 'tools/list' || m?.method === 'initialize') needsRewrite = true;
+        if (m?.method === 'tools/list' || m?.method === 'initialize' || m?.method === 'server/discover') needsRewrite = true;
         const verdict = checkRequest(m, ALLOWED_TOOLS);
         if (verdict.error) return sendJson(res, rpcErrorMsg(m.id, verdict.error));
         if (verdict.toolError) return sendJson(res, rpcToolError(m.id, verdict.toolError));

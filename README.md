@@ -331,7 +331,7 @@ The host-level `mcp-cloudflared` container provides the shared tunnel and reache
   Anything else returns 404.
 - Deployment identifiers are local-only and must stay out of Git. `fc.ps1` removes any legacy `GATEWAY_SECRET` entry from the ignored `public/gateway.env` during startup.
 - Gateway: the upstream Firecrawl surface is limited to scrape/map/search/crawl/check_crawl_status; `firecrawl_parse` is blocked because it can read arbitrary local files in this mode. The gateway additionally injects the bounded local `firecrawl_browser_*` tools and dispatches them only to the isolated browser sidecar. Firecrawl scrape/crawl requests asking for screenshot, branding, audio, or upstream browser `actions` are still rejected. The gateway defaults to 120 requests/min per caller IP (`RATE_PER_MIN`) with a 256 KB request cap.
-- Server instructions: the gateway replaces the MCP `initialize` instructions with `public/gateway/instructions.md`
+- Server instructions: the gateway replaces the MCP `initialize` and `server/discover` instructions with `public/gateway/instructions.md`
   (read on every connect, no restart needed). ChatGPT picks them up when the connector is refreshed ("Uppdatera").
   Keep it in line with the `firecrawl-mcp` core skill.
 - Verify end to end: `node public/selftest.mjs (.\fc.ps1 url)`; watch traffic: `.\fc.ps1 logs`.
