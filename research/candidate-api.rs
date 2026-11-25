@@ -8,7 +8,7 @@ use axum::{body::Bytes, extract::{DefaultBodyLimit, State},
     routing::{get, post}, Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::{Arc,Mutex}, time::Duration};
+use std::{collections::{HashMap,VecDeque}, sync::{Arc,Mutex}, time::{Duration,Instant}};
 use tokio::sync::Semaphore;
 
 #[path = "local-search-probe.rs"]
@@ -42,6 +42,7 @@ struct CandidateState {
     model_name: Option<String>,
     model_slot: Arc<Semaphore>,
     browser_enabled: bool,
+    html_cache:Arc<Mutex<HtmlCache>>,
 }
 
 #[derive(Clone,Deserialize)]
@@ -93,14 +94,73 @@ fn bounded(value: Value) -> Response {
     }
 }
 
-fn valid_common(req:&StaticRequest)->bool{
-    req.max_age==0&&!req.store_in_cache&&
+const CACHE_MAX_AGE_MS:u64=7*24*60*60*1000;
+const CACHE_MAX_BYTES:usize=8*1024*1024;
+const CACHE_MAX_ENTRY:usize=256*1024;
+const CACHE_MAX_ENTRIES:usize=64;
+
+struct CacheEntry{key:String,created:Instant,encoded:Vec<u8>}
+#[derive(Default)]
+struct HtmlCache{entries:VecDeque<CacheEntry>,bytes:usize}
+
+impl HtmlCache{
+    fn purge(&mut self,now:Instant){
+        self.entries.retain(|e|now.saturating_duration_since(e.created).as_millis()<=u128::from(CACHE_MAX_AGE_MS));
+        self.bytes=self.entries.iter().map(|e|e.key.len()+e.encoded.len()).sum();
+    }
+
+    fn get(&mut self,key:&str,max_age:u64,now:Instant)->Option<(Value,u64)>{
+        if max_age==0{return None;}
+        self.purge(now);
+        let index=self.entries.iter().position(|e|e.key==key)?;
+        let age=now.saturating_duration_since(self.entries[index].created).as_millis();
+        if age>u128::from(max_age){return None;}
+        let entry=self.entries.remove(index)?;
+        let doc=serde_json::from_slice(&entry.encoded).ok();
+        if doc.is_some(){self.entries.push_back(entry);}
+        else{self.bytes-=entry.key.len()+entry.encoded.len();}
+        doc.map(|value|(value,age as u64))
+    }
+
+    fn put(&mut self,key:String,doc:&Value,now:Instant)->bool{
+        let Ok(encoded)=serde_json::to_vec(doc)else{return false;};
+        if !doc.is_object()||encoded.len()+key.len()>CACHE_MAX_ENTRY{return false;}
+        self.purge(now);
+        if let Some(index)=self.entries.iter().position(|e|e.key==key){
+            let old=self.entries.remove(index).unwrap();
+            self.bytes-=old.key.len()+old.encoded.len();
+        }
+        let size=key.len()+encoded.len();
+        while self.entries.len()>=CACHE_MAX_ENTRIES||self.bytes+size>CACHE_MAX_BYTES{
+            let Some(old)=self.entries.pop_front()else{return false;};
+            self.bytes-=old.key.len()+old.encoded.len();
+        }
+        self.bytes+=size;
+        self.entries.push_back(CacheEntry{key,created:now,encoded});
+        true
+    }
+}
+
+// Exact public URL and content-affecting options, no user credentials,
+// request origin, arbitrary headers, or persistent storage.
+fn cache_key(target:&url::Url,req:&StaticRequest)->String{
+    json!([target.as_str(),req.formats,req.only_main_content,req.include_tags,req.exclude_tags]).to_string()
+}
+fn cache_receipt(used:bool,stored:bool,age:Option<u64>,requested:u64)->Value{
+    json!({"cache_supported":true,"cache_used":used,"cache_stored":stored,
+        "cache_age_ms":age,"cache_max_age_ms":requested,"cache_persistent":false})
+}
+fn valid_metadata(req:&StaticRequest)->bool{
         render::valid_tag_filters(&req.include_tags,&req.exclude_tags)&&
         req.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))
 }
 
+fn valid_common(req:&StaticRequest)->bool{
+    req.max_age==0&&!req.store_in_cache&&valid_metadata(req)
+}
+
 fn valid_static(req:&StaticRequest) -> bool {
-    valid_common(req)&&req.wait_for==0&&req.parsers.is_none()&&!req.formats.is_empty()&&req.formats.len()<=4&&
+    req.max_age<=CACHE_MAX_AGE_MS&&valid_metadata(req)&&req.wait_for==0&&req.parsers.is_none()&&!req.formats.is_empty()&&req.formats.len()<=4&&
         req.formats.iter().all(|s|matches!(s.as_str(),Some("markdown"|"html"|"rawHtml"|"links")))&&
         req.formats.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>().len()==req.formats.len()&&
         (1..=45000).contains(&req.timeout.unwrap_or(30000))
@@ -192,6 +252,9 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     let target=scrape_target(&req.url);
     let target=match target{Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")};
     let is_pdf=pdf_request(&req,&target);
+    if target.path().to_ascii_lowercase().ends_with(".pdf")&&(req.max_age>0||req.store_in_cache){
+        return refusal(StatusCode::BAD_REQUEST,"PDF_CACHE_UNSUPPORTED");
+    }
     if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!is_pdf{
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
     }
@@ -255,7 +318,11 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         return bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}));
     }
     match static_html_request(&state,target,req).await {
-        Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+        Ok(mut data)=>{
+            let receipt=data.as_object_mut().and_then(|m|m.remove("researchCache"))
+                .unwrap_or_else(||cache_receipt(false,false,None,0));
+            bounded(json!({"success":true,"data":data,"research":receipt}))
+        },
         Err(status)=>refusal(status,"STATIC_SCRAPE_FAILED")
     }
     }).await;
@@ -268,6 +335,17 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
 // Shared single-page HTML path for direct scrape and search enrichment.
 // Admission is owned by the caller for the whole operation.
 async fn static_html_request(state:&CandidateState,target:url::Url,req:StaticRequest)->Result<Value,StatusCode>{
+    let max_age=req.max_age;
+    let store=req.store_in_cache;
+    let key=(max_age>0||store).then(||cache_key(&target,&req));
+    if max_age>0{
+        if let (Some(key),Ok(mut cache))=(key.as_ref(),state.html_cache.lock()){
+            if let Some((mut data,age))=cache.get(key,max_age,Instant::now()){
+                data["researchCache"]=cache_receipt(true,false,Some(age),max_age);
+                return Ok(data);
+            }
+        }
+    }
     let mut formats=req.formats.clone();
     let wants_markdown=req.formats.iter().any(|s|s=="markdown");
     if !wants_markdown{formats.push(json!("markdown"));}
@@ -276,6 +354,10 @@ async fn static_html_request(state:&CandidateState,target:url::Url,req:StaticReq
         timeout:Some(req.timeout.unwrap_or(30000)),..Default::default()};
     let mut data=static_document_with_options(state,target,opts).await?;
     if !wants_markdown{data.as_object_mut().ok_or(StatusCode::BAD_GATEWAY)?.remove("markdown");}
+    let stored=if store{
+        if let (Some(key),Ok(mut cache))=(key,state.html_cache.lock()){cache.put(key,&data,Instant::now())}else{false}
+    }else{false};
+    data["researchCache"]=cache_receipt(false,stored,None,max_age);
     Ok(data)
 }
 
@@ -351,7 +433,7 @@ fn search_options(raw:Value)->Result<(search::Request,Option<StaticRequest>),Sta
         // destination is independently derived and guarded for each hit.
         fields.insert("url".into(),json!(""));
         let opts:StaticRequest=serde_json::from_value(Value::Object(fields)).map_err(|_|StatusCode::BAD_REQUEST)?;
-        if !valid_static(&opts){return Err(StatusCode::BAD_REQUEST);}
+        if !valid_static(&opts)||!valid_common(&opts){return Err(StatusCode::BAD_REQUEST);}
         Some(opts)
     }else{None};
     Ok((req,options))
@@ -456,7 +538,8 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         jobs:Mutex::new(HashMap::new())
     });
     let state=CandidateState{auth:auth.clone(),slots:Arc::new(Semaphore::new(4)),
-        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled,model_name,model_slot:Arc::new(Semaphore::new(1)),browser_enabled};
+        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled,model_name,model_slot:Arc::new(Semaphore::new(1)),browser_enabled,
+        html_cache:Arc::new(Mutex::new(HtmlCache::default()))};
     let app=Router::new()
         .route("/health",get(|State(state):State<CandidateState>|async move{
             let job_store=match &state.batch{None=>"disabled",Some(b) if b.ready()=>"ready",Some(_)=>"degraded"};
@@ -519,7 +602,7 @@ mod tests {
         assert!(valid_static(&full));
         for extra in [
             json!({"formats":["summary"]}),json!({"formats":[]}),json!({"formats":["markdown","markdown"]}),
-            json!({"maxAge":1}),json!({"storeInCache":true}),json!({"timeout":45001}),
+            json!({"maxAge":CACHE_MAX_AGE_MS+1}),json!({"timeout":45001}),
             json!({"origin":"x\nheader"})
         ]{
             let mut input=json!({"url":"https://example.org/"});
@@ -528,6 +611,55 @@ mod tests {
         }
         assert!(serde_json::from_value::<StaticRequest>(json!({"url":"https://example.org/",
             "headers":{"Cookie":"synthetic"}})).is_err());
+    }
+
+    #[test]
+    fn explicit_cache_options_and_bounded_lru(){
+        let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/a","maxAge":60000,"storeInCache":true})).unwrap();
+        assert!(valid_static(&req)&&!valid_common(&req));
+        let target=scrape_target(&req.url).unwrap();
+        let key=cache_key(&target,&req);
+        let mut different=req.clone();
+        different.only_main_content=false;
+        assert_ne!(key,cache_key(&target,&different));
+        different=req.clone();different.formats=vec![json!("html")];
+        assert_ne!(key,cache_key(&target,&different));
+        assert_ne!(key,cache_key(&scrape_target("https://example.org/a?q=1").unwrap(),&req));
+        different=req.clone();different.max_age=1;different.store_in_cache=false;
+        assert_eq!(key,cache_key(&target,&different));
+        let now=Instant::now();
+        let doc=json!({"markdown":"Stock 421.5","researchSourceVerified":false});
+        let mut cache=HtmlCache::default();
+        assert!(cache.put(key.clone(),&doc,now));
+        assert!(cache.get(&key,0,now).is_none());
+        assert!(cache.get(&key,1,now+Duration::from_millis(2)).is_none());
+        assert_eq!(cache.get(&key,60000,now+Duration::from_secs(1)),Some((doc.clone(),1000)));
+        assert!(!cache.put("huge".into(),&json!({"markdown":"x".repeat(CACHE_MAX_ENTRY)}),now));
+        for i in 0..=CACHE_MAX_ENTRIES{assert!(cache.put(format!("k{i}"),&doc,now));}
+        assert!(cache.entries.len()<=CACHE_MAX_ENTRIES&&cache.bytes<=CACHE_MAX_BYTES);
+        assert!(cache.get(&key,60000,now).is_none());
+        cache.purge(now+Duration::from_millis(CACHE_MAX_AGE_MS+1));
+        assert_eq!(cache.bytes,0);
+    }
+
+    #[tokio::test]
+    async fn actual_route_can_read_explicit_cache_without_network(){
+        let (app,state)=router(TOKEN.into(),"http://127.0.0.1:9/search".into(),"http://127.0.0.1:9/scrape".into(),
+            None,false,None,false).unwrap();
+        let payload=json!({"url":"https://example.org/cache","maxAge":60000,"formats":["markdown"]});
+        let req:StaticRequest=serde_json::from_value(payload.clone()).unwrap();
+        let key=cache_key(&scrape_target(&req.url).unwrap(),&req);
+        let doc=json!({"markdown":"Synthetic cached document 42","researchSourceVerified":false});
+        assert!(state.html_cache.lock().unwrap().put(key,&doc,Instant::now()));
+        let (base,task)=spawn(app).await;
+        let client=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
+        let result:Value=client.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&payload)
+            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(result["data"],doc);
+        assert_eq!(result["research"]["cache_used"],true);
+        assert_eq!(result["research"]["cache_stored"],false);
+        assert_eq!(result["research"]["cache_persistent"],false);
+        task.abort();
     }
 
     #[test]
