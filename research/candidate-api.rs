@@ -69,6 +69,12 @@ impl NetworkMode{
     }
 }
 
+// Self-hosted basic and auto use the existing configured local routes.
+// No Fire Engine, cloud or caller-selected proxy endpoint.
+#[derive(Clone,Copy,Debug,Default,Deserialize,serde::Serialize,PartialEq,Eq)]
+#[serde(rename_all="lowercase")]
+enum LocalProxy{Basic,#[default] Auto}
+
 #[derive(Clone,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct StaticRequest {
@@ -93,6 +99,8 @@ struct StaticRequest {
     parsers: Option<Vec<PdfParser>>,
     #[serde(default)]
     origin: Option<String>,
+    #[serde(default)]
+    proxy: LocalProxy,
 }
 
 #[derive(Clone,Deserialize)]
@@ -199,7 +207,7 @@ impl HtmlCache{
 // Exact public URL and content-affecting options, no user credentials,
 // request origin, arbitrary headers, or persistent storage.
 fn cache_key(target:&url::Url,req:&StaticRequest)->String{
-    json!([target.as_str(),req.formats,req.only_main_content,req.include_tags,req.exclude_tags]).to_string()
+    json!([target.as_str(),req.formats,req.only_main_content,req.include_tags,req.exclude_tags,req.proxy]).to_string()
 }
 fn cache_receipt(used:bool,stored:bool,age:Option<u64>,requested:u64)->Value{
     json!({"cache_supported":true,"cache_used":used,"cache_stored":stored,
@@ -525,6 +533,7 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
         render::check_dns(&landed).await.map_err(|_|StatusCode::FORBIDDEN)?;
         // Provenance, not an assertion of source completeness.
         data["researchSourceVerified"]=json!(false);
+        data["metadata"]["proxyUsed"]=json!("basic");
         Ok::<_,StatusCode>(data)
     }).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)?;
     if !matches!(direct,Err(StatusCode::PRECONDITION_REQUIRED)){return direct;}
@@ -811,6 +820,25 @@ mod tests {
         }
         assert!(serde_json::from_value::<StaticRequest>(json!({"url":"https://example.org/",
             "headers":{"Cookie":"synthetic"}})).is_err());
+    }
+
+    #[test]
+    fn explicit_local_proxy_classes_are_bounded_and_cache_keys_distinct(){
+        let base=json!({"url":"https://example.org/report","formats":["markdown"]});
+        let target=scrape_target("https://example.org/report").unwrap();
+        let implicit:StaticRequest=serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(implicit.proxy,LocalProxy::Auto);
+        for (value,mode) in [("basic",LocalProxy::Basic),("auto",LocalProxy::Auto)]{
+            let mut raw=base.clone();raw["proxy"]=json!(value);
+            let req:StaticRequest=serde_json::from_value(raw).unwrap();
+            assert!(valid_static(&req));
+            assert_eq!(req.proxy,mode);
+            assert_eq!(cache_key(&target,&req)==cache_key(&target,&implicit),mode==LocalProxy::Auto);
+        }
+        for value in ["stealth","enhanced","http://127.0.0.1:8080",""]{
+            let mut raw=base.clone();raw["proxy"]=json!(value);
+            assert!(serde_json::from_value::<StaticRequest>(raw).is_err());
+        }
     }
 
     #[test]

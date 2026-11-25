@@ -122,6 +122,8 @@ struct V2ScrapeOptions{
     #[serde(default)] exclude_tags:Vec<String>,
     #[serde(default)] max_age:u64,
     #[serde(default)] store_in_cache:bool,
+    // Validate the local class; crawl remains static and same-origin.
+    #[serde(default,rename="proxy")] _proxy:super::LocalProxy,
 }
 fn default_depth()->u32{10}
 fn default_sitemap()->String{"include".into()}

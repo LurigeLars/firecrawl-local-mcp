@@ -231,6 +231,8 @@ try{
   const calls=[
     ['firecrawl_scrape',{url:fixtureUrl,formats:['markdown']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['images']},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:fixtureUrl,formats:['markdown'],proxy:'basic'},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:fixtureUrl,formats:['markdown'],proxy:'auto'},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl+'?year=2026#data',formats:['markdown'],includeTags:['article'],excludeTags:['.ads']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['summary']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['json'],jsonOptions:{prompt:'Extract value',schema:{
@@ -260,6 +262,10 @@ try{
         assert.deepEqual(request?.scrapeOptions?.formats,[{type:'query',prompt:args.scrapeOptions.queryOptions.prompt,mode:'freeform'}]);
       }else assert.deepEqual(request?.scrapeOptions?.formats,args.scrapeOptions.formats);
       assert.deepEqual(request?.scrapeOptions?.includeTags,args.scrapeOptions.includeTags);
+    }
+    if(args.proxy){
+      const request=captured.find(x=>x.method===method&&x.path===path)?.body;
+      assert.equal(request?.proxy,args.proxy);
     }
     if(args.pdfOptions){
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;

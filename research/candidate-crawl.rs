@@ -236,6 +236,7 @@ fn convert_page(raw:String,target:&Url,opts:&ScrapeOptions,requested:Vec<Format>
     metadata.insert("url".into(),json!(target.as_str()));
     metadata.insert("statusCode".into(),json!(200));
     metadata.insert("contentType".into(),json!("text/html"));
+    metadata.insert("proxyUsed".into(),json!("basic"));
     data.insert("metadata".into(),Value::Object(metadata));
     data.insert("source".into(),json!("local"));
     data.insert("researchSourceVerified".into(),json!(false));
