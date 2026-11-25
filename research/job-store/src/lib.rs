@@ -24,7 +24,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone)]
 pub struct Claim { job: String, item: String, generation: i64, crawl: Option<CrawlClaim> }
 #[derive(Debug, Clone)]
-pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32, pub include_sitemap: bool, pub page_limit: usize }
+pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32, pub include_sitemap: bool, pub page_limit: u32 }
 impl Claim {
     pub fn item(&self) -> &str { &self.item }
     pub fn job(&self)->&str { &self.job }

@@ -81,7 +81,7 @@ impl Crawler{
     }
 
     pub(super) async fn read(&self,raw_seed:&str,raw_target:&str,include_sitemap:bool,
-        max_depth:u32,page_limit:usize)->Result<(Value,Vec<String>),StatusCode>{
+        max_depth:u32,page_limit:u32)->Result<(Value,Vec<String>),StatusCode>{
         let seed=seed(raw_seed)?;
         let target=static_target(raw_target)?;
         if !scoped(&seed,&target){return Err(StatusCode::FORBIDDEN);}
