@@ -73,3 +73,30 @@ assert status==200 and result["parser"]=="upstream-anydoc" and result["source_ve
 assert all(marker in result["markdown"] for marker in ("Office fixture","421.5","-1.2"))
 print("OFFICE_HTTP_PROCESS_PASS")
 assert call("/health")[0]==200
+
+# Real ZIP bytes, signed number and explicit cell order in a minimal XLSX.
+xlsx=ooxml({
+    "[Content_Types].xml":'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+    "_rels/.rels":'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+    "xl/workbook.xml":'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Stock" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    "xl/_rels/workbook.xml.rels":'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+    "xl/worksheets/sheet1.xml":'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Stock</t></is></c><c r="B1" t="inlineStr"><is><t>Change</t></is></c></row><row r="2"><c r="A2"><v>421.5</v></c><c r="B2"><v>-1.2</v></c></row></sheetData></worksheet>',
+})
+status,result=call("/extract-office",xlsx,"application/octet-stream",timeout=20)
+assert status==200 and result["parser"]=="upstream-anydoc" and result["source_verified"] is False
+assert all(marker in result["markdown"] for marker in ("Stock","Change","421.5","-1.2"))
+print("XLSX_HTTP_PROCESS_PASS")
+# Unsafe and duplicate paths fail before the parser. No file extraction occurs.
+unsafe=ooxml({"../escape.xml":"fixture","word/document.xml":"fixture"})
+assert call("/extract-office",unsafe,"application/octet-stream",timeout=20)[0]==422
+duplicate=io.BytesIO()
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore",UserWarning)
+    with zipfile.ZipFile(duplicate,"w") as archive:
+        archive.writestr("word/document.xml","one")
+        archive.writestr("word/document.xml","two")
+assert call("/extract-office",duplicate.getvalue(),"application/octet-stream",timeout=20)[0]==422
+assert call("/health")[0]==200
+print("OFFICE_ARCHIVE_GUARD_PASS")
+
