@@ -135,6 +135,7 @@ jobs:
             "scripts/configure_gemini.ps1|PSAvoidUsingConvertToSecureStringWithPlainText" = "Intentional legacy-secret migration into DPAPI-protected storage."
             "scripts/configure_service_secrets.ps1|PSAvoidUsingConvertToSecureStringWithPlainText" = "Intentional DPAPI encryption boundary for locally supplied service secrets."
             "scripts/configure_public_proxy.ps1|PSAvoidUsingConvertToSecureStringWithPlainText" = "Intentional DPAPI encryption boundary for locally supplied public-proxy credentials."
+            "local-mcp/rust-client.ps1|PSAvoidUsingConvertToSecureStringWithPlainText" = "Intentional DPAPI boundary for validated production token imported from the reviewed read-only volume; no plaintext file or command argument."
           }
 
           $blocking = @()
