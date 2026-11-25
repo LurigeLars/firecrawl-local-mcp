@@ -84,6 +84,27 @@ fn enqueue(seed:&Url,raw:&str,seen:&mut HashSet<String>,queue:&mut VecDeque<Url>
     if seen.insert(url.to_string()){queue.push_back(url);true}else{false}
 }
 
+async fn parse_sitemap_into(xml:&str,seed:&Url,results:&mut Results<'_>,seen:&mut HashSet<String>,
+    queue:&mut VecDeque<Url>)->Result<usize,()>{
+    if xml.len()>MAX_XML{return Err(());}
+    let parsed=crawler::process_sitemap(xml.to_owned()).await.map_err(|_|())?;
+    let mut skipped=0;
+    for instruction in parsed.instructions{
+        if instruction.action=="recurse"{
+            for raw in instruction.urls{
+                if !enqueue(seed,&raw,seen,queue){skipped+=1;}
+            }
+        }else if instruction.action=="process"{
+            for raw in instruction.urls{
+                results.push(&raw);
+                if results.full(){break;}
+            }
+        }
+        if results.full(){break;}
+    }
+    Ok(skipped)
+}
+
 async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url)->Result<Value,StatusCode>{
     let mut results=Results::new(req,seed)?;
     let end=Instant::now()+Duration::from_millis(req.timeout);
@@ -132,20 +153,9 @@ async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url)->Result<Val
             let Ok(xml)=std::str::from_utf8(&res.body)else{skipped+=1;continue;};
             // Upstream native parser rejects entity declarations/deep nesting.
             // Bounded input; do not drop its blocking task on an async timeout.
-            let Ok(parsed)=crawler::process_sitemap(xml.to_owned()).await else{skipped+=1;continue;};
-            read+=1;
-            for instruction in parsed.instructions{
-                if instruction.action=="recurse"{
-                    for raw in instruction.urls{
-                        if !enqueue(seed,&raw,&mut seen,&mut queue){skipped+=1;}
-                    }
-                }else if instruction.action=="process"{
-                    for raw in instruction.urls{
-                        results.push(&raw);
-                        if results.full(){break;}
-                    }
-                }
-                if results.full(){break;}
+            match parse_sitemap_into(xml,seed,&mut results,&mut seen,&mut queue).await{
+                Ok(n)=>{read+=1;skipped+=n;},
+                Err(())=>{skipped+=1;continue;}
             }
         }
     }
@@ -210,6 +220,37 @@ mod tests{
             {"url":"https://example.org/docs/a"},{"url":"https://sub.example.org/docs/b"}
         ]).as_array().unwrap().clone());
         assert!(results.full());
+    }
+
+    #[tokio::test]
+    async fn actual_native_sitemap_parser_filters_index_and_urlset(){
+        let req:MapRequest=serde_json::from_value(json!({"url":"https://example.org/docs/",
+            "limit":3,"sitemap":"only","includeSubdomains":false})).unwrap();
+        let seed=Url::parse(&req.url).unwrap();
+        let mut results=Results::new(&req,&seed).unwrap();
+        let mut seen=HashSet::new();let mut queue=VecDeque::new();
+        let ns="http://www.sitemaps.org/schemas/sitemap/0.9";
+        let index=format!(r#"<sitemapindex xmlns="{ns}">
+            <sitemap><loc>https://example.org/one.xml</loc></sitemap>
+            <sitemap><loc>https://other.org/two.xml</loc></sitemap>
+            <sitemap><loc>https://example.org/one.xml</loc></sitemap>
+            </sitemapindex>"#);
+        assert!(parse_sitemap_into(&index,&seed,&mut results,&mut seen,&mut queue).await.is_ok());
+        assert_eq!(queue.len(),1);
+        assert_eq!(queue.pop_front().unwrap().as_str(),"https://example.org/one.xml");
+        let pages=format!(r#"<urlset xmlns="{ns}">
+            <url><loc>https://example.org/docs/a</loc></url>
+            <url><loc>https://example.org/docs-old/a</loc></url>
+            <url><loc>https://other.org/docs/b</loc></url>
+            <url><loc>https://example.org/docs/a</loc></url>
+            <url><loc>https://example.org/docs/b</loc></url>
+            </urlset>"#);
+        parse_sitemap_into(&pages,&seed,&mut results,&mut seen,&mut queue).await.unwrap();
+        assert_eq!(results.links,json!([{"url":"https://example.org/docs/a"},
+            {"url":"https://example.org/docs/b"}]).as_array().unwrap().clone());
+        let before=results.links.clone();
+        assert!(parse_sitemap_into(&"x".repeat(MAX_XML+1),&seed,&mut results,&mut seen,&mut queue).await.is_err());
+        assert_eq!(results.links,before);
     }
 
     #[test]

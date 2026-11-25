@@ -1,6 +1,6 @@
 //! Research-only bridge to the existing one-shot Playwright router.
 //! Camofox remains an independent gateway tool. No browser sessions or keys.
-use firecrawl_local::{guard::{check_url, check_ip, NetworkPolicy}, scrape::{process_html, Format, ScrapeOptions}};
+use firecrawl_local::{cloud, guard::{check_url, check_ip, NetworkPolicy}, scrape::{process_html, Format, ScrapeOptions}};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{io::{self, Read}, time::Duration};
@@ -13,10 +13,10 @@ const MAX_INPUT: u64 = 16 * 1024;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
-    url: String,
+    pub(crate) url: String,
     #[serde(default)]
-    wait_for: u64,
-    only_main_content: bool,
+    pub(crate) wait_for: u64,
+    pub(crate) only_main_content: bool,
 }
 
 #[derive(Deserialize)]
@@ -50,8 +50,12 @@ pub(crate) async fn check_dns(url: &Url) -> Result<(), &'static str> {
 }
 
 pub(crate) async fn render_at(endpoint: &str, req: Request, budget: Duration) -> Result<Value, &'static str> {
+    render_formats_at(endpoint,req,budget,vec![Format::Markdown,Format::Links]).await
+}
+
+pub(crate) async fn render_formats_at(endpoint:&str,req:Request,budget:Duration,formats:Vec<Format>)->Result<Value,&'static str>{
     let target = public_url(&req.url)?;
-    if req.wait_for > 10_000 { return Err("waitFor exceeds research budget"); }
+    if req.wait_for > 10_000 || budget.is_zero() || budget.as_millis() <= u128::from(req.wait_for) { return Err("waitFor exceeds research budget"); }
     let client = reqwest::Client::builder().no_proxy()
         .redirect(reqwest::redirect::Policy::none()).timeout(budget)
         .build().map_err(|_| "browser client unavailable")?;
@@ -60,7 +64,7 @@ pub(crate) async fn render_at(endpoint: &str, req: Request, budget: Duration) ->
         let mut response = client.post(endpoint).json(&json!({
             "url": target.as_str(),
             "wait_after_load": req.wait_for,
-            "timeout": 30_000,
+            "timeout": budget.as_millis().min(30_000) as u64,
             "skip_tls_verification": false
         })).send().await.map_err(|_| "browser transport failed")?;
         if !response.status().is_success() { return Err("browser service failed"); }
@@ -90,12 +94,25 @@ pub(crate) async fn render_at(endpoint: &str, req: Request, budget: Duration) ->
         Ok((rendered, landed, route))
     }).await.map_err(|_| "browser deadline exceeded")??;
     let opts = ScrapeOptions { only_main_content: req.only_main_content, ..Default::default() };
-    // shortcut: conversion is synchronous and separately resource-bounded in
-    // research; production must include it in the end-to-end worker deadline.
-    let (data, _, _) = process_html(rendered.content, &landed, &opts, &[Format::Markdown, Format::Links])
-        .map_err(|_| "HTML conversion failed")?;
+    // Run conversion off the async executor; caller retains admission until
+    // completion. The network deadline does not bound the blocking parser.
+    let status=rendered.page_status_code;
+    let url=landed.to_string();
+    let (mut data,mut metadata,markdown)=tokio::task::spawn_blocking(move||
+        process_html(rendered.content,&landed,&opts,&formats))
+        .await.map_err(|_|"HTML conversion failed")?.map_err(|_|"HTML conversion failed")?;
+    if markdown.trim().is_empty() || cloud::looks_like_bot_check(&markdown){
+        return Err("empty or blocked rendered content");
+    }
+    metadata.insert("url".into(),json!(url));
+    metadata.insert("sourceURL".into(),json!(target.as_str()));
+    metadata.insert("statusCode".into(),json!(status));
+    metadata.insert("contentType".into(),json!("text/html"));
+    data.insert("metadata".into(),Value::Object(metadata));
+    data.insert("source".into(),json!("local"));
+    data.insert("researchSourceVerified".into(),json!(false));
     Ok(json!({"data": data, "research": {
-        "landed_url": landed.as_str(), "target_status": rendered.page_status_code,
+        "landed_url": url, "target_status": status,
         "router_path": route, "source_verified":false
     }}))
 }
@@ -157,6 +174,9 @@ mod tests {
         assert!(out["data"]["markdown"].as_str().unwrap().contains("421.5 million barrels"));
         assert!(out["data"]["links"].to_string().contains("https://93.184.216.34/reports/next"));
         assert_eq!(out["research"]["router_path"], "direct");
+        assert_eq!(out["data"]["metadata"]["url"],"https://93.184.216.34/reports/weekly");
+        assert_eq!(out["data"]["metadata"]["sourceURL"],TARGET);
+        assert_eq!(out["data"]["source"],"local");
         assert_eq!(out["research"]["source_verified"], false);
     }
 

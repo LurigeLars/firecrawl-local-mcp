@@ -2,7 +2,7 @@
 //! This is not the full Firecrawl v2 contract. Unsupported requests fail closed.
 use super::{AppState, Cloud, gate, from_a_web_page, error_response};
 use crate::{cloud::{self, CloudMode}, guard::NetworkPolicy,
-    scrape::{BrowserMode, Engine, EngineConfig, ScrapeOptions}};
+    scrape::{BrowserMode, Engine, EngineConfig, ScrapeOptions, Format}};
 use axum::{body::Bytes, extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode}, middleware, response::{IntoResponse, Response},
     routing::{get, post}, Json, Router};
@@ -41,6 +41,7 @@ struct CandidateState {
     pdf_enabled: bool,
     model_name: Option<String>,
     model_slot: Arc<Semaphore>,
+    browser_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +58,10 @@ struct StaticRequest {
     store_in_cache: bool,
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    wait_for: u64,
+    #[serde(default)]
+    parsers: Option<Vec<String>>,
     #[serde(default)]
     origin: Option<String>,
 }
@@ -90,7 +95,7 @@ fn valid_common(req:&StaticRequest)->bool{
 }
 
 fn valid_static(req:&StaticRequest) -> bool {
-    valid_common(req)&&!req.formats.is_empty()&&req.formats.len()<=4&&
+    valid_common(req)&&req.wait_for==0&&req.parsers.is_none()&&!req.formats.is_empty()&&req.formats.len()<=4&&
         req.formats.iter().all(|s|matches!(s.as_str(),Some("markdown"|"html"|"rawHtml"|"links")))&&
         req.formats.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>().len()==req.formats.len()&&
         (1..=45000).contains(&req.timeout.unwrap_or(30000))
@@ -105,7 +110,7 @@ struct QueryFormat{
 }
 
 fn model_format(req:&StaticRequest)->Option<(model::Mode,Option<String>)>{
-    if !valid_common(req)||req.formats.len()!=1||!(1..=180000).contains(&req.timeout.unwrap_or(180000)){return None;}
+    if !valid_common(req)||req.wait_for!=0||req.parsers.is_some()||req.formats.len()!=1||!(1..=180000).contains(&req.timeout.unwrap_or(180000)){return None;}
     let f=&req.formats[0];
     if f=="summary"{return Some((model::Mode::Summary,None));}
     let q:QueryFormat=serde_json::from_value(f.clone()).ok()?;
@@ -133,6 +138,28 @@ async fn add_model_result(data:&mut Value,mode:model::Mode,prompt:Option<String>
     Ok(())
 }
 
+fn browser_formats(req:&StaticRequest)->Option<Vec<Format>>{
+    if !valid_common(req)||req.parsers.is_some()||!(1..=10000).contains(&req.wait_for)||
+        !(1..=60000).contains(&req.timeout.unwrap_or(60000))||
+        req.timeout.unwrap_or(60000)<=req.wait_for||req.formats.is_empty()||req.formats.len()>4||
+        req.formats.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>().len()!=req.formats.len(){
+        return None;
+    }
+    req.formats.iter().map(|f|match f.as_str()?{
+        "markdown"=>Some(Format::Markdown),"html"=>Some(Format::Html),
+        "rawHtml"=>Some(Format::RawHtml),"links"=>Some(Format::Links),_=>None
+    }).collect()
+}
+
+fn valid_pdf_options(req:&StaticRequest)->bool{
+    valid_common(req)&&req.wait_for==0&&req.formats==[json!("markdown")]&&
+        req.parsers.as_ref().is_none_or(|p|p.as_slice()==["pdf"])&&
+        (1..=110000).contains(&req.timeout.unwrap_or(110000))
+}
+fn pdf_request(req:&StaticRequest,target:&url::Url)->bool{
+    valid_pdf_options(req)&&target.path().to_ascii_lowercase().ends_with(".pdf")
+}
+
 fn static_target(raw:&str)->Result<url::Url,StatusCode>{
     let target=render::public_url(raw).map_err(|_|StatusCode::FORBIDDEN)?;
     if target.scheme()!="https" || target.query().is_some() || target.fragment().is_some() || target.port().is_some(){
@@ -144,10 +171,47 @@ fn static_target(raw:&str)->Result<url::Url,StatusCode>{
 async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
     let req:StaticRequest=match decode(&headers,&body) { Ok(v)=>v,Err(r)=>return r };
     let model_req=model_format(&req);
-    if !valid_static(&req)&&model_req.is_none(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");}
+    let render_formats=browser_formats(&req);
+    if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!valid_pdf_options(&req){
+        return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
+    }
     let target=match static_target(&req.url) {
         Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")
     };
+    let is_pdf=pdf_request(&req,&target);
+    if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!is_pdf{
+        return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
+    }
+    if is_pdf{
+        if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
+        let Ok(_slot)=state.slots.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
+        let result=pdf::document(&state,&target,Duration::from_millis(req.timeout.unwrap_or(110000))).await
+            .and_then(|receipt|pdf::v2_document(&target,receipt));
+        return match result{
+            Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+            Err(status)=>refusal(status,"PDF_EXTRACTION_FAILED")
+        };
+    }
+    if let Some(formats)=render_formats{
+        if !state.browser_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"BROWSER_DISABLED");}
+        let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
+        let request=render::Request{url:target.to_string(),wait_for:req.wait_for,only_main_content:req.only_main_content};
+        let budget=Duration::from_millis(req.timeout.unwrap_or(60000));
+        let result=tokio::spawn(async move{
+            let _slot=slot;
+            render::render_formats_at(&state.render_endpoint,request,budget,formats).await
+        }).await;
+        return match result{
+            Ok(Ok(mut value))=>{
+                value["success"]=json!(true);
+                value["research"]["cache_used"]=json!(false);
+                value["research"]["cache_supported"]=json!(false);
+                bounded(value)
+            },
+            Ok(Err("destination denied"))=>refusal(StatusCode::FORBIDDEN,"DESTINATION_DENIED"),
+            _=>refusal(StatusCode::BAD_GATEWAY,"RENDER_FAILED")
+        };
+    }
     let Ok(_slot)=state.slots.try_acquire() else {
         return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");
     };
@@ -233,7 +297,7 @@ async fn render_route(State(state):State<CandidateState>,headers:HeaderMap,body:
     }
 }
 
-fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>,pdf_enabled:bool,model_name:Option<String>)->Result<(Router,CandidateState),String> {
+fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>,pdf_enabled:bool,model_name:Option<String>,browser_enabled:bool)->Result<(Router,CandidateState),String> {
     if !(32..=256).contains(&token.len()) || token.chars().any(|c|c.is_control()||c.is_whitespace()) {
         return Err("invalid candidate token".into());
     }
@@ -247,7 +311,7 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         jobs:Mutex::new(HashMap::new())
     });
     let state=CandidateState{auth:auth.clone(),slots:Arc::new(Semaphore::new(4)),
-        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled,model_name,model_slot:Arc::new(Semaphore::new(1))};
+        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled,model_name,model_slot:Arc::new(Semaphore::new(1)),browser_enabled};
     let app=Router::new()
         .route("/health",get(|State(state):State<CandidateState>|async move{
             let job_store=match &state.batch{None=>"disabled",Some(b) if b.ready()=>"ready",Some(_)=>"degraded"};
@@ -277,7 +341,8 @@ pub async fn run_candidate()->Result<(),String> {
     let batch=std::env::var_os("CANDIDATE_JOB_DB_FILE").map(|path|batch::BatchState::open(std::path::Path::new(&path))).transpose()?;
     let pdf_enabled=std::env::var("CANDIDATE_PDF_ENABLED").as_deref()==Ok("1");
     let model_name=std::env::var("CANDIDATE_MODEL_NAME").ok();
-    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch,pdf_enabled,model_name)?;
+    let browser_enabled=std::env::var("CANDIDATE_BROWSER_ENABLED").as_deref()==Ok("1");
+    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch,pdf_enabled,model_name,browser_enabled)?;
     let listener=tokio::net::TcpListener::bind("127.0.0.1:3002").await.map_err(|e|e.to_string())?;
     let worker=state.batch.is_some().then(||tokio::spawn(batch::supervise(state)));
     let result=axum::serve(listener,app).with_graceful_shutdown(super::shutdown_signal()).await.map_err(|e|e.to_string());
@@ -372,7 +437,7 @@ mod tests {
                 Json(json!({"content":"<html><body><p>Stock 421.5</p></body></html>",
                     "pageStatusCode":200,"contentType":"text/html","url":body["url"]}))
             }))).await;
-        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape"),None,false,None).unwrap().0).await;
+        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape"),None,false,None,true).unwrap().0).await;
         let c=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
         assert_eq!(c.get(format!("{base}/health")).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
         assert_eq!(c.get(format!("{base}/health")).bearer_auth(TOKEN).header("Host","bad.example").send().await.unwrap().status(),StatusCode::FORBIDDEN);
@@ -393,6 +458,16 @@ mod tests {
             .json(&json!({"url":search["data"]["web"][0]["url"],"onlyMainContent":false}))
             .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
         assert!(result["data"]["markdown"].as_str().unwrap().contains("421.5"));
+        let rendered:Value=c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({
+            "url":"https://93.184.216.34/report","formats":["html","links"],"waitFor":50
+        })).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(rendered["success"],true);
+        assert!(rendered["data"]["html"].as_str().unwrap().contains("421.5"));
+        assert!(rendered["data"].get("markdown").is_none());
+        assert_eq!(rendered["data"]["metadata"]["contentType"],"text/html");
+        assert_eq!(c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({
+            "url":"https://93.184.216.34/report.pdf","formats":["markdown"],"parsers":["pdf"]
+        })).send().await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
         let static_body=json!({"url":"https://127.0.0.1/","formats":["markdown"],"onlyMainContent":true,
             "maxAge":0,"storeInCache":false,"timeout":1000});
         assert_eq!(c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&static_body)

@@ -146,6 +146,7 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
     saved_jobs={}
     env.pop("CANDIDATE_PDF_ENABLED",None)
     env.pop("CANDIDATE_MODEL_NAME",None)
+    env.pop("CANDIDATE_BROWSER_ENABLED",None)
     if "--batch" in sys.argv or "--live-jobs" in sys.argv:
         env["CANDIDATE_JOB_DB_FILE"]=str(pathlib.Path(td)/"jobs.sqlite")
     bad=subprocess.run([BIN],env=env,capture_output=True,timeout=5)
@@ -179,6 +180,8 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             assert call("/v2/scrape",payload={"url":"https://www.iana.org/help","formats":["summary"]})[0]==503
             assert call("/v2/map",payload={"url":"https://www.iana.org/help","limit":101})[0]==400
             assert call("/research/pdf",payload={"url":"https://www.iana.org/report.pdf"})[0]==503
+            assert call("/v2/scrape",payload={"url":"https://www.iana.org/report.pdf","formats":["markdown"],"parsers":["pdf"]})[0]==503
+            assert call("/v2/scrape",payload={"url":"https://www.iana.org/help","formats":["markdown"],"waitFor":100})[0]==503
             assert call("/research/pdf",payload={"url":"https://127.0.0.1/x.pdf"})[0]==403
             print("CANDIDATE_PROCESS_SMOKE_PASS: authenticated loopback, unsupported options and private destinations rejected")
             if "--live" in sys.argv:

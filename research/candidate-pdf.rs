@@ -39,31 +39,52 @@ async fn ocr_at(endpoint:&str,pdf:Bytes)->Result<Value,StatusCode>{
     parse_reply(&bytes).map_err(|_|StatusCode::BAD_GATEWAY)
 }
 
+pub(super) async fn document(state:&CandidateState,target:&url::Url,budget:Duration)->Result<Value,StatusCode>{
+    if !state.pdf_enabled{return Err(StatusCode::SERVICE_UNAVAILABLE);}
+    let deadline=tokio::time::Instant::now()+budget;
+    let bytes=tokio::time::timeout(budget.min(Duration::from_secs(25)),async{
+        render::check_dns(target).await.map_err(|_|StatusCode::FORBIDDEN)?;
+        let res=state.crawler.fetcher.fetch_once(target,&FetchOptions{
+            timeout:Some(Duration::from_secs(20)),..Default::default()
+        }).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+        if res.status!=200||res.final_url!=*target||res.mime().as_deref()!=Some("application/pdf")||
+            res.body.len()>MAX_PDF||!res.body.starts_with(b"%PDF-"){
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        Ok::<_,StatusCode>(res.body)
+    }).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)??;
+    tokio::time::timeout_at(deadline,ocr_at(ENDPOINT,bytes)).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)?
+}
+
+pub(super) fn v2_document(target:&url::Url,receipt:Value)->Result<Value,StatusCode>{
+    if receipt["unresolved_pages"]!=0{return Err(StatusCode::UNPROCESSABLE_ENTITY);}
+    let pages=receipt["pages"].as_array().ok_or(StatusCode::BAD_GATEWAY)?;
+    let mut text=String::new();
+    for p in pages{
+        let page=p["page"].as_u64().ok_or(StatusCode::BAD_GATEWAY)?;
+        let body=p["text"].as_str().ok_or(StatusCode::BAD_GATEWAY)?;
+        text.push_str(&format!("<!-- PDF page {page} -->\n{body}\n\n"));
+    }
+    if pages.iter().all(|p|p["text"].as_str().is_none_or(|s|s.trim().is_empty())){
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let warning=if receipt["ocr_attempted"]==0{
+        "PDF parsed locally; page text and reading order are not independently verified."
+    }else{
+        "PDF includes OCR text; numbers, layout and completeness are not independently verified. See per-page evidence."
+    };
+    Ok(json!({"markdown":text,"metadata":{"url":target.as_str(),"sourceURL":target.as_str(),
+        "statusCode":200,"contentType":"application/pdf","numPages":pages.len()},
+        "source":"local","researchSourceVerified":false,"warning":warning,"researchPdf":receipt}))
+}
+
 pub(super) async fn extract(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response{
     let req:PdfRequest=match decode(&headers,&body){Ok(r)=>r,Err(r)=>return r};
     let target=match static_target(&req.url){Ok(u)=>u,Err(s)=>return refusal(s,"DESTINATION_DENIED")};
     if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
     let Ok(_slot)=state.slots.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
-    let fetched=tokio::time::timeout(Duration::from_secs(25),async{
-        render::check_dns(&target).await.map_err(|_|StatusCode::FORBIDDEN)?;
-        let res=state.crawler.fetcher.fetch_once(&target,&FetchOptions{
-            timeout:Some(Duration::from_secs(20)),..Default::default()
-        }).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
-        if res.status!=200||res.final_url!=target||res.mime().as_deref()!=Some("application/pdf")||
-            res.body.len()>MAX_PDF||!res.body.starts_with(b"%PDF-"){
-            return Err(StatusCode::UNPROCESSABLE_ENTITY);
-        }
-        Ok::<_,StatusCode>(res.body)
-    }).await;
-    let bytes=match fetched{
-        Ok(Ok(bytes))=>bytes,
-        Ok(Err(s))=>return refusal(s,"PDF_FETCH_FAILED"),
-        Err(_)=>return refusal(StatusCode::GATEWAY_TIMEOUT,"PDF_FETCH_TIMEOUT")
-    };
-    match ocr_at(ENDPOINT,bytes).await{
+    match document(&state,&target,Duration::from_secs(110)).await{
         Ok(data)=>{
-            // A completed OCR operation is not verified source text.
-            // Preserve per-page provenance; incomplete pages are explicit.
             let complete=data["unresolved_pages"]==0;
             let value=json!({"success":complete,"source_verified":false,"url":target.as_str(),"data":data});
             let mut response=bounded(value);
@@ -78,6 +99,22 @@ pub(super) async fn extract(State(state):State<CandidateState>,headers:HeaderMap
 mod tests{
     use super::*;
     use axum::{Router,routing::post};
+    #[test]
+    fn v2_pdf_preserves_page_order_and_evidence(){
+        let receipt=json!({"pages":[{"page":1,"source":"native","text":"Native 42","warning":null},
+            {"page":2,"source":"ocr","text":"OCR 1.2","native_text":"","warning":"unverified"}],
+            "unresolved_pages":0,"ocr_attempted":1,"source_verified":false});
+        let target=url::Url::parse("https://example.org/test.pdf").unwrap();
+        let doc=v2_document(&target,receipt.clone()).unwrap();
+        assert!(doc["markdown"].as_str().unwrap().contains("Native 42\n\n<!-- PDF page 2 -->\nOCR 1.2"));
+        assert_eq!(doc["researchPdf"],receipt);
+        assert_eq!(doc["metadata"]["numPages"],2);
+        assert!(doc["warning"].as_str().unwrap().contains("OCR text"));
+        let mut incomplete=receipt;
+        incomplete["unresolved_pages"]=json!(1);
+        assert_eq!(v2_document(&target,incomplete).unwrap_err(),StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     #[tokio::test]
     async fn fixed_worker_contract_rejects_invalid_result(){
         let app=Router::new().route("/extract",post(|headers:HeaderMap,body:Bytes|async move{

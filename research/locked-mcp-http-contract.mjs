@@ -94,6 +94,8 @@ try{
     ['firecrawl_scrape',{url:fixtureUrl,formats:['summary']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'What is the value?'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'Quote the value',mode:'directQuote'}},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:fixtureUrl,formats:['html','links'],waitFor:100},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:'https://example.org/test.pdf',formats:['markdown'],parsers:['pdf']},'POST','/v2/scrape'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2},'POST','/v2/search'],
     ['firecrawl_map',{url:fixtureUrl,limit:2},'POST','/v2/map'],
     ['firecrawl_crawl',{url:fixtureUrl,limit:2,maxConcurrency:1,scrapeOptions:{formats:['markdown']}},'POST','/v2/crawl'],
