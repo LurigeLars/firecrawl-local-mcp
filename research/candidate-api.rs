@@ -218,9 +218,13 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
             _=>refusal(StatusCode::BAD_GATEWAY,"RENDER_FAILED")
         };
     }
-    let Ok(_slot)=state.slots.try_acquire() else {
+    let Ok(slot)=state.slots.clone().try_acquire_owned() else {
         return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");
     };
+    // Own admission until blocking conversion finishes, even if the HTTP
+    // caller disconnects. Model and automatic browser dispatch share it.
+    let result=tokio::spawn(async move{
+    let _slot=slot;
     if let Some((mode,prompt))=model_req{
         let Some(name)=state.model_name.as_deref()else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"MODEL_DISABLED")};
         let Ok(_model_slot)=state.model_slot.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"MODEL_BUSY")};
@@ -249,6 +253,11 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         },
         Err(status)=>refusal(status,"STATIC_SCRAPE_FAILED")
     }
+    }).await;
+    match result{
+        Ok(response)=>response,
+        Err(_)=>refusal(StatusCode::BAD_GATEWAY,"SCRAPE_TASK_FAILED")
+    }
 }
 
 async fn static_document(state:&CandidateState,target:url::Url,timeout:u64)->Result<Value,StatusCode>{
@@ -257,12 +266,14 @@ async fn static_document(state:&CandidateState,target:url::Url,timeout:u64)->Res
 
 async fn static_document_with_options(state:&CandidateState,target:url::Url,opts:ScrapeOptions)->Result<Value,StatusCode>{
     let budget=Duration::from_millis(opts.timeout.unwrap_or(30000));
-    tokio::time::timeout(budget,async {
+    let deadline=tokio::time::Instant::now()+budget;
+    let direct=tokio::time::timeout(budget,async {
         render::check_dns(&target).await.map_err(|_|StatusCode::FORBIDDEN)?;
         let mut data=cloud::scrape_with_fallback(&state.auth.engine,&state.auth.cloud,target.as_str(),&opts).await
             .map_err(|e|match e.code {
                 "BLOCKED_TARGET"=>StatusCode::FORBIDDEN,
                 "DOCUMENT_ISOLATION_REQUIRED"=>StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "BROWSER_RENDER_REQUIRED"=>StatusCode::PRECONDITION_REQUIRED,
                 _=>StatusCode::BAD_GATEWAY
             })?;
         // Do not promote incomplete, blocked or non-HTML results to success.
@@ -280,7 +291,24 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
         // Provenance, not an assertion of source completeness.
         data["researchSourceVerified"]=json!(false);
         Ok::<_,StatusCode>(data)
-    }).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)?
+    }).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)?;
+    if !matches!(direct,Err(StatusCode::PRECONDITION_REQUIRED)){return direct;}
+    if !state.browser_enabled{return Err(StatusCode::SERVICE_UNAVAILABLE);}
+    let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero(){return Err(StatusCode::GATEWAY_TIMEOUT);}
+    let (formats,unsupported)=opts.resolved_formats();
+    if !unsupported.is_empty(){return Err(StatusCode::BAD_REQUEST);}
+    let mut result=render::render_auto_at(&state.render_endpoint,render::Request{
+        url:target.to_string(),wait_for:0,only_main_content:opts.only_main_content
+    },remaining,formats).await.map_err(|e|if e=="destination denied"{
+        StatusCode::FORBIDDEN
+    }else{StatusCode::BAD_GATEWAY})?;
+    let receipt=result["research"].clone();
+    let mut data=result["data"].take();
+    if !data.is_object(){return Err(StatusCode::BAD_GATEWAY);}
+    data["researchBrowser"]=receipt;
+    data["researchBrowser"]["automatic"]=json!(true);
+    Ok(data)
 }
 
 async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
@@ -420,13 +448,24 @@ mod tests {
             .route("/page",get(||async{axum::response::Html("<html><body><p>Native HTML fixture 42.</p></body></html>")}))
             .route("/pdf",get(||async{([("content-type","application/pdf")],"%PDF-invalid-fixture")}))
             .route("/mislabelled",get(||async{([("content-type","text/html")],"%PDF-invalid-fixture")}))
-            .route("/redirect",get(||async{axum::response::Redirect::temporary("/pdf")}));
+            .route("/redirect",get(||async{axum::response::Redirect::temporary("/pdf")}))
+            .route("/shell",get(||async{axum::response::Html("<html><body><div id=\"root\">Loading...</div><script src=\"app.js\"></script></body></html>")}))
+            .route("/challenge",get(||async{(StatusCode::FORBIDDEN,axum::response::Html("<html><body><p>Verify you are human</p></body></html>"))}))
+            .route("/rate-limit",get(||async{(StatusCode::TOO_MANY_REQUESTS,axum::response::Html("<html><body><p>Verify you are human</p></body></html>"))}));
         let (base,task)=spawn(app).await;
         let engine=Engine::new(EngineConfig{policy:NetworkPolicy::AllowPrivate,user_agent:None,
             browser:BrowserMode::Never}).unwrap().require_html_only();
         let opts=ScrapeOptions::default();
         let doc=engine.scrape(&format!("{base}/page"),&opts).await.unwrap();
         assert!(doc["markdown"].as_str().unwrap().contains("Native HTML fixture 42."));
+        for path in ["/shell","/challenge"]{
+            let err=engine.scrape(&format!("{base}{path}"),&opts).await.unwrap_err();
+            assert_eq!(err.code,"BROWSER_RENDER_REQUIRED");
+        }
+        match engine.scrape(&format!("{base}/rate-limit"),&opts).await{
+            Ok(doc)=>assert_eq!(doc["metadata"]["statusCode"],429),
+            Err(err)=>assert_ne!(err.code,"BROWSER_RENDER_REQUIRED")
+        }
         for path in ["/pdf","/mislabelled","/redirect"]{
             let err=engine.scrape(&format!("{base}{path}"),&opts).await.unwrap_err();
             assert_eq!(err.code,"DOCUMENT_ISOLATION_REQUIRED");

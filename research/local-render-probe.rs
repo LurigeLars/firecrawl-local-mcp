@@ -1,6 +1,6 @@
 //! Research-only bridge to the existing one-shot Playwright router.
 //! Camofox remains an independent gateway tool. No browser sessions or keys.
-use firecrawl_local::{cloud, guard::{check_url, check_ip, NetworkPolicy}, scrape::{process_html, Format, ScrapeOptions}};
+use firecrawl_local::{browser::{needs_browser,looks_like_nav_only_shell},cloud, guard::{check_url, check_ip, NetworkPolicy}, scrape::{process_html, Format, ScrapeOptions}};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{io::{self, Read}, time::Duration};
@@ -54,6 +54,14 @@ pub(crate) async fn render_at(endpoint: &str, req: Request, budget: Duration) ->
 }
 
 pub(crate) async fn render_formats_at(endpoint:&str,req:Request,budget:Duration,formats:Vec<Format>)->Result<Value,&'static str>{
+    render_checked_at(endpoint,req,budget,formats,false).await
+}
+
+pub(crate) async fn render_auto_at(endpoint:&str,req:Request,budget:Duration,formats:Vec<Format>)->Result<Value,&'static str>{
+    render_checked_at(endpoint,req,budget,formats,true).await
+}
+
+async fn render_checked_at(endpoint:&str,req:Request,budget:Duration,mut formats:Vec<Format>,automatic:bool)->Result<Value,&'static str>{
     let target = public_url(&req.url)?;
     if req.wait_for > 10_000 || budget.is_zero() || budget.as_millis() <= u128::from(req.wait_for) { return Err("waitFor exceeds research budget"); }
     let client = reqwest::Client::builder().no_proxy()
@@ -98,11 +106,22 @@ pub(crate) async fn render_formats_at(endpoint:&str,req:Request,budget:Duration,
     // completion. The network deadline does not bound the blocking parser.
     let status=rendered.page_status_code;
     let url=landed.to_string();
+    // For automatic fallback, reuse upstream shell detection on the returned
+    // HTML. Raw HTML is only kept internally unless the caller requested it.
+    let added_raw=automatic&&!formats.contains(&Format::RawHtml);
+    if added_raw{formats.push(Format::RawHtml);}
     let (mut data,mut metadata,markdown)=tokio::task::spawn_blocking(move||
         process_html(rendered.content,&landed,&opts,&formats))
         .await.map_err(|_|"HTML conversion failed")?.map_err(|_|"HTML conversion failed")?;
     if markdown.trim().is_empty() || cloud::looks_like_bot_check(&markdown){
         return Err("empty or blocked rendered content");
+    }
+    if automatic{
+        let raw=data.get("rawHtml").and_then(Value::as_str).ok_or("missing rendered HTML")?;
+        if needs_browser(raw,&markdown)||looks_like_nav_only_shell(raw,&markdown){
+            return Err("rendered content still appears incomplete");
+        }
+        if added_raw{data.remove("rawHtml");}
     }
     metadata.insert("url".into(),json!(url));
     metadata.insert("sourceURL".into(),json!(target.as_str()));
@@ -178,6 +197,26 @@ mod tests {
         assert_eq!(out["data"]["metadata"]["sourceURL"],TARGET);
         assert_eq!(out["data"]["source"],"local");
         assert_eq!(out["research"]["source_verified"], false);
+    }
+
+    #[tokio::test]
+    async fn automatic_render_preserves_formats_and_rejects_remaining_shell() {
+        for (html,success) in [
+            ("<html><body><p>Stock report 421.5 million barrels</p></body></html>",true),
+            ("<html><body><div id=\"root\">Loading...</div><script src=\"app.js\"></script></body></html>",false)
+        ]{
+            let router=Router::new().route("/scrape",post(move||async move{Json(json!({
+                "content":html,"pageStatusCode":200,"contentType":"text/html","url":TARGET
+            }))}));
+            let (url,task)=spawn(router).await;
+            let result=render_auto_at(&url,req(),Duration::from_secs(3),vec![Format::Markdown]).await;
+            task.abort();
+            if success{
+                let doc=result.unwrap();
+                assert!(doc["data"]["markdown"].as_str().unwrap().contains("421.5"));
+                assert!(doc["data"].get("rawHtml").is_none());
+            }else{assert_eq!(result.unwrap_err(),"rendered content still appears incomplete");}
+        }
     }
 
     #[tokio::test]
