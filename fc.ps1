@@ -1,6 +1,6 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'migrate-nuq-postgres', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini')][string]$Action = 'status', [string]$Service = '')
+param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'migrate-nuq-postgres', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini', 'rust-promote', 'rust-rollback')][string]$Action = 'status', [string]$Service = '', [string]$AcceptedRevision = '', [string]$ApiDigest = '', [string]$DocumentDigest = '', [string]$McpDigest = '')
 
 $root = $PSScriptRoot
 # Stamped into image labels (compose x-image-revision) so Docker-MCP's audit can spot stale images.
@@ -83,12 +83,19 @@ function Get-RustMaintenanceMode {
     if ($ActionName -eq 'maintain-stateless' -and $ServiceName -cin @('mcp','playwright-service','browser-session-service','playwright-public-proxy-service')) { return $true }
     throw 'Action is not reviewed for active Rust; maintenance refused.'
 }
-$RustMode = Get-RustMaintenanceMode -ActionName $Action -ServiceName $Service -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
-if ($RustMode) {
-    if (-not $public -or -not $PublicProxyConfigured) { throw 'Reviewed Rust production profiles are unavailable.' }
-    $compose += @('-f',"$root\research\compose.rust-production-plan.yaml")
+$TransitionAction = $Action -in @('rust-promote','rust-rollback')
+$RustMode = $false
+if ($TransitionAction) {
+    if (-not $public -or -not $PublicProxyConfigured) { throw 'Reviewed Rust production profiles unavailable.' }
+    . (Join-Path $root 'research\rust-transition.ps1')
 } else {
-    Assert-LegacyEngineAction -ActionName $Action -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+    $RustMode = Get-RustMaintenanceMode -ActionName $Action -ServiceName $Service -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+    if ($RustMode) {
+        if (-not $public -or -not $PublicProxyConfigured) { throw 'Reviewed Rust production profiles are unavailable.' }
+        $compose += @('-f',"$root\research\compose.rust-production-plan.yaml")
+    } else {
+        Assert-LegacyEngineAction -ActionName $Action -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+    }
 }
 
 function Assert-UpstreamFirecrawlPin([switch]$AllowHeadMismatch) {
@@ -622,7 +629,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres")
+$composeActions = @("rust-promote", "rust-rollback", "refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -639,7 +646,7 @@ try {
     if ($Action -in $composeActions) {
         # Only the public proxy deployment needs the existing DPAPI-backed
         # post_start hook; preserve all other reviewed secret boundaries.
-        if ($Action -in @("deploy-proxy", "deploy-api", "refresh-searxng") -or $Action -eq "migrate-nuq-postgres" -or
+        if ($Action -in @("rust-promote", "rust-rollback", "deploy-proxy", "deploy-api", "refresh-searxng") -or $Action -eq "migrate-nuq-postgres" -or
             ($Action -eq "maintain-stateless" -and $Service -in @("api", "playwright-public-proxy-service"))) {
             Set-RuntimeHookSecrets -UseRealSecrets $true
         } else {
@@ -699,6 +706,14 @@ function Assert-StatefulComposeDataSafety {
 }
 
 switch ($Action) {
+    'rust-promote' {
+        Assert-UpstreamFirecrawlPin
+        Invoke-RustPromotion -LegacyCompose $compose -ProjectRoot $root -Revision $AcceptedRevision -ApiDigest $ApiDigest -DocumentDigest $DocumentDigest -McpDigest $McpDigest
+    }
+    'rust-rollback' {
+        Assert-UpstreamFirecrawlPin
+        Invoke-RustRollback -LegacyCompose $compose -ProjectRoot $root
+    }
     'refresh-playwright-router' {
         Assert-UpstreamFirecrawlPin
         if (-not $PublicProxyConfigured) { throw 'Playwright proxy profile is not enabled.' }

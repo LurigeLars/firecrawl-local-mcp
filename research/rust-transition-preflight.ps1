@@ -1,7 +1,7 @@
 # Read-only production transition preflight. No Docker mutations or job data.
 # The eventual cutover must repeat these checks after ingress is quiesced.
 [CmdletBinding()]
-param()
+param([switch]$Library)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -78,6 +78,7 @@ function Get-LegacyInventoryReceipt {
     return $images
 }
 
+if ($Library) { return }
 $images = Get-LegacyInventoryReceipt
 $queues = Get-LegacyQueueReceipt
 $idle = @($queues.Values | Where-Object { $_ -ne 0 }).Count -eq 0
