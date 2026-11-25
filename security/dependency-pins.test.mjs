@@ -24,8 +24,9 @@ test('public MCP allows only the Docker internal gateway hostname (no wildcard)'
 });
 
 test('public gateway and MCP runtime strip unused vulnerable npm CLI and pin patched Alpine image', () => {
+  assert.match(dockerfile, /^FROM node:26.13.1-alpine3.23@sha256:39d8c143e60e99ae98f014bebea1e72fc96d3c9bdf9504bc3a27af5c05bfa39f$/m);
+  assert.match(gatewayDockerfile, /^FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5$/m);
   for (const source of [dockerfile, gatewayDockerfile]) {
-    assert.match(source, /^FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5$/m);
     assert.match(source, /apk upgrade --no-cache/);
     assert.match(source, /rm -rf \/usr\/local\/lib\/node_modules\/npm/);
     assert.match(source, /test ! -e \/usr\/local\/lib\/node_modules\/npm/);

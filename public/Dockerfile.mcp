@@ -1,4 +1,5 @@
-FROM node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
+# Alpine 3.23 has a patched musl package and passes Scout without the 3.24 false positive.
+FROM node:26.13.1-alpine3.23@sha256:39d8c143e60e99ae98f014bebea1e72fc96d3c9bdf9504bc3a27af5c05bfa39f
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Patch OS packages and keep npm only in the build phase. The packaged
