@@ -89,7 +89,8 @@ const server=http.createServer(async(req,res)=>{
       const names=(body?.formats??[]).map(x=>typeof x==='string'?x:x?.type);
       data={success:true,data:{...doc,
         ...(names.includes('summary')?{summary:'Synthetic summary'}:{}),
-        ...(names.includes('query')?{answer:'42'}:{})
+        ...(names.includes('query')?{answer:'42'}:{}),
+        ...(names.includes('json')?{json:{value:42}}:{})
       }};
     }else if(req.method==='POST'&&u.pathname==='/v2/search'){
       data={success:true,data:{web:[{url:fixtureUrl,title:'Fixture',description:'Synthetic hit'}]}};
@@ -231,12 +232,15 @@ try{
     ['firecrawl_scrape',{url:fixtureUrl,formats:['markdown']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl+'?year=2026#data',formats:['markdown'],includeTags:['article'],excludeTags:['.ads']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['summary']},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:fixtureUrl,formats:['json'],jsonOptions:{prompt:'Extract value',schema:{
+      type:'object',properties:{value:{type:'number'}},required:['value'],additionalProperties:false}}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'What is the value?'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'Quote the value',mode:'directQuote'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['html','links'],waitFor:100},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:'https://example.org/test.pdf',formats:['markdown'],parsers:['pdf']},'POST','/v2/scrape'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2},'POST','/v2/search'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2,scrapeOptions:{formats:['markdown'],includeTags:['article']}},'POST','/v2/search'],
+    ['firecrawl_search',{query:'synthetic fixture',limit:2,scrapeOptions:{formats:['query'],queryOptions:{prompt:'What is the value?'}}},'POST','/v2/search'],
     ['firecrawl_map',{url:fixtureUrl,limit:2},'POST','/v2/map'],
     ['firecrawl_crawl',{url:fixtureUrl,limit:2,maxConcurrency:1,scrapeOptions:{formats:['markdown']}},'POST','/v2/crawl'],
     ['firecrawl_check_crawl_status',{id},'GET','/v2/crawl/'+id],
@@ -250,8 +254,14 @@ try{
     const captured=traffic.slice(offset);
     if(name==='firecrawl_search'&&args.scrapeOptions){
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;
-      assert.deepEqual(request?.scrapeOptions?.formats,args.scrapeOptions.formats);
+      if(args.scrapeOptions.queryOptions){
+        assert.deepEqual(request?.scrapeOptions?.formats,[{type:'query',prompt:args.scrapeOptions.queryOptions.prompt,mode:'freeform'}]);
+      }else assert.deepEqual(request?.scrapeOptions?.formats,args.scrapeOptions.formats);
       assert.deepEqual(request?.scrapeOptions?.includeTags,args.scrapeOptions.includeTags);
+    }
+    if(args.jsonOptions){
+      const request=captured.find(x=>x.method===method&&x.path===path)?.body;
+      assert.deepEqual(request?.formats,[{type:'json',prompt:args.jsonOptions.prompt,schema:args.jsonOptions.schema}]);
     }
     if(args.includeTags){
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;
