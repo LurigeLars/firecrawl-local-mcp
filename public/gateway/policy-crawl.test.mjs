@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseAllowedTools, rememberCrawlRequest, rewriteResponse, urlSafetyReason } from './policy.mjs';
+import { parseAllowedTools, rememberCrawlRequest, rewriteResponse, urlSafetyReason, compactToolResult } from './policy.mjs';
 
 const allowedTools = parseAllowedTools();
 
@@ -135,4 +135,24 @@ test('new Camoufox read tool uses same public URL/private IP safety validation',
   assert.match(await urlSafetyReason({ name: 'firecrawl_camofox_read', arguments: { url: 'http://127.0.0.1:9377/health' } }), /Private or local network/);
   assert.match(await urlSafetyReason({ name: 'firecrawl_camofox_read', arguments: { url: 'http://localhost/' } }), /Private or local network/);
   assert.match(await urlSafetyReason({ name: 'firecrawl_camofox_read', arguments: { url: 'https://u:p@5e.tools/adventure.html' } }), /credentials/);
+});
+
+test('model result compaction retains bounded uncertainty and validation receipt', () => {
+  const receipt = {source:'configured-llm-proxy', source_verified:false, schema_validated:true,
+    schema_contract:'bounded-typed-subset-v1', provider:'gemini', provider_completion_verified:false,
+    provider_reported_complete:true, input_proxy_truncated:false};
+  const payload = {json:{stock:421.5}, metadata:{url:'https://example.org/'},
+    warning:'Model-generated extraction', researchModel:{...receipt, arbitrary:'x'.repeat(10000)}};
+  const raw = {content:[{type:'text',text:JSON.stringify(payload)}], structuredContent:payload};
+  const compact = compactToolResult(raw);
+  const data = JSON.parse(compact.content[0].text);
+  assert.deepEqual(data.researchModel,receipt);
+  assert.deepEqual(data.json,{stock:421.5});
+  assert.equal(data.source.url,'https://example.org/');
+  assert.equal(compact.structuredContent,undefined);
+  const invalid = {...payload,researchModel:{...receipt,source_verified:true}};
+  assert.equal(JSON.parse(compactToolResult({content:[{type:'text',text:JSON.stringify(invalid)}]}).content[0].text).researchModel,undefined);
+  const legacy = {answer:'42',metadata:{url:'https://example.org/'}};
+  assert.deepEqual(JSON.parse(compactToolResult({content:[{type:'text',text:JSON.stringify(legacy)}]}).content[0].text),
+    {answer:'42',source:{url:'https://example.org/'}});
 });

@@ -220,6 +220,24 @@ export function wantsCompactResult(params) {
 }
 
 const KEEP_METADATA = ['title', 'url', 'sourceURL', 'statusCode', 'language', 'contentType'];
+
+// Preserve the candidate's small typed transport receipt, not arbitrary
+// model-produced metadata. Completion and schema validation do not prove
+// factual correctness or source completeness.
+function compactModelReceipt(data) {
+  const value = data?.researchModel;
+  if (!value || value.source !== 'configured-llm-proxy' || value.source_verified !== false) return null;
+  const receipt = { source: 'configured-llm-proxy', source_verified: false };
+  for (const key of ['schema_validated', 'provider_completion_verified', 'provider_reported_complete',
+    'input_proxy_truncated', 'quote_spans_verified']) {
+    if (typeof value[key] === 'boolean') receipt[key] = value[key];
+  }
+  if (['gemini', 'ollama'].includes(value.provider)) receipt.provider = value.provider;
+  if (value.schema_contract === 'bounded-typed-subset-v1') receipt.schema_contract = value.schema_contract;
+  if (value.quote_unit === 'source_line') receipt.quote_unit = value.quote_unit;
+  return receipt;
+}
+
 export function compactToolResult(result) {
   const item = result?.content?.[0];
   if (result?.isError || item?.type !== 'text' || typeof item.text !== 'string') return result;
@@ -234,6 +252,8 @@ export function compactToolResult(result) {
     compact.source = source;
   }
   if (!('answer' in compact || 'json' in compact || 'summary' in compact)) return result;
+  const receipt = compactModelReceipt(data);
+  if (receipt) compact.researchModel = receipt;
   const { structuredContent: _structuredContent, ...rest } = result;
   return { ...rest, content: [{ ...item, text: JSON.stringify(compact) }, ...result.content.slice(1)] };
 }
