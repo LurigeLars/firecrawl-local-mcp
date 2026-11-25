@@ -38,13 +38,13 @@ impl Default for Policy{
 }
 impl Policy{
     fn formats(&self)->Result<Vec<Format>,StatusCode>{
-        if self.formats.is_empty()||self.formats.len()>4||
+        if self.formats.is_empty()||self.formats.len()>5||
             self.formats.iter().collect::<HashSet<_>>().len()!=self.formats.len(){
             return Err(StatusCode::BAD_REQUEST);
         }
         self.formats.iter().map(|f|match f.as_str(){
             "markdown"=>Ok(Format::Markdown),"html"=>Ok(Format::Html),
-            "rawHtml"=>Ok(Format::RawHtml),"links"=>Ok(Format::Links),_=>Err(StatusCode::BAD_REQUEST)
+            "rawHtml"=>Ok(Format::RawHtml),"links"=>Ok(Format::Links),"images"=>Ok(Format::Images),_=>Err(StatusCode::BAD_REQUEST)
         }).collect()
     }
     pub(super) fn scope(&self,seed:&Url)->Result<Scope,StatusCode>{
