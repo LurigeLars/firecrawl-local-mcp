@@ -18,13 +18,13 @@ function Invoke-FirecrawlSearchBackendRefresh {
     if ($LASTEXITCODE -ne 0 -or $TargetImage -cnotmatch '^searxng/searxng:[0-9]{4}[.][0-9]{1,2}[.][0-9]{1,2}-[0-9a-f]{7,}$') {
         throw 'Compose does not pin SearXNG to an exact versioned tag.'
     }
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $CurrentImageId -Repository 'searxng/searxng' -AllowMissing
     & docker @ComposeArguments pull $Service
     if ($LASTEXITCODE -ne 0) { throw 'Pulling the reviewed SearXNG image failed; running container untouched.' }
     $TargetId = [string](& docker image inspect --format '{{.Id}}' $TargetImage)
     if ($LASTEXITCODE -ne 0 -or $TargetId -cnotmatch '^sha256:[a-f0-9]{64}$') {
         throw 'Reviewed SearXNG image is not present after pull.'
     }
-    $Rollback = 'none'
     if ([string]$CurrentImageId -cne $TargetId) {
         # Exact local image SHA is checked before and after fail-closed Scout scan.
         & docker scout cves --only-severity critical,high --only-fixed --exit-code ("local://" + $TargetId) | Out-Null
@@ -33,7 +33,7 @@ function Invoke-FirecrawlSearchBackendRefresh {
         if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne $TargetId) {
             throw 'SearXNG image identity changed after scan.'
         }
-        $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $CurrentImageId -Repository 'searxng/searxng'
+        Assert-FirecrawlRollbackImage -Container $Container -BaselineId $CurrentImageId -RollbackTag $Rollback -RollbackId $CurrentImageId
         & docker @ComposeArguments up -d --no-deps --no-build --force-recreate $Service
         if ($LASTEXITCODE -ne 0) { throw 'Scoped SearXNG recreation failed.' }
     }

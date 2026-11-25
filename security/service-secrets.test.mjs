@@ -23,9 +23,11 @@ test('one-service refreshes use the running image as baseline instead of hard-co
     const source = readFileSync(new URL(`./${name}.ps1`, import.meta.url), 'utf8');
     assert.match(source, /Get-FirecrawlRunningImage -Container \$Container/, name);
     assert.match(source, /Save-FirecrawlRollbackImage -Container \$Container -BaselineId/, name);
-    // Only the unused RabbitMQ branch of refresh-ephemeral still names an exact image id.
     const ids = (source.match(/'sha256:[0-9a-f]{64}'/g) || []).filter(id => !source.includes(`$RabbitTarget = ${id}`));
-    assert.deepEqual(ids, [], `${name} hard-codes an image id`);
+    assert.deepEqual(ids, [], name + ' contains an unexpected literal image id');
+    const reservation = source.split('\n').find(line => line.includes('Save-FirecrawlRollbackImage -Container'));
+    if (name === 'refresh-ephemeral') assert.doesNotMatch(reservation, /-AllowMissing/);
+    else assert.match(reservation, /-AllowMissing/);
     assert.doesNotMatch(source, /node:\d+\[?\.\]?\d+\[?\.\]?\d+-alpine@sha256:[0-9a-f]{64}|\^v\d+\[\.\]/, `${name} hard-codes a Node pin`);
   }
 });

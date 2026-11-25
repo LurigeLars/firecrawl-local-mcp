@@ -147,8 +147,9 @@ test('MCP rollout requires a verified image ID, recent zero-high Scout scan and 
   // The Alpine-based one-service refreshes pass the same reviewed VEX and accept only its author.
   for (const name of ['refresh-node-helpers', 'refresh-public-gateway', 'refresh-node-runtime', 'refresh-ephemeral']) {
     const refresh = read(`security/${name}.ps1`);
-    assert.equal((refresh.match(/scout cves /g) || []).length, 1, name);
-    assert.match(refresh, /scout cves --only-severity critical,high --only-fixed --exit-code --vex-location \(Join-Path \$PSScriptRoot 'vex\/firecrawl-mcp\.openvex\.json'\) --vex-author 'firecrawl-local-mcp maintainers' /, name);
+    const expectedScans = 1;
+    assert.equal((refresh.match(/scout cves /g) || []).length, expectedScans, name);
+    assert.equal((refresh.match(/scout cves --only-severity critical,high --only-fixed --exit-code --vex-location \(Join-Path \$PSScriptRoot 'vex\/firecrawl-mcp\.openvex\.json'\) --vex-author 'firecrawl-local-mcp maintainers' /g) || []).length, expectedScans, name);
   }
   assert.match(staged, /if \(\$null -ne \$RawText\)/);
   assert.match(staged, /image_id = \$Id/);

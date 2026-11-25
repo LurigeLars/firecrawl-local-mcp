@@ -251,3 +251,6 @@ jobs:
       - name: Verify scoped staged build, CVE and rollback gates without Docker
         shell: pwsh
         run: ./security/staged-mcp-image.test.ps1
+      - name: Verify rollback reservation before builds
+        shell: pwsh
+        run: ./security/refresh-rollback.test.ps1
