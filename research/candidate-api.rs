@@ -465,11 +465,26 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
     let direct=tokio::time::timeout(budget,async {
         render::check_dns(&target).await.map_err(|_|StatusCode::FORBIDDEN)?;
         let mut data=cloud::scrape_with_fallback(&state.auth.engine,&state.auth.cloud,target.as_str(),&opts).await
-            .map_err(|e|match e.code {
-                "BLOCKED_TARGET"=>StatusCode::FORBIDDEN,
-                "DOCUMENT_ISOLATION_REQUIRED"=>StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "BROWSER_RENDER_REQUIRED"=>StatusCode::PRECONDITION_REQUIRED,
-                _=>StatusCode::BAD_GATEWAY
+            .map_err(|e|{
+                // Research debug builds emit only fixed categories, never
+                // destination, remote content or transport error text.
+                #[cfg(debug_assertions)]
+                eprintln!("CANDIDATE_BROWSER_DIAG engine={}",match e.code{
+                    "BLOCKED_TARGET"=>"blocked_target",
+                    "DOCUMENT_ISOLATION_REQUIRED"=>"document",
+                    "BROWSER_RENDER_REQUIRED"=>"render_required",
+                    "FETCH_FAILED"=>"fetch_failed",
+                    "SCRAPE_TIMEOUT"=>"timeout",
+                    "RESPONSE_TOO_LARGE"=>"response_too_large",
+                    "PARSE_FAILED"=>"parse_failed",
+                    _=>"other"
+                });
+                match e.code {
+                    "BLOCKED_TARGET"=>StatusCode::FORBIDDEN,
+                    "DOCUMENT_ISOLATION_REQUIRED"=>StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "BROWSER_RENDER_REQUIRED"=>StatusCode::PRECONDITION_REQUIRED,
+                    _=>StatusCode::BAD_GATEWAY
+                }
             })?;
         // Do not promote incomplete, blocked or non-HTML results to success.
         let markdown=data["markdown"].as_str().unwrap_or("");
@@ -478,6 +493,12 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
             markdown.trim().is_empty() || cloud::looks_like_bot_check(markdown) ||
             !data["metadata"]["contentType"].as_str().unwrap_or("").split(';').next()
                 .unwrap_or("").trim().eq_ignore_ascii_case("text/html") {
+            #[cfg(debug_assertions)]
+            eprintln!("CANDIDATE_BROWSER_DIAG static_rejected status={} local={} blocked={} warning={} error={} empty={} challenge={} html={}",
+                data["metadata"]["statusCode"].as_u64().unwrap_or(0),data["source"]=="local",
+                data["blocked"]==true,!data["warning"].is_null(),!data["error"].is_null(),
+                markdown.trim().is_empty(),cloud::looks_like_bot_check(markdown),
+                data["metadata"]["contentType"].as_str().unwrap_or("").split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/html"));
             return Err(StatusCode::BAD_GATEWAY);
         }
         let landed=render::public_url(data["metadata"]["url"].as_str().ok_or(StatusCode::BAD_GATEWAY)?)
@@ -496,9 +517,21 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
     let mut result=render::render_auto_at(&state.render_endpoint,render::Request{
         url:target.to_string(),wait_for:0,only_main_content:opts.only_main_content,
         include_tags:opts.include_tags,exclude_tags:opts.exclude_tags
-    },remaining,formats).await.map_err(|e|if e=="destination denied"{
-        StatusCode::FORBIDDEN
-    }else{StatusCode::BAD_GATEWAY})?;
+    },remaining,formats).await.map_err(|e|{
+        #[cfg(debug_assertions)]
+        eprintln!("CANDIDATE_BROWSER_DIAG render={}",match e{
+            "destination denied"=>"denied",
+            "target response failed"=>"target_response",
+            "rendered content still appears incomplete"=>"incomplete",
+            "empty or blocked rendered content"=>"empty_or_blocked",
+            "browser transport failed"=>"transport",
+            "browser service failed"=>"service",
+            "browser deadline exceeded"=>"deadline",
+            "non-HTML or empty target response"=>"non_html",
+            _=>"other"
+        });
+        if e=="destination denied"{StatusCode::FORBIDDEN}else{StatusCode::BAD_GATEWAY}
+    })?;
     let receipt=result["research"].clone();
     let mut data=result["data"].take();
     if !data.is_object(){return Err(StatusCode::BAD_GATEWAY);}

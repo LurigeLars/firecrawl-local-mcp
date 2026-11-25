@@ -1,7 +1,7 @@
 """One-shot actual browser sidecar smoke, fixed public source and own denial fixture.
 
 No proxy credentials, production volumes, arbitrary endpoints or external retry.
-Explicit waitFor path only. Does not prove automatic fallback for dynamic sites.
+Tests explicit waitFor and a fixed public dynamic CFTC story without caller waitFor. External availability and actual automatic dispatch must both be confirmed.
 """
 import json
 import time
@@ -83,5 +83,37 @@ text = " ".join(doc["markdown"].split()).lower()
 assert all(marker.lower() in text for marker in ("Example Domains", "RFC 2606", "RFC 6761"))
 print("BROWSER_SIDECAR_LIVE_PASS", json.dumps({
     "markers": 3, "route": "direct", "source_verified": False,
+    "elapsed_ms": round((time.monotonic() - started) * 1000),
+}))
+
+# Real public dynamic-source acceptance. No caller waitFor, no proxy retry
+# profile and no network-policy exception. A complete static result is useful
+# but does not constitute positive automatic-fallback evidence.
+DYNAMIC = "https://publicreporting.cftc.gov/stories/s/r4w3-av2u"
+started = time.monotonic()
+status, result, _ = request(CANDIDATE + "/v2/scrape", auth=True, timeout=65, payload={
+    "url": DYNAMIC, "formats": ["markdown"], "onlyMainContent": True,
+    "timeout": 45000, "maxAge": 0, "storeInCache": False,
+})
+if status != 200:
+    print("BROWSER_AUTOMATIC_LIVE_FAIL", json.dumps({"status": status, "code": result.get("code")}))
+    raise SystemExit(1)
+doc = result["data"]
+assert result["success"] is True
+assert doc["metadata"]["statusCode"] == 200
+assert doc["metadata"]["sourceURL"] == DYNAMIC
+assert doc["researchSourceVerified"] is False
+text = " ".join(doc["markdown"].split()).lower()
+markers = ("Public Reporting Environment", "Legacy Futures Only Report", "Disaggregated Futures Only Report")
+found = sum(marker.lower() in text for marker in markers)
+receipt = doc.get("researchBrowser", {})
+if found != len(markers) or receipt.get("automatic") is not True or receipt.get("router_path") != "direct":
+    print("BROWSER_AUTOMATIC_LIVE_UNVERIFIED", json.dumps({
+        "markers": found, "expected": len(markers), "automatic": receipt.get("automatic", False),
+        "route": receipt.get("router_path"), "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }))
+    raise SystemExit(1)
+print("BROWSER_AUTOMATIC_LIVE_PASS", json.dumps({
+    "markers": found, "route": "direct", "source_verified": False,
     "elapsed_ms": round((time.monotonic() - started) * 1000),
 }))

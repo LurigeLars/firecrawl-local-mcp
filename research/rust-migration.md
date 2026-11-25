@@ -296,3 +296,11 @@ Local benchmark identifies exactly one full Docker container ID per expected Com
 ### Actual model proxy transport with deterministic private provider
 
 Reuse the existing CI candidate and locked Node image; run the actual unchanged model proxy on an internal-only Docker network with one deterministic Ollama-shaped fixture at its fixed host alias. Candidate alone has public egress for the fixed IANA source. No model credentials, external model calls, host mappings or production services. Check typed JSON, provider/uncertainty receipt, source markers observed by the mock provider and rejection of a string where an integer is required. External source availability is reported separately; this proves actual proxy transport only, not real Gemini/Ollama accuracy or availability. Results pending.
+
+### Automatic rendering: representative dynamic CFTC source
+
+Extend the opt-in real browser test with a fixed public CFTC Public Reporting Environment story, no explicit waitFor, uncached, three substantive report markers and automatic direct-browser receipt required. Static success alone is not proof of fallback, HTTP 200 with missing markers is not a pass, and external failures do not justify relaxing policy. No production changes, proxy credentials or new runtime dependencies. This is page-content evidence, not validation of the underlying financial dataset. Results pending.
+
+### Automatic-render diagnostic checkpoint
+
+PR #249 merged after both fixed proxy tests passed. The #250 retry passed the actual explicit browser and private-target denial, but the fixed CFTC story returned STATIC_SCRAPE_FAILED (502), so automatic browser acceptance remains unverified. Add debug-build-only fixed-category diagnostics at engine error, static-result rejection and automatic renderer error, emitted only by the disposable CI workflow on failure. No raw URL, remote text, exception message, new network requests, release logging or changes to dispatch/security policy. #251 release Compose search separately returned 2 IANA hits, zero engine failure reports, 348 ms. Repeat the browser check to identify the actual cause before changing the classifier or fallback behavior.
