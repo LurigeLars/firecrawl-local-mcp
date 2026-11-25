@@ -31,6 +31,12 @@ pub(crate) struct Request {
     include_domains: Vec<String>,
     #[serde(default)]
     exclude_domains: Vec<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    domain_tools: bool,
+    #[serde(default)]
+    tool_detail: Option<String>,
 }
 
 fn valid_domain(s: &str) -> bool {
@@ -51,8 +57,17 @@ impl Request {
             !self.lang.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-') {
             return Err("invalid search parameters");
         }
-        if self.sources.as_ref().is_some_and(|v| v.len() != 1 || v[0] != "web") {
-            return Err("only plain web search is supported by this research adapter");
+        // The installed MCP client sends web + alexandria by default.
+        // Accept that exact mixed request, but mark catalogue coverage unavailable.
+        // Never contact a paid/remote provider and never claim catalogue results.
+        if self.sources.as_ref().is_some_and(|v| {
+            v.as_slice() != ["web"] && v.as_slice() != ["web","alexandria"]
+        }) {
+            return Err("only web or the default mixed MCP search is supported");
+        }
+        if self.origin.as_ref().is_some_and(|s| s.is_empty() || s.len()>256 || s.chars().any(char::is_control)) ||
+           self.tool_detail.as_deref().is_some_and(|s| !matches!(s,"compact"|"summary"|"full")) {
+            return Err("invalid MCP metadata");
         }
         if !self.include_domains.is_empty() && !self.exclude_domains.is_empty() {
             return Err("includeDomains and excludeDomains are mutually exclusive");
@@ -62,6 +77,10 @@ impl Request {
             return Err("invalid domain filter");
         }
         Ok(())
+    }
+
+    fn catalogue_requested(&self) -> bool {
+        self.domain_tools || self.sources.as_ref().is_some_and(|v|v.iter().any(|s|s=="alexandria"))
     }
 
     fn proxy_query(&self) -> String {
@@ -85,7 +104,7 @@ struct Page {
 }
 
 #[derive(Serialize)]
-struct Hit { url: String, title: String, description: String }
+struct Hit { url: String, title: String, description: String, source: &'static str, position: usize }
 
 fn host_matches(host: &str, domain: &str) -> bool {
     let domain = domain.to_ascii_lowercase();
@@ -107,7 +126,7 @@ fn accept_hit(raw: RawHit, req: &Request) -> Option<Hit> {
     let title = raw.title.unwrap_or_default();
     let description = raw.content.unwrap_or_default();
     if title.len() > 4096 || description.len() > 16384 { return None; }
-    Some(Hit { url: url.into(), title, description })
+    Some(Hit { url: url.into(), title, description, source:"web", position:0 })
 }
 
 pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'static str> {
@@ -142,8 +161,11 @@ pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'s
             let results: Page = serde_json::from_slice(&body).map_err(|_| "invalid search proxy response")?;
             if results.results.is_empty() { break; }
             for raw in results.results {
-                if let Some(hit) = accept_hit(raw, &req) {
-                    if seen.insert(hit.url.clone()) { web.push(hit); }
+                if let Some(mut hit) = accept_hit(raw, &req) {
+                    if seen.insert(hit.url.clone()) {
+                        hit.position=web.len()+1;
+                        web.push(hit);
+                    }
                 } else { omitted += 1; }
                 if web.len() >= req.limit { break; }
             }
@@ -151,10 +173,16 @@ pub(crate) async fn search_at(endpoint: &str, req: Request) -> Result<Value, &'s
         }
         // Research metadata is explicit. Final public API envelope and
         // credits/id semantics still need end-to-end compatibility testing.
-        Ok(json!({"success": true, "data": {"web": web}, "research": {
+        let catalogue_requested=req.catalogue_requested();
+        let mut value=json!({"success": true, "data": {"web": web}, "research": {
             "requested": req.limit, "returned": web.len(), "omitted": omitted,
-            "source": "local-searxng"
-        }}))
+            "source": "local-searxng", "catalogue_requested":catalogue_requested,
+            "catalogue_available":false
+        }});
+        if catalogue_requested {
+            value["warning"]=json!("Web results only: Alexandria catalogue and domain tool discovery are unavailable on this local candidate.");
+        }
+        Ok(value)
     }).await.map_err(|_| "search deadline exceeded")?
 }
 
@@ -262,6 +290,25 @@ mod tests {
         let result = search_at(&url, req(json!({"query":"test","timeout":50}))).await;
         task.abort();
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn actual_mcp_default_search_reports_catalogue_unavailable() {
+        let router=Router::new().route("/search",get(||async{
+            Json(json!({"results":[{"url":"https://example.org/","title":"Fixture"}]}))
+        }));
+        let (url,task)=spawn(router).await;
+        let result=search_at(&url,req(json!({"query":"synthetic fixture","limit":2,
+            "sources":["web","alexandria"],"domainTools":true,"toolDetail":"compact",
+            "origin":"mcp-candidate-contract@3.40.0"}))).await.unwrap();
+        assert_eq!(result["data"]["web"][0]["source"],"web");
+        assert_eq!(result["data"]["web"][0]["position"],1);
+        assert_eq!(result["research"]["catalogue_available"],false);
+        assert!(result["warning"].as_str().unwrap().contains("Web results only"));
+        assert!(result["data"].get("alexandria").is_none());
+        assert!(req(json!({"query":"x","sources":["alexandria"]})).validate().is_err());
+        assert!(req(json!({"query":"x","sources":["web","news"]})).validate().is_err());
+        task.abort();
     }
 
     #[test]

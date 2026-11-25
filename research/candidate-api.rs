@@ -41,12 +41,23 @@ struct CandidateState {
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct StaticRequest {
     url: String,
+    #[serde(default="default_formats")]
     formats: Vec<String>,
+    #[serde(default="default_main")]
     only_main_content: bool,
+    #[serde(default)]
     max_age: u64,
+    #[serde(default)]
     store_in_cache: bool,
+    #[serde(default="default_timeout")]
     timeout: u64,
+    #[serde(default)]
+    origin: Option<String>,
 }
+
+fn default_formats()->Vec<String>{vec!["markdown".into()]}
+fn default_main()->bool{true}
+fn default_timeout()->u64{30000}
 
 fn refusal(status: StatusCode, code: &str) -> Response {
     error_response(status,code,"Request outside the supported research contract.")
@@ -68,8 +79,11 @@ fn bounded(value: Value) -> Response {
 }
 
 fn valid_static(req:&StaticRequest) -> bool {
-    req.formats == ["markdown"] && req.only_main_content && req.max_age==0 &&
-        !req.store_in_cache && (1..=45000).contains(&req.timeout)
+    !req.formats.is_empty() && req.formats.len()<=4 &&
+        req.formats.iter().all(|s|matches!(s.as_str(),"markdown"|"html"|"rawHtml"|"links")) &&
+        req.formats.iter().collect::<std::collections::HashSet<_>>().len()==req.formats.len() &&
+        req.max_age==0 && !req.store_in_cache && (1..=45000).contains(&req.timeout) &&
+        req.origin.as_ref().is_none_or(|s| !s.is_empty() && s.len()<=256 && !s.chars().any(char::is_control))
 }
 
 fn static_target(raw:&str)->Result<url::Url,StatusCode>{
@@ -89,17 +103,30 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     let Ok(_slot)=state.slots.try_acquire() else {
         return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");
     };
-    match static_document(&state,target,req.timeout).await {
-        Ok(data)=>bounded(json!({"success":true,"data":data})),
+    let mut formats:Vec<Value>=req.formats.iter().map(|s|json!(s)).collect();
+    // Markdown is used internally for block/empty-content detection even if
+    // the client requests only HTML or links. Do not return extra fields.
+    let wants_markdown=req.formats.iter().any(|s|s=="markdown");
+    if !wants_markdown{formats.push(json!("markdown"));}
+    let opts=ScrapeOptions{formats,only_main_content:req.only_main_content,
+        timeout:Some(req.timeout),..Default::default()};
+    match static_document_with_options(&state,target,opts).await {
+        Ok(mut data)=>{
+            if !wants_markdown{data.as_object_mut().unwrap().remove("markdown");}
+            bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}))
+        },
         Err(status)=>refusal(status,"STATIC_SCRAPE_FAILED")
     }
 }
 
 async fn static_document(state:&CandidateState,target:url::Url,timeout:u64)->Result<Value,StatusCode>{
-    let budget=Duration::from_millis(timeout);
+    static_document_with_options(state,target,ScrapeOptions{timeout:Some(timeout),..Default::default()}).await
+}
+
+async fn static_document_with_options(state:&CandidateState,target:url::Url,opts:ScrapeOptions)->Result<Value,StatusCode>{
+    let budget=Duration::from_millis(opts.timeout.unwrap_or(30000));
     tokio::time::timeout(budget,async {
         render::check_dns(&target).await.map_err(|_|StatusCode::FORBIDDEN)?;
-        let opts=ScrapeOptions {timeout:Some(timeout),..Default::default()};
         let mut data=cloud::scrape_with_fallback(&state.auth.engine,&state.auth.cloud,target.as_str(),&opts).await
             .map_err(|e|match e.code {
                 "BLOCKED_TARGET"=>StatusCode::FORBIDDEN,
@@ -202,6 +229,30 @@ mod tests {
         (base,task)
     }
 
+    #[test]
+    fn actual_mcp_scrape_envelope_and_supported_formats(){
+        let minimal:StaticRequest=serde_json::from_value(json!({
+            "url":"https://example.org/docs/","formats":["markdown"],"origin":"mcp-candidate-contract@3.40.0"
+        })).unwrap();
+        assert!(valid_static(&minimal));
+        assert!(minimal.only_main_content);
+        assert_eq!(minimal.timeout,30000);
+        let full:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
+            "formats":["html","rawHtml","links"],"onlyMainContent":false})).unwrap();
+        assert!(valid_static(&full));
+        for extra in [
+            json!({"formats":["summary"]}),json!({"formats":[]}),json!({"formats":["markdown","markdown"]}),
+            json!({"maxAge":1}),json!({"storeInCache":true}),json!({"timeout":45001}),
+            json!({"origin":"x\nheader"})
+        ]{
+            let mut input=json!({"url":"https://example.org/"});
+            input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(!valid_static(&serde_json::from_value(input).unwrap()));
+        }
+        assert!(serde_json::from_value::<StaticRequest>(json!({"url":"https://example.org/",
+            "headers":{"Cookie":"synthetic"}})).is_err());
+    }
+
     #[tokio::test]
     async fn static_engine_refuses_documents_before_native_parser() {
         // Only the synthetic loopback test may use AllowPrivate.
@@ -238,6 +289,16 @@ mod tests {
         assert_eq!(c.get(format!("{base}/health")).bearer_auth(TOKEN).header("Host","bad.example").send().await.unwrap().status(),StatusCode::FORBIDDEN);
         let search:Value=c.post(format!("{base}/v2/search")).bearer_auth(TOKEN).json(&json!({"query":"stock"}))
             .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        let actual:Value=c.post(format!("{base}/v2/search")).bearer_auth(TOKEN).json(&json!({
+            "query":"stock","limit":2,"sources":["web","alexandria"],"domainTools":true,
+            "toolDetail":"compact","origin":"mcp-candidate-contract@3.40.0"
+        })).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert!(actual["warning"].as_str().unwrap().contains("Web results only"));
+        assert_eq!(actual["data"]["web"][0]["position"],1);
+        let denied=c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({
+            "url":"https://127.0.0.1/","formats":["markdown"],"origin":"mcp-candidate-contract@3.40.0"
+        })).send().await.unwrap();
+        assert_eq!(denied.status(),StatusCode::FORBIDDEN);
         let result:Value=c.post(format!("{base}/research/render")).bearer_auth(TOKEN)
             .json(&json!({"url":search["data"]["web"][0]["url"],"onlyMainContent":false}))
             .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();

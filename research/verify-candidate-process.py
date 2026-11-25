@@ -163,6 +163,21 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             print("CANDIDATE_PROCESS_SMOKE_PASS: authenticated loopback, unsupported options and private destinations rejected")
             if "--live" in sys.argv:
                 verify_live(proc.pid)
+                # Actual default MCP request envelope, without research-only
+                # maxAge/storeInCache/timeout fields.
+                status,raw=call("/v2/scrape",payload={"url":"https://www.iana.org/help/example-domains",
+                    "formats":["markdown"],"origin":"mcp-candidate-contract@3.40.0"},timeout=35)
+                assert status==200
+                result=json.loads(raw)
+                assert "RFC 2606" in result["data"]["markdown"]
+                assert result["research"]["cache_used"] is False
+                status,raw=call("/v2/scrape",payload={"url":"https://www.iana.org/help/example-domains",
+                    "formats":["html","links"],"onlyMainContent":False,"origin":"mcp-candidate-contract@3.40.0"},timeout=35)
+                assert status==200
+                data=json.loads(raw)["data"]
+                assert "RFC 2606" in data["html"] and len(data["links"])>0
+                assert "markdown" not in data
+                print("MCP_SCRAPE_ENVELOPE_LIVE_PASS: minimal request and HTML/link formats")
             if "--batch" in sys.argv or "--live-jobs" in sys.argv:
                 assert json.loads(call("/health")[1])["jobStore"]=="ready"
                 assert call("/research/crawl",payload={"url":"https://127.0.0.1/","limit":2,"maxDiscoveryDepth":1})[0]==403
