@@ -17,6 +17,17 @@ pub(crate) struct Request {
     #[serde(default)]
     pub(crate) wait_for: u64,
     pub(crate) only_main_content: bool,
+    #[serde(default)] pub(crate) include_tags:Vec<String>,
+    #[serde(default)] pub(crate) exclude_tags:Vec<String>,
+}
+
+// Deliberately limited CSS subset: tag, .class, #id and their compounds.
+// No :has, combinators, wildcards, selector lists or arbitrary expressions.
+// Invalid or advanced selectors fail rather than being silently dropped.
+pub(crate) fn valid_tag_filters(include:&[String],exclude:&[String])->bool{
+    if include.len()+exclude.len()>16{return false;}
+    let pattern=regex::Regex::new(r"^(?:[A-Za-z][A-Za-z0-9_-]*)?(?:[.#][A-Za-z_][A-Za-z0-9_-]*)*$").unwrap();
+    include.iter().chain(exclude).all(|s|!s.is_empty()&&s.len()<=128&&pattern.is_match(s))
 }
 
 #[derive(Deserialize)]
@@ -63,6 +74,7 @@ pub(crate) async fn render_auto_at(endpoint:&str,req:Request,budget:Duration,for
 
 async fn render_checked_at(endpoint:&str,req:Request,budget:Duration,mut formats:Vec<Format>,automatic:bool)->Result<Value,&'static str>{
     let target = public_url(&req.url)?;
+    if !valid_tag_filters(&req.include_tags,&req.exclude_tags){return Err("unsupported HTML selector");}
     if req.wait_for > 10_000 || budget.is_zero() || budget.as_millis() <= u128::from(req.wait_for) { return Err("waitFor exceeds research budget"); }
     let client = reqwest::Client::builder().no_proxy()
         .redirect(reqwest::redirect::Policy::none()).timeout(budget)
@@ -101,7 +113,8 @@ async fn render_checked_at(endpoint:&str,req:Request,budget:Duration,mut formats
         check_dns(&landed).await?;
         Ok((rendered, landed, route))
     }).await.map_err(|_| "browser deadline exceeded")??;
-    let opts = ScrapeOptions { only_main_content: req.only_main_content, ..Default::default() };
+    let opts = ScrapeOptions { only_main_content: req.only_main_content,
+        include_tags:req.include_tags,exclude_tags:req.exclude_tags,..Default::default() };
     // Run conversion off the async executor; caller retains admission until
     // completion. The network deadline does not bound the blocking parser.
     let status=rendered.page_status_code;
@@ -153,7 +166,7 @@ mod tests {
 
     const TARGET: &str = "https://93.184.216.34/start";
     fn req() -> Request {
-        Request { url: TARGET.into(), wait_for: 50, only_main_content: false }
+        Request { url: TARGET.into(), wait_for: 50, only_main_content: false,include_tags:vec![],exclude_tags:vec![] }
     }
 
     async fn spawn(router: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -197,6 +210,22 @@ mod tests {
         assert_eq!(out["data"]["metadata"]["sourceURL"],TARGET);
         assert_eq!(out["data"]["source"],"local");
         assert_eq!(out["research"]["source_verified"], false);
+    }
+
+    #[tokio::test]
+    async fn rendered_html_respects_the_same_selector_subset(){
+        let router=Router::new().route("/scrape",post(||async{Json(json!({
+            "content":"<html><body><article><p>Included fixture 42</p><p class=\"ads\">Omit this ad</p></article><aside>Omit sidebar</aside></body></html>",
+            "pageStatusCode":200,"contentType":"text/html","url":TARGET
+        }))}));
+        let (url,task)=spawn(router).await;
+        let mut req=req();
+        req.include_tags=vec!["article".into()];req.exclude_tags=vec![".ads".into()];
+        let doc=render_formats_at(&url,req,Duration::from_secs(3),vec![Format::Markdown]).await.unwrap();
+        let md=doc["data"]["markdown"].as_str().unwrap();
+        assert!(md.contains("Included fixture 42"));
+        assert!(!md.contains("Omit this ad")&&!md.contains("Omit sidebar"));
+        task.abort();
     }
 
     #[tokio::test]

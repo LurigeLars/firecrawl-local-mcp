@@ -53,6 +53,10 @@ struct StaticRequest {
     #[serde(default="default_main")]
     only_main_content: bool,
     #[serde(default)]
+    include_tags:Vec<String>,
+    #[serde(default)]
+    exclude_tags:Vec<String>,
+    #[serde(default)]
     max_age: u64,
     #[serde(default)]
     store_in_cache: bool,
@@ -91,6 +95,7 @@ fn bounded(value: Value) -> Response {
 
 fn valid_common(req:&StaticRequest)->bool{
     req.max_age==0&&!req.store_in_cache&&
+        render::valid_tag_filters(&req.include_tags,&req.exclude_tags)&&
         req.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))
 }
 
@@ -153,11 +158,20 @@ fn browser_formats(req:&StaticRequest)->Option<Vec<Format>>{
 
 fn valid_pdf_options(req:&StaticRequest)->bool{
     valid_common(req)&&req.wait_for==0&&req.formats==[json!("markdown")]&&
+        req.include_tags.is_empty()&&req.exclude_tags.is_empty()&&
         req.parsers.as_ref().is_none_or(|p|p.as_slice()==["pdf"])&&
         (1..=110000).contains(&req.timeout.unwrap_or(110000))
 }
 fn pdf_request(req:&StaticRequest,target:&url::Url)->bool{
     valid_pdf_options(req)&&target.path().to_ascii_lowercase().ends_with(".pdf")
+}
+
+// Single-page HTML accepts public HTTP(S), including query strings and
+// fragments. Crawl/map keep their narrower URL contract until separately tested.
+fn scrape_target(raw:&str)->Result<url::Url,StatusCode>{
+    let target=render::public_url(raw).map_err(|_|StatusCode::FORBIDDEN)?;
+    if target.port().is_some(){return Err(StatusCode::BAD_REQUEST);}
+    Ok(target)
 }
 
 fn static_target(raw:&str)->Result<url::Url,StatusCode>{
@@ -175,20 +189,16 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!valid_pdf_options(&req){
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
     }
-    // Browser routes may use a fragment for client-side navigation. Keep
-    // the same public-host and HTTPS restriction; do not admit query strings
-    // or custom ports to this opt-in subset.
-    let target=if render_formats.is_some(){
-        render::public_url(&req.url).map_err(|_|StatusCode::FORBIDDEN).and_then(|u|{
-            if u.scheme()!="https"||u.query().is_some()||u.port().is_some(){Err(StatusCode::BAD_REQUEST)}else{Ok(u)}
-        })
-    }else{static_target(&req.url)};
+    let target=scrape_target(&req.url);
     let target=match target{Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")};
     let is_pdf=pdf_request(&req,&target);
     if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!is_pdf{
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
     }
     if is_pdf{
+        // Preserve the existing no-query/no-fragment PDF subset. No
+        // silently narrowed document request or native PDF parser fallback.
+        if static_target(target.as_str()).is_err(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_PDF_URL");}
         if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
         let Ok(_slot)=state.slots.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
         let result=pdf::document(&state,&target,Duration::from_millis(req.timeout.unwrap_or(110000))).await
@@ -201,7 +211,8 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     if let Some(formats)=render_formats{
         if !state.browser_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"BROWSER_DISABLED");}
         let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
-        let request=render::Request{url:target.to_string(),wait_for:req.wait_for,only_main_content:req.only_main_content};
+        let request=render::Request{url:target.to_string(),wait_for:req.wait_for,only_main_content:req.only_main_content,
+            include_tags:req.include_tags,exclude_tags:req.exclude_tags};
         let budget=Duration::from_millis(req.timeout.unwrap_or(60000));
         let result=tokio::spawn(async move{
             let _slot=slot;
@@ -230,7 +241,8 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         let Ok(_model_slot)=state.model_slot.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"MODEL_BUSY")};
         let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(180000));
         let mut data=match static_document_with_options(&state,target,ScrapeOptions{
-            timeout:Some(req.timeout.unwrap_or(180000).min(45000)),only_main_content:req.only_main_content,..Default::default()
+            timeout:Some(req.timeout.unwrap_or(180000).min(45000)),only_main_content:req.only_main_content,
+            include_tags:req.include_tags,exclude_tags:req.exclude_tags,..Default::default()
         }).await{Ok(data)=>data,Err(status)=>return refusal(status,"STATIC_SCRAPE_FAILED")};
         let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero(){return refusal(StatusCode::GATEWAY_TIMEOUT,"MODEL_DEADLINE");}
@@ -245,6 +257,7 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     let wants_markdown=req.formats.iter().any(|s|s=="markdown");
     if !wants_markdown{formats.push(json!("markdown"));}
     let opts=ScrapeOptions{formats,only_main_content:req.only_main_content,
+        include_tags:req.include_tags,exclude_tags:req.exclude_tags,
         timeout:Some(req.timeout.unwrap_or(30000)),..Default::default()};
     match static_document_with_options(&state,target,opts).await {
         Ok(mut data)=>{
@@ -299,7 +312,8 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
     let (formats,unsupported)=opts.resolved_formats();
     if !unsupported.is_empty(){return Err(StatusCode::BAD_REQUEST);}
     let mut result=render::render_auto_at(&state.render_endpoint,render::Request{
-        url:target.to_string(),wait_for:0,only_main_content:opts.only_main_content
+        url:target.to_string(),wait_for:0,only_main_content:opts.only_main_content,
+        include_tags:opts.include_tags,exclude_tags:opts.exclude_tags
     },remaining,formats).await.map_err(|e|if e=="destination denied"{
         StatusCode::FORBIDDEN
     }else{StatusCode::BAD_GATEWAY})?;
@@ -419,6 +433,25 @@ mod tests {
             "headers":{"Cookie":"synthetic"}})).is_err());
     }
 
+    #[test]
+    fn single_page_public_query_and_bounded_selector_contract(){
+        for url in ["http://example.org/article","https://example.org/report?year=2026#data"]{
+            assert!(scrape_target(url).is_ok());
+            assert!(static_target(url).is_err());
+        }
+        for url in ["http://127.0.0.1/?q=1","https://user:pass@example.org/","https://[64:ff9b::5db8:d822]/"]{
+            assert!(scrape_target(url).is_err());
+        }
+        assert!(scrape_target("https://example.org:8443/").is_err());
+        let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/report?year=2026",
+            "includeTags":["article","div.report","#main"],"excludeTags":[".ads"]})).unwrap();
+        assert!(valid_static(&req));
+        assert!(!valid_pdf_options(&req));
+        let bad:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
+            "includeTags":["article:has(div)"]})).unwrap();
+        assert!(!valid_static(&bad));
+    }
+
     #[tokio::test]
     async fn captured_model_format_and_strict_quote_result(){
         let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
@@ -446,6 +479,7 @@ mod tests {
         // Only the synthetic loopback test may use AllowPrivate.
         let app=Router::new()
             .route("/page",get(||async{axum::response::Html("<html><body><p>Native HTML fixture 42.</p></body></html>")}))
+            .route("/tags",get(||async{axum::response::Html("<html><body><article><p>Included fixture 42</p><p class=\"ads\">Omit this ad</p></article><aside>Omit sidebar</aside></body></html>")}))
             .route("/pdf",get(||async{([("content-type","application/pdf")],"%PDF-invalid-fixture")}))
             .route("/mislabelled",get(||async{([("content-type","text/html")],"%PDF-invalid-fixture")}))
             .route("/redirect",get(||async{axum::response::Redirect::temporary("/pdf")}))
@@ -458,6 +492,13 @@ mod tests {
         let opts=ScrapeOptions::default();
         let doc=engine.scrape(&format!("{base}/page"),&opts).await.unwrap();
         assert!(doc["markdown"].as_str().unwrap().contains("Native HTML fixture 42."));
+        let filtered=engine.scrape(&format!("{base}/tags?fixture=1"),&ScrapeOptions{
+            include_tags:vec!["article".into()],exclude_tags:vec![".ads".into()],
+            ..Default::default()
+        }).await.unwrap();
+        let md=filtered["markdown"].as_str().unwrap();
+        assert!(md.contains("Included fixture 42"));
+        assert!(!md.contains("Omit this ad")&&!md.contains("Omit sidebar"));
         for path in ["/shell","/challenge"]{
             let err=engine.scrape(&format!("{base}{path}"),&opts).await.unwrap_err();
             assert_eq!(err.code,"BROWSER_RENDER_REQUIRED");
