@@ -38,6 +38,7 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
             throw 'Legacy Gemini secret is not DPAPI-migrated; not restarting LLM proxy.'
         }
     }
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $Old -Repository 'firecrawl-node-runtime'
     if ($Service -eq 'playwright-router') {
         & docker @ComposeArguments --profile public-proxy build playwright-router
         if ($LASTEXITCODE -ne 0) { throw 'Pinned Node image build failed; old router untouched.' }
@@ -52,7 +53,7 @@ function Invoke-FirecrawlNodeRuntimeRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$Candidate) {
         throw 'Reviewed Node helper image changed during scan.'
     }
-    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $Old -Repository 'firecrawl-node-runtime'
+    Assert-FirecrawlRollbackImage -Container $Container -BaselineId $Old -RollbackTag $Rollback -RollbackId $Old
     if ($Service -eq 'playwright-router') {
         & docker @ComposeArguments --profile public-proxy up -d --no-deps --no-build --force-recreate $Service
     } else {
