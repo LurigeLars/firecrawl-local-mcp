@@ -7,6 +7,8 @@ RUN apk upgrade --no-cache \
     && test ! -e /usr/local/lib/node_modules/npm \
     && test -x /usr/local/bin/node
 
+RUN mkdir -p /var/lib/firecrawl-tool-usage && chown node:node /var/lib/firecrawl-tool-usage && chmod 700 /var/lib/firecrawl-tool-usage
+
 USER node
 WORKDIR /app
 CMD ["node", "/app/gateway.mjs"]
