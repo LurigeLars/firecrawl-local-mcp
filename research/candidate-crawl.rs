@@ -7,7 +7,7 @@ use crate::{crawl::{CrawlOptions,Scope,ROBOTS_AGENT},fetch::{Fetcher,FetchOption
 use axum::http::StatusCode;
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
-use std::{collections::HashSet,sync::Arc,time::Duration};
+use std::{collections::{HashSet,hash_map::DefaultHasher},hash::{Hash,Hasher},sync::Arc,time::Duration};
 use tokio::sync::Mutex;
 use texting_robots::Robot;
 use url::Url;
@@ -17,7 +17,8 @@ const HTML_LIMIT:usize=2*1024*1024;
 const DISCOVERY_LIMIT:usize=100;
 
 #[derive(Clone)]
-pub(super) struct Crawler {pub(super) fetcher:Fetcher,pub(super) serial:Arc<Mutex<()>>}
+pub(super) struct Crawler {pub(super) fetcher:Fetcher,domain_locks:Arc<Vec<Arc<Mutex<()>>>>}
+const DOMAIN_LOCKS:usize=32;
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(default,rename_all="camelCase",deny_unknown_fields)]
@@ -105,7 +106,19 @@ pub(super) fn robots_decision(status:u16,body:&[u8],target:&Url)->Result<(bool,D
 
 impl Crawler{
     pub(super) fn new()->Result<Self,String>{
-        Ok(Self{fetcher:Fetcher::new_no_redirect(NetworkPolicy::PublicOnly)?,serial:Arc::new(Mutex::new(()))})
+        Ok(Self{fetcher:Fetcher::new_no_redirect(NetworkPolicy::PublicOnly)?,
+            domain_locks:Arc::new((0..DOMAIN_LOCKS).map(|_|Arc::new(Mutex::new(()))).collect())})
+    }
+
+    // A fixed number of stripes bounds memory, including under hostile
+    // host churn. Subdomains of one registrable domain share their lock;
+    // collisions only reduce concurrency, never relax pacing.
+    pub(super) fn domain_lock(&self,target:&Url)->Arc<Mutex<()>>{
+        let host=target.host_str().unwrap_or("").trim_end_matches('.');
+        let domain=psl::domain_str(host).unwrap_or(host);
+        let mut hash=DefaultHasher::new();
+        domain.hash(&mut hash);
+        self.domain_locks[hash.finish() as usize%DOMAIN_LOCKS].clone()
     }
 
     pub(super) async fn robots(&self,target:&Url)->Result<(u16,bytes::Bytes),StatusCode>{
@@ -130,13 +143,17 @@ impl Crawler{
         // Match upstream: the explicitly supplied seed is read even when
         // includePaths selects only its descendants. All discoveries are filtered.
         if seed.origin()!=target.origin() || (target!=seed&&!scope.allows(&target)){return Err(StatusCode::FORBIDDEN);}
-        let _serial=self.serial.lock().await;
-        let (mut doc,links)=self.read_links_with_options(&target,Duration::from_secs(50),&policy).await?;
+        let domain=self.domain_lock(&target);
+        let guard=domain.lock().await;
+        let fetched=self.fetch_page(&target,Duration::from_secs(50),policy.delay()).await?;
+        drop(guard);
+        let (mut doc,links)=self.convert(fetched,&target,&policy).await?;
         let mut frontier=candidates(&seed,&scope,&links);
         if include_sitemap{
             if max_depth==0||page_limit<=1{
                 doc["researchSitemap"]=json!({"status":"skipped_by_crawl_limit"});
             }else{
+                let _domain=domain.lock().await;
                 let (sitemap,receipt)=map::crawl_sitemap(self,&seed,&policy).await;
                 doc["researchSitemap"]=receipt;
                 // Prefer sitemap candidates, then HTML discovery. Both enter
@@ -149,44 +166,47 @@ impl Crawler{
         Ok((doc,frontier))
     }
 
-    /// Caller holds the shared crawl/map serial lock. The target must already
+    /// Caller holds the shared per-domain crawl/map lock. The target must already
     /// be validated as a public HTTPS seed or in-scope crawl URL.
     pub(super) async fn read_links(&self,target:&Url,budget:Duration)->Result<(Value,Vec<Value>),StatusCode>{
         self.read_links_with_options(target,budget,&Policy::default()).await
     }
 
     async fn read_links_with_options(&self,target:&Url,budget:Duration,policy:&Policy)->Result<(Value,Vec<Value>),StatusCode>{
-        let target=target.clone();
-        let minimum_delay=policy.delay();
-        let formats=policy.formats()?;
-        let opts=ScrapeOptions{only_main_content:policy.only_main_content,include_tags:policy.include_tags.clone(),
-            exclude_tags:policy.exclude_tags.clone(),..Default::default()};
-        // Fresh robots check on every claimed page. Fail closed if unavailable.
-        // No retries/redirects in either request. Connection-time DNS guard
-        // remains in the same upstream Fetcher.
-        let fetched=tokio::time::timeout(budget.min(Duration::from_secs(50)),async{
-            let (status,body)=self.robots(&target).await?;
-            let (allowed,robots_delay)=robots_decision(status,&body,&target)?;
-            let delay=robots_delay.max(minimum_delay);
+        let fetched=self.fetch_page(target,budget,policy.delay()).await?;
+        self.convert(fetched,target,policy).await
+    }
+
+    async fn fetch_page(&self,target:&Url,budget:Duration,minimum_delay:Duration)->Result<String,StatusCode>{
+        // Caller owns the domain lock. Always complete the cooldown before
+        // releasing it, including when a network timeout cancels a fetch.
+        let mut delay=Duration::from_secs(10);
+        let result=tokio::time::timeout(budget.min(Duration::from_secs(50)),async{
+            let (status,body)=self.robots(target).await?;
+            let (allowed,robots_delay)=robots_decision(status,&body,target)?;
+            delay=robots_delay.max(minimum_delay);
             tokio::time::sleep(delay).await;
             if !allowed{return Err(StatusCode::FORBIDDEN);}
-            let page=self.fetcher.fetch_once_limited(&target,&FetchOptions{
+            let page=self.fetcher.fetch_once_limited(target,&FetchOptions{
                 timeout:Some(Duration::from_secs(15)),..Default::default()
-            },HTML_LIMIT).await;
-            // The one crawl worker spaces the next robots/page request too.
-            tokio::time::sleep(delay).await;
-            let page=page.map_err(|_|StatusCode::BAD_GATEWAY)?;
-            if page.status!=200 || page.final_url!=target || page.body.len()>HTML_LIMIT{
+            },HTML_LIMIT).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+            if page.status!=200 || page.final_url!=*target || page.body.len()>HTML_LIMIT{
                 return Err(StatusCode::BAD_GATEWAY);
             }
             check_html_only(&page).map_err(|_|StatusCode::UNSUPPORTED_MEDIA_TYPE)?;
             Ok::<_,StatusCode>(page.text())
-        }).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)??;
+        }).await;
+        tokio::time::sleep(delay).await;
+        result.map_err(|_|StatusCode::GATEWAY_TIMEOUT)?
+    }
 
-        // Reuse actual upstream HTML conversion. Keep the worker admission
-        // slot until the blocking parser finishes; don't abandon a running
-        // parse on async timeout. Overall process memory/wall limits remain
-        // required for untrusted document conversion.
+    async fn convert(&self,fetched:String,target:&Url,policy:&Policy)->Result<(Value,Vec<Value>),StatusCode>{
+        let target=target.clone();
+        let formats=policy.formats()?;
+        let opts=ScrapeOptions{only_main_content:policy.only_main_content,include_tags:policy.include_tags.clone(),
+            exclude_tags:policy.exclude_tags.clone(),..Default::default()};
+        // Network pacing is complete; parsing may overlap with the next
+        // bounded claim. Caller retains the global admission permit.
         tokio::task::spawn_blocking(move||convert_page(fetched,&target,&opts,formats))
             .await.map_err(|_|StatusCode::BAD_GATEWAY)?
     }
@@ -225,6 +245,21 @@ fn convert_page(raw:String,target:&Url,opts:&ScrapeOptions,requested:Vec<Format>
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[tokio::test]
+    async fn fixed_domain_locks_share_subdomains_and_allow_independent_work(){
+        let crawler=Crawler::new().unwrap();
+        let a=Url::parse("https://www.example.org/a").unwrap();
+        let b=Url::parse("https://news.example.org/b").unwrap();
+        let first=crawler.domain_lock(&a);
+        assert!(Arc::ptr_eq(&first,&crawler.domain_lock(&b)));
+        let _held=first.lock().await;
+        assert!(crawler.domain_lock(&b).try_lock().is_err());
+        let independent=(0..128).map(|i|Url::parse(&format!("https://site{i}.com/")).unwrap())
+            .find(|u|!Arc::ptr_eq(&first,&crawler.domain_lock(u))).unwrap();
+        assert!(crawler.domain_lock(&independent).try_lock().is_ok());
+        assert_eq!(crawler.domain_locks.len(),DOMAIN_LOCKS);
+    }
+
     #[test]
     fn discovery_is_same_origin_and_under_seed_path(){
         let seed=seed("https://example.com/docs/").unwrap();

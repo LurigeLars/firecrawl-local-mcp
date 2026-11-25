@@ -148,7 +148,7 @@ try{
     const cases=mode==='--candidate'?[
       {name:'firecrawl_scrape',args:{url:'https://127.0.0.1/',formats:['markdown']},path:'/v2/scrape',status:403},
       {name:'firecrawl_map',args:{url:'https://127.0.0.1/',limit:2},path:'/v2/map',status:403},
-      {name:'firecrawl_crawl',args:{url:fixtureUrl,limit:2,maxConcurrency:2,scrapeOptions:{formats:['markdown']}},path:'/v2/crawl',status:400}
+      {name:'firecrawl_crawl',args:{url:'https://127.0.0.1/',limit:2,maxConcurrency:2,scrapeOptions:{formats:['markdown']}},path:'/v2/crawl',status:403}
     ]:[
       {name:'firecrawl_scrape',args:{url:'https://www.iana.org/help/example-domains',formats:['markdown']},path:'/v2/scrape',status:200,markers:['Example Domains','RFC 2606','RFC 6761']},
       {name:'firecrawl_scrape',args:{url:'https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm',formats:['markdown']},path:'/v2/scrape',status:200,markers:['September 8, 2026','Open Interest','1,939,911']}
@@ -179,11 +179,13 @@ try{
     if(mode==='--candidate-live'){
       const offset=traffic.length;
       const start=await rpc('tools/call',{name:'firecrawl_crawl',arguments:{
-        url:'https://www.iana.org/help',limit:2,maxConcurrency:1,includePaths:['^/help/'],delay:1,
+        url:'https://www.iana.org/help',limit:3,maxConcurrency:2,includePaths:['^/help/'],delay:1,
         scrapeOptions:{formats:['markdown']}}});
       assert.ok(!start.error&&start.result&&!start.result.isError,'MCP crawl creation failed');
       const created=traffic.slice(offset).find(x=>x.path==='/v2/crawl'&&x.status===200)?.response;
       assert.equal(created?.research?.sitemap_mode,'include');
+      assert.equal(created?.research?.requested_max_concurrency,2);
+      assert.equal(created?.research?.same_domain_network_concurrency,1);
       const envelope=traffic.slice(offset).find(x=>x.path==='/v2/crawl'&&x.status===200)?.body;
       assert.deepEqual(envelope?.includePaths,['^/help/']);
       assert.equal(envelope?.delay,1);
@@ -198,9 +200,10 @@ try{
         assert.ok(!reply.error&&reply.result&&!reply.result.isError,'MCP crawl status failed');
         result=traffic.slice(at).find(x=>x.path==='/v2/crawl/'+jobId&&x.status===200)?.response;
         assert.equal(result?.research?.sitemap_mode,'include');
+        assert.equal(result?.research?.requested_max_concurrency,2);
         if(result.status==='completed'||result.status==='failed'){
           assert.equal(result.status,'completed');
-          assert.equal(result.completed,2);
+          assert.equal(result.completed,3);
           assert.equal(result.research.failed,0);
           assert.ok(result.data.every(d=>d.metadata?.url==='https://www.iana.org/help'||d.metadata?.url?.startsWith('https://www.iana.org/help/')));
           assert.ok(result.data.some(d=>d.researchSitemap?.status),'sitemap outcome missing');
