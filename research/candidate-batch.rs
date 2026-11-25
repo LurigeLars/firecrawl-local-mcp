@@ -118,6 +118,8 @@ struct V2CrawlRequest{
 struct V2ScrapeOptions{
     #[serde(default="super::default_formats")] formats:Vec<String>,
     #[serde(default="super::default_main")] only_main_content:bool,
+    #[serde(default)] include_tags:Vec<String>,
+    #[serde(default)] exclude_tags:Vec<String>,
     #[serde(default)] max_age:u64,
     #[serde(default)] store_in_cache:bool,
 }
@@ -129,7 +131,7 @@ impl V2CrawlRequest{
         (1..=100).contains(&self.limit)&&self.max_concurrency==1&&self.max_discovery_depth<=10&&
         matches!(self.sitemap.as_str(),"include"|"skip")&&self.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))&&
         self.delay.is_none_or(|d|d.is_finite()&&(0.0..=10.0).contains(&d))&&
-        self.scrape_options.as_ref().is_none_or(|s|s.formats==["markdown"]&&s.max_age==0&&!s.store_in_cache)
+        self.scrape_options.as_ref().is_none_or(|s|s.max_age==0&&!s.store_in_cache)
     }
 
     fn policy(&self)->crawl::Policy{
@@ -137,7 +139,10 @@ impl V2CrawlRequest{
             crawl_entire_domain:self.crawl_entire_domain,
             // Firecrawl v2/MCP delay is seconds, never round a positive request down.
             delay_ms:(self.delay.unwrap_or(0.0)*1000.0).ceil() as u32,
-            only_main_content:self.scrape_options.as_ref().is_none_or(|s|s.only_main_content)}
+            only_main_content:self.scrape_options.as_ref().is_none_or(|s|s.only_main_content),
+            formats:self.scrape_options.as_ref().map_or_else(super::default_formats,|s|s.formats.clone()),
+            include_tags:self.scrape_options.as_ref().map_or_else(Vec::new,|s|s.include_tags.clone()),
+            exclude_tags:self.scrape_options.as_ref().map_or_else(Vec::new,|s|s.exclude_tags.clone())}
     }
 }
 
@@ -240,6 +245,21 @@ mod v2_tests{
         let invalid:V2CrawlRequest=serde_json::from_value(json!({"url":"https://example.org/","limit":1,
             "maxConcurrency":1,"delay":11})).unwrap();
         assert!(!invalid.valid());
+    }
+
+    #[test]
+    fn crawl_formats_and_selectors_are_validated_before_job_creation(){
+        let seed=crawl::seed("https://example.org/docs/").unwrap();
+        let base=json!({"url":seed.as_str(),"limit":2,"maxConcurrency":1,
+            "scrapeOptions":{"formats":["html","links"],"includeTags":["article"],"excludeTags":[".ads"]}});
+        let req:V2CrawlRequest=serde_json::from_value(base.clone()).unwrap();
+        assert!(req.valid()&&req.policy().scope(&seed).is_ok());
+        for options in [json!({"formats":["markdown","markdown"]}),json!({"formats":["summary"]}),
+            json!({"formats":[]}),json!({"includeTags":["article:has(div)"]})]{
+            let mut invalid=base.clone();invalid["scrapeOptions"]=options;
+            let req:V2CrawlRequest=serde_json::from_value(invalid).unwrap();
+            assert!(req.policy().scope(&seed).is_err());
+        }
     }
 
     #[test]

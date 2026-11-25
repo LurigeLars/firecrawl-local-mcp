@@ -87,16 +87,45 @@ diff --git a/apps/local/src/fetch.rs b/apps/local/src/fetch.rs
        .user_agent(user_agent.unwrap_or(USER_AGENT))
        .default_headers(default_headers)
        .redirect(redirect_policy)
-@@ -214,7 +229,7 @@
+@@ -214,7 +229,16 @@
      }
    }
  
 -  async fn fetch_once(&self, url: &Url, opts: &FetchOptions) -> Result<FetchResult, FetchError> {
 +  pub(crate) async fn fetch_once(&self, url: &Url, opts: &FetchOptions) -> Result<FetchResult, FetchError> {
++    self.fetch_once_limited(url, opts, MAX_BODY_BYTES).await
++  }
++
++  /// Caller-selected internal ceiling, never larger than the global cap.
++  pub(crate) async fn fetch_once_limited(&self, url: &Url, opts: &FetchOptions, max_bytes: usize) -> Result<FetchResult, FetchError> {
++    let max_bytes = max_bytes.min(MAX_BODY_BYTES);
++    if max_bytes == 0 {
++      return Err(FetchError::TooLarge);
++    }
      guard::check_url(url, self.policy).map_err(|e| FetchError::Blocked(e.0))?;
  
      let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
-@@ -298,6 +313,19 @@
+@@ -238,16 +262,16 @@
+       .map(str::to_string);
+ 
+     if let Some(len) = resp.content_length() {
+-      if len as usize > MAX_BODY_BYTES {
++      if len > max_bytes as u64 {
+         return Err(FetchError::TooLarge);
+       }
+     }
+ 
+-    let mut buf = BytesMut::with_capacity(resp.content_length().unwrap_or(64 * 1024) as usize);
++    let mut buf = BytesMut::with_capacity(resp.content_length().unwrap_or(64 * 1024).min(max_bytes as u64) as usize);
+     let mut stream = resp.bytes_stream();
+     while let Some(chunk) = stream.next().await {
+       let chunk = chunk.map_err(classify)?;
+-      if buf.len() + chunk.len() > MAX_BODY_BYTES {
++      if chunk.len() > max_bytes - buf.len() {
+         return Err(FetchError::TooLarge);
+       }
+       buf.extend_from_slice(&chunk);
+@@ -298,6 +322,45 @@
    use super::*;
  
    #[test]
@@ -110,6 +139,32 @@ diff --git a/apps/local/src/fetch.rs b/apps/local/src/fetch.rs
 +      assert!(validate_resolved(vec![public,private], NetworkPolicy::PublicOnly).is_err());
 +      assert!(validate_resolved(vec![private,public], NetworkPolicy::PublicOnly).is_err());
 +    }
++  }
++
++  #[tokio::test]
++  async fn per_request_body_ceiling_applies_to_declared_and_chunked_responses() {
++    use axum::{Router, body::Body, routing::get};
++    let app = Router::new()
++      .route("/ok", get(|| async { "12345678" }))
++      .route("/large", get(|| async { "123456789" }))
++      .route("/chunked", get(|| async {
++        Body::from_stream(futures::stream::iter([
++          Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"12345")),
++          Ok(bytes::Bytes::from_static(b"6789")),
++        ]))
++      }));
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let base = format!("http://{}", listener.local_addr().unwrap());
++    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
++    let fetcher = Fetcher::new_no_redirect(NetworkPolicy::AllowPrivate).unwrap();
++    let opts = FetchOptions { timeout: Some(Duration::from_secs(2)), ..Default::default() };
++    let url = |path: &str| Url::parse(&format!("{base}/{path}")).unwrap();
++    assert_eq!(fetcher.fetch_once_limited(&url("ok"), &opts, 8).await.unwrap().body.len(), 8);
++    for path in ["large", "chunked"] {
++      assert!(matches!(fetcher.fetch_once_limited(&url(path), &opts, 8).await, Err(FetchError::TooLarge)));
++    }
++    assert!(matches!(fetcher.fetch_once_limited(&url("ok"), &opts, 0).await, Err(FetchError::TooLarge)));
++    server.abort();
 +  }
 +
 +  #[test]
