@@ -121,8 +121,10 @@ function classifyRequest(body, proxyHosts) {
   return { eligible };
 }
 
-function requestJson(upstream, body) {
+// Bound retained response bytes and total wall time, not just socket-idle time.
+function requestJson(upstream, body, signal, maxBytes) {
   return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new Error('upstream deadline or caller disconnected'));
     const target = new URL(upstream);
     const payload = Buffer.from(JSON.stringify(body));
     const req = http.request({
@@ -132,13 +134,30 @@ function requestJson(upstream, body) {
       path: target.pathname + target.search,
       method: 'POST',
       agent: false,
+      signal,
       headers: {
         'content-type': 'application/json',
         'content-length': String(payload.length),
       },
     }, res => {
       const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
+      let size = 0;
+      res.on('error', reject);
+      res.on('aborted', () => reject(new Error('upstream response aborted')));
+      const declared = Number(res.headers['content-length']);
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        res.destroy(new Error('upstream response too large'));
+        return;
+      }
+      res.on('data', chunk => {
+        size += chunk.length;
+        if (size > maxBytes) {
+          chunks.length = 0;
+          res.destroy(new Error('upstream response too large'));
+        } else {
+          chunks.push(chunk);
+        }
+      });
       res.on('end', () => resolve({
         statusCode: res.statusCode || 502,
         headers: res.headers,
@@ -209,7 +228,14 @@ export function createServer({
   proxyHosts = DEFAULT_PROXY_HOSTS,
   proxyAttempts = DEFAULT_PROXY_ATTEMPTS,
   metricsPath = DEFAULT_METRICS_PATH,
+  // Internal operator defaults. The request cannot select these limits.
+  maxResponseBytes = 32 * 1024 * 1024,
+  totalTimeoutMs = 180_000,
 } = {}) {
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1 || maxResponseBytes > 32 * 1024 * 1024 ||
+      !Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs < 1 || totalTimeoutMs > 180_000) {
+    throw new Error('invalid router bounds');
+  }
   const metrics = loadMetrics(metricsPath);
 
   const commitMetrics = (startedAtMs) => {
@@ -264,8 +290,14 @@ export function createServer({
         return res.end(JSON.stringify({ error: classification.error }));
       }
 
+      // One wall-clock deadline across direct and all existing retry attempts.
+      // Closing the caller socket also cancels the router's upstream transport.
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), totalTimeoutMs);
+      const disconnect = () => { if (!res.writableFinished) controller.abort(); };
+      res.once('close', disconnect);
       try {
-        const direct = await requestJson(directUpstream, body);
+        const direct = await requestJson(directUpstream, body, controller.signal, maxResponseBytes);
         const status = targetStatus(direct);
         if (policyDenied(direct)) {
           increment(metrics, 'policy_denied');
@@ -283,7 +315,7 @@ export function createServer({
           let attempts = 0;
 
           for (let i = 0; i < proxyAttempts; i += 1) {
-            proxied = await requestJson(proxyUpstream, body);
+            proxied = await requestJson(proxyUpstream, body, controller.signal, maxResponseBytes);
             attempts += 1;
             increment(metrics, 'proxy_attempts');
             proxiedStatus = targetStatus(proxied);
@@ -299,7 +331,9 @@ export function createServer({
           }
 
           if (proxiedStatus === 403 || proxiedStatus === 429 || challengeResponse(proxied, new URL(body.url).hostname)) increment(metrics, 'proxy_exhausted');
-          else increment(metrics, 'proxy_success');
+          else if (proxied.statusCode >= 200 && proxied.statusCode < 300 &&
+              proxiedStatus !== null && proxiedStatus >= 200 && proxiedStatus < 300) increment(metrics, 'proxy_success');
+          else increment(metrics, 'upstream_errors');
 
           commitMetrics(startedAtMs);
           console.log(
@@ -317,8 +351,12 @@ export function createServer({
         increment(metrics, 'upstream_errors');
         commitMetrics(startedAtMs);
         console.warn('playwright router upstream error');
-        res.writeHead(502, { 'content-type': 'application/json' });
+        if (res.destroyed || res.writableEnded) return;
+        res.writeHead(controller.signal.aborted ? 504 : 502, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ error: 'playwright upstream unavailable' }));
+      } finally {
+        clearTimeout(deadline);
+        res.off('close',disconnect);
       }
     });
   });

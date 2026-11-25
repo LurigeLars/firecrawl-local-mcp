@@ -448,3 +448,46 @@ for (const blockedStage of ['direct', 'proxy']) {
     assert.equal(metrics.body.proxy_attempts, proxyHits);
   });
 }
+
+test('oversized upstream body fails closed without proxy retry', async t => {
+  let proxyHits=0;
+  const direct=fakePlaywright(()=>({content:'x'.repeat(4096),pageStatusCode:200}));
+  const proxy=fakePlaywright(()=>{proxyHits++;return {content:'unexpected',pageStatusCode:200};});
+  const directUrl=await listen(direct),proxyUrl=await listen(proxy);
+  const router=createServer({directUpstream:directUrl,proxyUpstream:proxyUrl,
+    proxyHosts:new Set(['example.com']),maxResponseBytes:1024,metricsPath:''});
+  const routerUrl=await listen(router);
+  t.after(()=>Promise.all([router,direct,proxy].map(s=>new Promise(r=>s.close(r)))));
+  const result=await post(routerUrl,{url:'https://example.com/'});
+  assert.equal(result.status,502);
+  assert.equal(proxyHits,0);
+  assert.equal((await get(routerUrl.replace(/\/scrape$/,'/metrics'))).body.upstream_errors,1);
+});
+
+test('wall-clock deadline aborts a stalled upstream without retry', async t=>{
+  let proxyHits=0;
+  const direct=http.createServer((req,res)=>{req.resume();res.writeHead(200,{'content-type':'application/json'});res.write('{"content":"');});
+  const proxy=fakePlaywright(()=>{proxyHits++;return {pageStatusCode:200};});
+  const directUrl=await listen(direct),proxyUrl=await listen(proxy);
+  const router=createServer({directUpstream:directUrl,proxyUpstream:proxyUrl,
+    proxyHosts:new Set(['example.com']),totalTimeoutMs:100,metricsPath:''});
+  const routerUrl=await listen(router);
+  t.after(()=>Promise.all([router,direct,proxy].map(s=>new Promise(r=>{s.closeAllConnections();s.close(r);}))));
+  const result=await post(routerUrl,{url:'https://example.com/'});
+  assert.equal(result.status,504);
+  assert.equal(proxyHits,0);
+});
+
+test('proxy transport failure does not count as proxy success',async t=>{
+  const direct=fakePlaywright(()=>({pageStatusCode:429}));
+  const proxy=http.createServer((req,res)=>{req.resume();res.writeHead(500,{'content-type':'application/json'});res.end('{"error":"fixture"}');});
+  const directUrl=await listen(direct),proxyUrl=await listen(proxy);
+  const router=createServer({directUpstream:directUrl,proxyUpstream:proxyUrl,proxyHosts:new Set(['example.com']),metricsPath:''});
+  const routerUrl=await listen(router);
+  t.after(()=>Promise.all([router,direct,proxy].map(s=>new Promise(r=>s.close(r)))));
+  assert.equal((await post(routerUrl,{url:'https://example.com/'})).status,500);
+  const metrics=(await get(routerUrl.replace(/\/scrape$/,'/metrics'))).body;
+  assert.equal(metrics.proxy_attempts,1);
+  assert.equal(metrics.proxy_success,0);
+  assert.equal(metrics.upstream_errors,1);
+});

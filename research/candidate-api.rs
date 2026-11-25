@@ -175,9 +175,15 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!valid_pdf_options(&req){
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
     }
-    let target=match static_target(&req.url) {
-        Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")
-    };
+    // Browser routes may use a fragment for client-side navigation. Keep
+    // the same public-host and HTTPS restriction; do not admit query strings
+    // or custom ports to this opt-in subset.
+    let target=if render_formats.is_some(){
+        render::public_url(&req.url).map_err(|_|StatusCode::FORBIDDEN).and_then(|u|{
+            if u.scheme()!="https"||u.query().is_some()||u.port().is_some(){Err(StatusCode::BAD_REQUEST)}else{Ok(u)}
+        })
+    }else{static_target(&req.url)};
+    let target=match target{Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")};
     let is_pdf=pdf_request(&req,&target);
     if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!is_pdf{
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
@@ -459,12 +465,13 @@ mod tests {
             .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
         assert!(result["data"]["markdown"].as_str().unwrap().contains("421.5"));
         let rendered:Value=c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({
-            "url":"https://93.184.216.34/report","formats":["html","links"],"waitFor":50
+            "url":"https://93.184.216.34/report#chapter","formats":["html","links"],"waitFor":50
         })).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
         assert_eq!(rendered["success"],true);
         assert!(rendered["data"]["html"].as_str().unwrap().contains("421.5"));
         assert!(rendered["data"].get("markdown").is_none());
         assert_eq!(rendered["data"]["metadata"]["contentType"],"text/html");
+        assert_eq!(rendered["data"]["metadata"]["sourceURL"],"https://93.184.216.34/report#chapter");
         assert_eq!(c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({
             "url":"https://93.184.216.34/report.pdf","formats":["markdown"],"parsers":["pdf"]
         })).send().await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
