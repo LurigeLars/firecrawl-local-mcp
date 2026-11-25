@@ -1,8 +1,14 @@
 // One fixed public-domain query using the actual reused SearXNG proxy.
 import assert from 'node:assert/strict';
-// Only the isolated CI fixture mode uses this intentionally public test
-// credential. Never read or transmit arbitrary local filesystem data.
-const token='0123456789abcdef'.repeat(4);
+import {readFileSync} from 'node:fs';
+// The local mode is only for the disposable candidate Compose project.
+// Read its already-mounted fixed token; never print it or accept a file/URL
+// argument. The production MCP container must not run local mode.
+const fixture='0123456789abcdef'.repeat(4);
+const mode=process.argv[2];
+assert.ok(mode===undefined||mode==='--local','unsupported search probe mode');
+const token=mode==='--local'?readFileSync('/run/research-token/token','utf8').trim():fixture;
+assert.ok(/^[a-f0-9]{64}$/.test(token)&&((token===fixture)===(mode===undefined)),'invalid isolated search token');
 const start=performance.now();
 const response=await fetch('http://api:3002/v2/search',{
   method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},
@@ -23,6 +29,15 @@ assert.equal(body.success,true);
 assert.equal(body.research.source,'local-searxng');
 assert.equal(body.research.catalogue_available,false);
 const results=body.data.web;
+assert.ok(Array.isArray(results));
+const counters=['returned','omitted','pages_read','proxy_hits_observed','engine_failure_reports','duplicate_hits'];
+const diagnostics=Object.fromEntries(counters.map(key=>{
+  const value=body.research[key];
+  assert.ok(Number.isSafeInteger(value)&&value>=0,'missing or invalid search counter');
+  return [key,value];
+}));
+assert.equal(diagnostics.returned,results.length);
+console.log('RELEASE_SEARXNG_DIAGNOSTICS',JSON.stringify(diagnostics));
 assert.ok(results.length>=1&&results.length<=2,'no verified search hits');
 for(const hit of results){
   const host=new URL(hit.url).hostname;
