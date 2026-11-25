@@ -1,0 +1,77 @@
+name: Rust isolated release Compose (opt-in)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-compose-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-compose:
+    if: github.event_name == 'workflow_dispatch' || (github.event.label.name == 'rust-compose-integration' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build and exercise disposable release Compose stack
+        run: |
+          set -euo pipefail
+          project="fc-rust-review-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          compose=(docker compose -p "$project" -f research/compose.rust-research.yaml --profile search)
+          cleanup() {
+            "${compose[@]}" down --volumes --remove-orphans --timeout 10 >/dev/null || true
+          }
+          trap cleanup EXIT
+          "${compose[@]}" config --quiet
+          "${compose[@]}" up -d --build
+          api=$("${compose[@]}" ps -q api)
+          mcp=$("${compose[@]}" ps -q mcp)
+          pdf=$("${compose[@]}" ps -q pdf-ocr)
+          test -n "$api" && test -n "$mcp" && test -n "$pdf"
+          test "$(docker network inspect --format '{{.Internal}}' "${project}_private")" = true
+          for cid in "$mcp" "$pdf"; do
+            test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$cid")" = 1
+          done
+          for cid in "$api" "$mcp" "$pdf"; do
+            test "$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$cid")" = 0
+          done
+          receipt=$(timeout 180s "${compose[@]}" exec -T mcp node --input-type=module - create < research/verify-release-compose.mjs)
+          printf '%s\n' "$receipt"
+          job=$(jq -er '.job' <<< "$receipt")
+          digest=$(jq -er '.digest' <<< "$receipt")
+          # Recreate API only; same private named SQLite volume and secret.
+          "${compose[@]}" up -d --no-deps --no-build --force-recreate api
+          replacement=$("${compose[@]}" ps -q api)
+          test -n "$replacement" && test "$replacement" != "$api"
+          timeout 35s "${compose[@]}" exec -T mcp node --input-type=module - verify "$job" "$digest" < research/verify-release-compose.mjs
+          search=$("${compose[@]}" ps -q searxng)
+          proxy=$("${compose[@]}" ps -q searxng-proxy)
+          test -n "$search" && test -n "$proxy"
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$proxy")" = 1
+          # Search engines can refuse CI egress. Record that separately.
+          if timeout 75s "${compose[@]}" exec -T mcp node --input-type=module - < research/verify-release-search.mjs; then
+            echo 'Release SearXNG integration: PASS (external evidence)' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Release SearXNG integration: UNVERIFIED (external evidence)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Record per-container cgroup counters as separate evidence; the
+          # lifetime peaks are not a simultaneous stack peak or paired baseline.
+          metrics() {
+            for service in api mcp pdf-ocr searxng searxng-proxy; do
+              echo "CGROUP service=$service phase=$1"
+              "${compose[@]}" exec -T "$service" sh -c 'for f in memory.current memory.peak cpu.stat; do if test -r "/sys/fs/cgroup/$f"; then printf "%s\n" "$f"; cat "/sys/fs/cgroup/$f"; fi; done' || true
+            done
+          }
+          metrics before_html
+          timeout 120s "${compose[@]}" exec -T mcp node --input-type=module - < research/verify-release-load.mjs
+          metrics after_html
+          docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}} {{.PIDs}}' "$replacement" "$mcp" "$pdf" "$search" "$proxy"

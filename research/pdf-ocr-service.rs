@@ -3,7 +3,7 @@
 //! No URL fetches, file paths, shell, arbitrary arguments or provider access.
 #[path="../pdf-result.rs"]
 mod contract;
-use contract::{MAX_PDF,MAX_REPLY,parse_reply};
+use contract::{MAX_PDF,MAX_REPLY,parse_reply,parse_office_reply,office_magic};
 use axum::{Router,body::to_bytes,extract::{Request,State},http::StatusCode,
     response::{IntoResponse,Response},routing::{get,post},Json};
 use serde_json::{json,Value};
@@ -22,9 +22,13 @@ fn fail_stop()->!{
     std::process::exit(1)
 }
 
-async fn worker(pdf:&[u8])->Result<Value,StatusCode>{
-    let mut child=Command::new("/usr/local/bin/pdf-ocr-worker")
-        .env_clear().env("PATH","/usr/bin:/bin").env("HOME","/tmp")
+#[derive(Clone,Copy)]
+enum Kind{Pdf,Office}
+
+async fn worker(pdf:&[u8],kind:Kind)->Result<Value,StatusCode>{
+    let mut command=Command::new("/usr/local/bin/pdf-ocr-worker");
+    if matches!(kind,Kind::Office){command.arg("--office");}
+    let mut child=command.env_clear().env("PATH","/usr/bin:/bin").env("HOME","/tmp")
         .env("LC_ALL","C").env("OMP_THREAD_LIMIT","1")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
         .kill_on_drop(true).spawn().map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
@@ -59,18 +63,26 @@ async fn worker(pdf:&[u8])->Result<Value,StatusCode>{
         if status.code()==Some(1){return Err(StatusCode::UNPROCESSABLE_ENTITY);}
         fail_stop();
     }
-    parse_reply(&out).map_err(|_|StatusCode::BAD_GATEWAY)
+    match kind{Kind::Pdf=>parse_reply(&out),Kind::Office=>parse_office_reply(&out)}
+        .map_err(|_|StatusCode::BAD_GATEWAY)
 }
 
-async fn extract(State(slots):State<Arc<Semaphore>>,req:Request)->Response{
-    if req.headers().get("content-type").and_then(|v|v.to_str().ok())!=Some("application/pdf"){
-        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE,"PDF_REQUIRED");
+async fn extract_pdf(State(slots):State<Arc<Semaphore>>,req:Request)->Response{
+    extract(slots,req,Kind::Pdf).await
+}
+async fn extract_office(State(slots):State<Arc<Semaphore>>,req:Request)->Response{
+    extract(slots,req,Kind::Office).await
+}
+async fn extract(slots:Arc<Semaphore>,req:Request,kind:Kind)->Response{
+    let mime=match kind{Kind::Pdf=>"application/pdf",Kind::Office=>"application/octet-stream"};
+    if req.headers().get("content-type").and_then(|v|v.to_str().ok())!=Some(mime){
+        return failure(StatusCode::UNSUPPORTED_MEDIA_TYPE,"DOCUMENT_MEDIA_REQUIRED");
     }
     let Ok(permit)=slots.try_acquire_owned()else{
         return failure(StatusCode::TOO_MANY_REQUESTS,"OCR_BUSY");
     };
     let pdf=match tokio::time::timeout(Duration::from_secs(15),to_bytes(req.into_body(),MAX_PDF)).await{
-        Ok(Ok(bytes)) if bytes.starts_with(b"%PDF-")=>bytes,
+        Ok(Ok(bytes)) if match kind{Kind::Pdf=>bytes.starts_with(b"%PDF-"),Kind::Office=>office_magic(&bytes)}=>bytes,
         Ok(Ok(_))=>return failure(StatusCode::BAD_REQUEST,"INVALID_PDF"),
         Ok(Err(_))=>return failure(StatusCode::PAYLOAD_TOO_LARGE,"PDF_BODY_REJECTED"),
         Err(_)=>return failure(StatusCode::REQUEST_TIMEOUT,"PDF_BODY_TIMEOUT")
@@ -78,7 +90,7 @@ async fn extract(State(slots):State<Arc<Semaphore>>,req:Request)->Response{
     // The bounded task owns the permit even if the HTTP caller disconnects.
     let result=tokio::spawn(async move{
         let _permit=permit;
-        worker(&pdf).await
+        worker(&pdf,kind).await
     }).await;
     match result{
         Ok(Ok(value))=>Json(value).into_response(),
@@ -92,7 +104,8 @@ async fn main()->Result<(),String>{
     if std::process::id()!=1{return Err("OCR server must run as container PID 1".into());}
     let app=Router::new()
         .route("/health",get(||async{Json(json!({"status":"ok","research":true}))}))
-        .route("/extract",post(extract))
+        .route("/extract",post(extract_pdf))
+        .route("/extract-office",post(extract_office))
         .with_state(Arc::new(Semaphore::new(1)));
     let listener=tokio::net::TcpListener::bind("0.0.0.0:3000").await.map_err(|e|e.to_string())?;
     axum::serve(listener,app).await.map_err(|e|e.to_string())
