@@ -368,6 +368,37 @@ mod tests {
     }
 
     #[test]
+    fn v1_batch_database_migrates_without_losing_results_or_claims() {
+        let tmp=Temp::new();
+        let db=Connection::open(tmp.db()).unwrap();
+        db.execute_batch("
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, status TEXT NOT NULL,
+                created_at INTEGER NOT NULL, finished_at INTEGER
+            );
+            CREATE TABLE items (
+                job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, key TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,state TEXT NOT NULL,generation INTEGER NOT NULL DEFAULT 0,
+                result_seq INTEGER,payload TEXT,
+                PRIMARY KEY(job,key), UNIQUE(job,ordinal), UNIQUE(job,result_seq)
+            );
+            INSERT INTO jobs VALUES('old','scraping',1,NULL);
+            INSERT INTO items VALUES('old','a',0,'done',1,1,'{}');
+            INSERT INTO items VALUES('old','b',1,'running',1,NULL,NULL);
+            PRAGMA user_version=1;").unwrap();
+        drop(db);
+        let mut store=Store::open(&tmp.db()).unwrap();
+        assert_eq!(store.page("old",0,10).unwrap()["completed"],1);
+        let b=store.claim_next().unwrap().unwrap();
+        assert_eq!(b.item(),"b");
+        assert!(b.crawl().is_none());
+        store.settle(&b,true,&json!({"value":42})).unwrap();
+        assert_eq!(store.page("old",0,10).unwrap()["completed"],2);
+        store.create_crawl("new","seed",2,1).unwrap();
+        assert_eq!(store.claim_next().unwrap().unwrap().crawl().unwrap().depth,0);
+    }
+
+    #[test]
     fn crawl_frontier_atomic_restart_dedup_depth_and_failure_limit() {
         let tmp=Temp::new();
         let mut db=Store::open(&tmp.db()).unwrap();

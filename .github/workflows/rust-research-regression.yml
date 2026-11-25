@@ -46,6 +46,15 @@ jobs:
             --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
             firecrawl-rust-ocr-ci:review
+      - name: Smoke isolated OCR HTTP server and worker
+        run: |
+          cid=$(docker run -d --pull=never --network none --read-only --init=false \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
+            --entrypoint /usr/local/bin/pdf-ocr-service firecrawl-rust-ocr-ci:review)
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          timeout 100s docker exec "$cid" python3 -B /research/verify-ocr-service.py
       - name: Smoke actual isolated candidate server process
         run: |
           timeout 75s docker run --rm --pull=never --network none --read-only \

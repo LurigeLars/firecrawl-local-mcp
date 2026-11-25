@@ -19,6 +19,8 @@ mod render;
 mod batch;
 #[path = "candidate-crawl.rs"]
 mod crawl;
+#[path = "candidate-pdf.rs"]
+mod pdf;
 
 const MAX_OUTPUT: usize = 2 * 1024 * 1024;
 const SEARCH: &str = "http://searxng-proxy:8081/search";
@@ -32,6 +34,7 @@ struct CandidateState {
     render_endpoint: String,
     batch: Option<batch::BatchState>,
     crawler: crawl::Crawler,
+    pdf_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -137,7 +140,7 @@ async fn render_route(State(state):State<CandidateState>,headers:HeaderMap,body:
     }
 }
 
-fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>)->Result<(Router,CandidateState),String> {
+fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>,pdf_enabled:bool)->Result<(Router,CandidateState),String> {
     if !(32..=256).contains(&token.len()) || token.chars().any(|c|c.is_control()||c.is_whitespace()) {
         return Err("invalid candidate token".into());
     }
@@ -150,7 +153,7 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         jobs:Mutex::new(HashMap::new())
     });
     let state=CandidateState{auth:auth.clone(),slots:Arc::new(Semaphore::new(4)),
-        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?};
+        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled};
     let app=Router::new()
         .route("/health",get(|State(state):State<CandidateState>|async move{
             let job_store=match &state.batch{None=>"disabled",Some(b) if b.ready()=>"ready",Some(_)=>"degraded"};
@@ -162,6 +165,7 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         .route("/research/render",post(render_route))
         .route("/research/batch",post(batch::create))
         .route("/research/crawl",post(batch::create_crawl))
+        .route("/research/pdf",post(pdf::extract))
         .route("/research/batch/{id}",get(batch::status).delete(batch::cancel))
         .layer(DefaultBodyLimit::max(32*1024))
         .layer(middleware::from_fn_with_state(auth,gate))
@@ -174,7 +178,8 @@ pub async fn run_candidate()->Result<(),String> {
     let path=std::env::var("CANDIDATE_TOKEN_FILE").unwrap_or_else(|_|"/run/secrets/firecrawl_candidate_token".into());
     let token=std::fs::read_to_string(path).map_err(|_|"candidate token file unavailable".to_string())?;
     let batch=std::env::var_os("CANDIDATE_JOB_DB_FILE").map(|path|batch::BatchState::open(std::path::Path::new(&path))).transpose()?;
-    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch)?;
+    let pdf_enabled=std::env::var("CANDIDATE_PDF_ENABLED").as_deref()==Ok("1");
+    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch,pdf_enabled)?;
     let listener=tokio::net::TcpListener::bind("127.0.0.1:3002").await.map_err(|e|e.to_string())?;
     let worker=state.batch.is_some().then(||tokio::spawn(batch::supervise(state)));
     let result=axum::serve(listener,app).with_graceful_shutdown(super::shutdown_signal()).await.map_err(|e|e.to_string());
@@ -201,7 +206,7 @@ mod tests {
                 Json(json!({"content":"<html><body><p>Stock 421.5</p></body></html>",
                     "pageStatusCode":200,"contentType":"text/html","url":body["url"]}))
             }))).await;
-        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape"),None).unwrap().0).await;
+        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape"),None,false).unwrap().0).await;
         let c=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
         assert_eq!(c.get(format!("{base}/health")).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
         assert_eq!(c.get(format!("{base}/health")).bearer_auth(TOKEN).header("Host","bad.example").send().await.unwrap().status(),StatusCode::FORBIDDEN);

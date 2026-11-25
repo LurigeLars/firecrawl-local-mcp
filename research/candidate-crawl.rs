@@ -14,7 +14,7 @@ const HTML_LIMIT:usize=2*1024*1024;
 const DISCOVERY_LIMIT:usize=100;
 
 #[derive(Clone)]
-pub(super) struct Crawler {fetcher:Fetcher}
+pub(super) struct Crawler {pub(super) fetcher:Fetcher}
 
 pub(super) fn scoped(seed:&Url,target:&Url)->bool {
     seed.origin()==target.origin() &&
@@ -79,6 +79,9 @@ impl Crawler{
             let res=self.fetcher.fetch_once(&robots,&FetchOptions{
                 timeout:Some(Duration::from_secs(8)),..Default::default()
             }).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+            if res.status==200 && (res.mime().as_deref()!=Some("text/plain") || std::str::from_utf8(&res.body).is_err()){
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
             let (allowed,delay)=robots_decision(res.status,&res.body,&target)?;
             tokio::time::sleep(delay).await;
             if !allowed{return Err(StatusCode::FORBIDDEN);}
