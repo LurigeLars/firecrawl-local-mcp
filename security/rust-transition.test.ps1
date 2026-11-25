@@ -132,4 +132,55 @@ try {
     $expected='stop:gateway,stop:mcp,stop:api,rust-queue-count,stop:pdf-ocr,original:redis,original:rabbitmq,original:nuq-postgres,restore-pg:nuq-postgres,pg-auth,rabbit-ready,wait:2,pg-auth,rabbit-ready,tag:firecrawl-api:latest,tag:firecrawl-mcp:latest,legacy-recreate:api,restore-pg:api,restore-search,legacy-health,legacy-recreate:mcp,legacy-mcp,original:gateway'
     if (($script:events -join ',') -cne $expected) { throw 'Rollback orchestration changed.' }
     'RUST_ROLLBACK_ORCHESTRATION_FIXTURE_PASS'
+
+    & {
+        $baseImage=$candidate['pdf-ocr']
+        $newImage='sha256:'+('7'*64)
+        $script:states['pdf-ocr']=@{id=('c'*64);image=$baseImage;running=$true}
+        $script:tags['firecrawl-rust-document:local']=$baseImage
+        Set-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Value 'rust-active-v1'
+        $journal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Get-TransitionPath 'rust-transition.json')
+        function Assert-TransitionSource {
+            param($ProjectRoot,$Revision)
+            if ($ProjectRoot -cne 'synthetic' -or $Revision -cne $journal.revision) { throw 'Incorrect release source.' }
+        }
+        function Get-AcceptedCandidateImage([string]$Image,[string]$Digest) {
+            if ($Image -cne 'firecrawl-rust-document:staged' -or $Digest -cne $newImage) { throw 'Wrong accepted image.' }
+            return $newImage
+        }
+        function Invoke-McpDocker {
+            param([string[]]$Arguments,[int]$TimeoutSeconds=1800)
+            $script:events.Add($Arguments[0])
+            switch ($Arguments[0]) {
+                'compose' { if ($Arguments[-1] -cne '--quiet') { throw 'Unexpected Compose call.' }; return '' }
+                'network' { return 'true' }
+                'scout' { if ($Arguments[-1] -cne "local://$newImage") { throw 'Wrong scanned image.' }; return '' }
+                'top' { return "PID COMMAND`n123 pdf-ocr-service" }
+                default { throw 'Unreviewed PDF operation.' }
+            }
+        }
+        function Restart-RustDocumentService {
+            param($ComposeArguments,[string]$Image)
+            $script:events.Add("restart:$Image")
+            if ($failHealth -and $Image -ceq $newImage) { throw 'Synthetic health failure.' }
+        }
+        $script:events.Clear()
+        $failHealth=$true
+        try {
+            Invoke-RustDocumentUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Revision $journal.revision -Digest $newImage
+            throw 'Unhealthy OCR update accepted.'
+        } catch { if ($_.Exception.Message -cne 'PDF update failed; original PDF service verified.') { throw } }
+        if ((Get-RustRollbackJournal).candidate['pdf-ocr'] -cne $baseImage -or
+            ($script:events -join ',') -cne "compose,network,scout,top,tag:firecrawl-rust-document:staged-rollback,restart:$newImage,restart:$baseImage") {
+            throw 'Failed PDF update did not preserve the original service and journal.'
+        }
+        $script:events.Clear()
+        $failHealth=$false
+        $receipt=Invoke-RustDocumentUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Revision $journal.revision -Digest $newImage
+        if ($receipt -cne 'RUST_PDF_ONLY_UPDATE_VERIFIED' -or (Get-RustRollbackJournal).candidate['pdf-ocr'] -cne $newImage -or
+            ($script:events -join ',') -cne "compose,network,scout,top,tag:firecrawl-rust-document:staged-rollback,restart:$newImage") {
+            throw 'PDF update verification or journal commit failed.'
+        }
+        'RUST_DOCUMENT_UPDATE_FIXTURE_PASS'
+    }
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
