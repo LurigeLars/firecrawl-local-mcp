@@ -5,6 +5,9 @@ import {createHash} from 'node:crypto';
 const MCP='http://mcp:3000/mcp';
 const modeArg=process.argv[2];
 assert.ok(['legacy','candidate'].includes(modeArg));
+const documentMode=process.argv[3]==='--documents';
+const searchMode=process.argv[3]==='--search';
+assert.ok(process.argv[3]===undefined||documentMode||searchMode,'unsupported workload');
 const deadline=performance.now()+120000;
 let session;
 let version = '2025-06-18';
@@ -81,6 +84,79 @@ const list = await rpc('tools/list', {});
 assert.ok(list.result?.tools?.some(tool=>tool.name==='firecrawl_scrape'));
 
 
+// Separate document acceptance, not part of the ten-call HTML memory sample.
+// URLs refer to existing pinned public synthetic fixtures. Never print content.
+if(searchMode){
+  assert.ok(list.result.tools.some(tool=>tool.name==='firecrawl_search'),'search unavailable');
+  const started=performance.now();
+  let reason='transport_or_envelope',hits=0;
+  try{
+    const result=await rpc('tools/call',{name:'firecrawl_search',arguments:{
+      query:'example domains RFC 2606',includeDomains:['iana.org'],sources:['web'],limit:2,timeout:40000
+    }});
+    if(result.result&&!result.result.isError&&!result.error){
+      const item=result.result.content?.find(x=>x.type==='text');
+      const body=JSON.parse(item?.text??'null');
+      const web=body?.data?.web;
+      if(body?.success===true&&Array.isArray(web)){
+        hits=web.length;
+        const valid=web.every(hit=>{
+          try{
+            const u=new URL(hit.url);
+            return ['https:','http:'].includes(u.protocol)&&!u.username&&!u.password&&
+              (u.hostname==='iana.org'||u.hostname.endsWith('.iana.org'))&&hit.source==='web';
+          }catch{return false;}
+        });
+        reason=hits===0?'no_hits':hits>2||!valid||new Set(web.map(h=>h.url)).size!==hits?'invalid_hits':'ok';
+      }
+    }
+  }catch{/* Only fixed category, no raw remote payload. */}
+  const passed=reason==='ok';
+  console.log(JSON.stringify({verdict:passed?'PASS':'UNVERIFIED',backend:modeArg,
+    scope:'fixed IANA-domain query through actual MCP HTTP; not comprehensive search coverage',
+    reason,hits,elapsed_ms:Math.round((performance.now()-started)*10)/10}));
+  if(modeArg==='candidate'&&!passed)process.exitCode=1;
+} else if(documentMode){
+  const documents=[
+    ['PDF','https://raw.githubusercontent.com/LurigeLars/firecrawl-local-mcp/b5a1bddc489c1d39fc2e45ef19ea77f7040c449b/research/fixtures/pdf-transport-native.pdf',
+      ['Firecrawl synthetic PDF transport fixture','Stock 421.5 million barrels','Weekly change -1.2 million barrels','September 8, 2026'],{parsers:['pdf']}],
+    ['XLSX','https://raw.githubusercontent.com/LurigeLars/firecrawl-local-mcp/ae200f184f3a2cc9aad17a17b7e82a8eb6e1a424/research/fixtures/office-transport.xlsx',
+      ['Stock','Change','421.5','-1.2'],{}]
+  ];
+  const results=[];
+  for(const [source,url,markers,options] of documents){
+    const started=performance.now();
+    let reason='transport_or_envelope',found=0,bytes=0;
+    try{
+      const result=await rpc('tools/call',{name:'firecrawl_scrape',arguments:{
+        url,formats:['markdown'],maxAge:0,storeInCache:false,timeout:40000,...options
+      }});
+      if(result.result&&!result.result.isError&&!result.error){
+        const item=result.result.content?.find(x=>x.type==='text');
+        const envelope=JSON.parse(item?.text??'null');
+        const doc=envelope?.data??envelope;
+        if(typeof doc?.markdown==='string'){
+          const md=doc.markdown;
+          bytes=Buffer.byteLength(md);
+          const normalized=md.replace(/\\-/g,'-').replace(/\s+/g,' ').toLowerCase();
+          found=markers.filter(marker=>normalized.includes(marker.toLowerCase())).length;
+          // Legacy XLSX can expose raw ZIP bytes as Markdown even with HTTP
+          // 200 and all markers. Reject controls/replacement/ZIP signature.
+          const binary=/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\ufffd]/u.test(md)||md.trimStart().startsWith('PK\u0003\u0004');
+          reason=doc.metadata?.statusCode!==200||doc.metadata?.sourceURL!==url?'metadata_mismatch':
+            binary?'binary_like_markdown':found!==markers.length?'missing_markers':'ok';
+        }
+      }
+    }catch{/* Fixed failure category; no raw remote data or error text. */}
+    results.push({source,verdict:reason==='ok'?'PASS':'UNVERIFIED',reason,
+      markers:found,expected_markers:markers.length,markdown_bytes:bytes,
+      elapsed_ms:Math.round((performance.now()-started)*10)/10});
+  }
+  const passed=results.every(r=>r.verdict==='PASS');
+  console.log(JSON.stringify({verdict:passed?'PASS':'UNVERIFIED',backend:modeArg,
+    scope:'pinned synthetic PDF and XLSX via actual MCP HTTP; not arbitrary document parity',results}));
+  if(modeArg==='candidate'&&!passed)process.exitCode=1;
+} else {
 const sources=[
   ['IANA','https://www.iana.org/help/example-domains',['Example Domains','RFC 2606','RFC 6761']],
   ['CFTC','https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm',['September 8, 2026','Open Interest','1,939,911']]
@@ -123,3 +199,4 @@ for(const mode of ['serial','concurrent_2']){
 for(const [source] of sources)assert.equal(new Set(samples.filter(x=>x.source===source).map(x=>x.sha256)).size,1,source+' content varied');
 console.log(JSON.stringify({verdict:'PASS',backend:modeArg,scope:'same fixed HTML workload through actual MCP HTTP; not full production parity',
   requests:samples.length,markers:samples.reduce((n,x)=>n+x.markers,0),wall_ms:Math.round(performance.now()-started),groups,samples}));
+}

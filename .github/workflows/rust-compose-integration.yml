@@ -80,4 +80,14 @@ jobs:
           metrics before_html
           timeout 120s "${compose[@]}" exec -T mcp node --input-type=module - < research/verify-release-load.mjs
           metrics after_html
+          if timeout 135s "${compose[@]}" exec -T mcp node --input-type=module - candidate --documents < research/verify-mcp-load.mjs; then
+            echo 'Release MCP document transport: PASS (external fixture evidence)' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Release MCP document transport: UNVERIFIED (external fixture evidence)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if timeout 135s "${compose[@]}" exec -T mcp node --input-type=module - candidate --search < research/verify-mcp-load.mjs; then
+            echo 'Release MCP search transport: PASS (external fixture evidence)' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Release MCP search transport: UNVERIFIED (external fixture evidence)' >> "$GITHUB_STEP_SUMMARY"
+          fi
           docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}} {{.PIDs}}' "$replacement" "$mcp" "$pdf" "$search" "$proxy"
