@@ -76,12 +76,60 @@ def verify_live(pid):
     if not all_pass:
         raise SystemExit("LIVE_CANDIDATE_NOT_VERIFIED")
 
+def settled_job(route,payload,seconds=65):
+    status,raw=call(route,payload=payload)
+    assert status==202,(route,status)
+    job_id=json.loads(raw)["id"]
+    deadline=time.monotonic()+seconds
+    while time.monotonic()<deadline:
+        status,raw=call("/research/batch/"+job_id)
+        assert status==200,(route,status)
+        result=json.loads(raw)["data"]
+        if result["status"]=="completed":
+            return job_id,result
+        time.sleep(.2)
+    raise AssertionError("job did not settle within bound")
+
+def verify_live_jobs():
+    # Fixed official public sources only. No retries or robots override.
+    cases={
+        "https://www.iana.org/help/example-domains":["Example Domains","RFC 2606","RFC 6761"],
+        "https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm":
+            ["September 8, 2026","Open Interest","1,939,911"]
+    }
+    started=time.monotonic()
+    batch_id,batch=settled_job("/research/batch",{"urls":list(cases)})
+    assert batch["total"]==2 and batch["completed"]==2 and batch["failed"]==0,batch["status"]
+    assert {r["key"] for r in batch["results"]}==set(cases)
+    for row in batch["results"]:
+        assert row["state"]=="done"
+        assert row["data"]["source"]=="local"
+        text=" ".join(row["data"]["markdown"].split()).lower()
+        assert all(m.lower() in text for m in cases[row["key"]])
+    assert batch["next_after"] is None
+    print("LIVE_BATCH_PASS",json.dumps({"pages":2,"markers":6,"elapsed_ms":round((time.monotonic()-started)*1000)}))
+    started=time.monotonic()
+    seed="https://www.iana.org/help"
+    crawl_id,crawl=settled_job("/research/crawl",{"url":seed,"limit":2,"maxDiscoveryDepth":1},115)
+    assert crawl["total"]==2 and crawl["completed"]==2 and crawl["failed"]==0,(
+        "bounded live crawl not verified",crawl["total"],crawl["completed"],crawl["failed"])
+    assert crawl["crawl"]["page_attempts"]==2 and crawl["crawl"]["page_attempt_limit"]==6
+    assert crawl["crawl"]["site_coverage_verified"] is False
+    assert crawl["next_after"] is None
+    for row in crawl["results"]:
+        assert row["state"]=="done" and row["data"]["source"]=="local"
+        assert row["data"]["markdown"].strip()
+        assert row["key"]==seed or row["key"].startswith(seed+"/")
+    print("LIVE_CRAWL_PASS",json.dumps({"pages":2,"attempts":2,"site_coverage_verified":False,
+        "elapsed_ms":round((time.monotonic()-started)*1000)}))
+    return {batch_id:batch,crawl_id:crawl}
+
 with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
     token_path=pathlib.Path(td)/"token"
     env={**os.environ,"CANDIDATE_TOKEN_FILE":str(token_path)}
-    batch_id=None
-    saved_batch=None
-    if "--batch" in sys.argv:
+    saved_jobs={}
+    env.pop("CANDIDATE_PDF_ENABLED",None)
+    if "--batch" in sys.argv or "--live-jobs" in sys.argv:
         env["CANDIDATE_JOB_DB_FILE"]=str(pathlib.Path(td)/"jobs.sqlite")
     bad=subprocess.run([BIN],env=env,capture_output=True,timeout=5)
     assert bad.returncode!=0,"must refuse missing token"
@@ -110,27 +158,24 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             assert call("/v2/search",payload={"query":"test","endpoint":"http://localhost"})[0]==400
             assert call("/research/render",payload={"url":"https://169.254.169.254/","onlyMainContent":True})[0]==403
             assert call("/v2/crawl",payload={})[0]==404
+            assert call("/research/pdf",payload={"url":"https://www.iana.org/report.pdf"})[0]==503
+            assert call("/research/pdf",payload={"url":"https://127.0.0.1/x.pdf"})[0]==403
             print("CANDIDATE_PROCESS_SMOKE_PASS: authenticated loopback, unsupported options and private destinations rejected")
             if "--live" in sys.argv:
                 verify_live(proc.pid)
-            if "--batch" in sys.argv:
+            if "--batch" in sys.argv or "--live-jobs" in sys.argv:
                 assert json.loads(call("/health")[1])["jobStore"]=="ready"
+                assert call("/research/crawl",payload={"url":"https://127.0.0.1/","limit":2,"maxDiscoveryDepth":1})[0]==403
+                assert call("/research/crawl",payload={"url":"https://www.iana.org/help","limit":2,"maxDiscoveryDepth":1,"ignoreRobotsTxt":True})[0]==400
+                assert call("/research/crawl",payload={"url":"https://www.iana.org/help","limit":101,"maxDiscoveryDepth":1})[0]==400
+            if "--live-jobs" in sys.argv:
+                saved_jobs.update(verify_live_jobs())
+            if "--batch" in sys.argv:
                 assert call("/research/batch",payload={"urls":["https://127.0.0.1/"]})[0]==403
                 # No egress in this test: a real guarded request must settle as
                 # an explicit per-item failure, not an invented document.
-                status,body=call("/research/batch",payload={"urls":["https://93.184.216.34/report"]})
-                assert status==202
-                batch_id=json.loads(body)["id"]
-                deadline=time.monotonic()+30
-                while time.monotonic()<deadline:
-                    status,body=call("/research/batch/"+batch_id)
-                    assert status==200
-                    saved_batch=json.loads(body)["data"]
-                    if saved_batch["status"]=="completed":
-                        break
-                    time.sleep(.1)
-                else:
-                    raise AssertionError("durable worker did not settle")
+                batch_id,saved_batch=settled_job("/research/batch",{"urls":["https://93.184.216.34/report"]},30)
+                saved_jobs[batch_id]=saved_batch
                 assert saved_batch["failed"]==1 and saved_batch["completed"]==0
                 assert saved_batch["results"][0]["state"]=="failed"
                 assert call("/research/batch/"+batch_id,token=None)[0]==401
@@ -142,7 +187,7 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
                 proc.kill()
                 proc.wait(timeout=5)
 
-    if batch_id:
+    if saved_jobs:
         # Reopen the same private DB in a new actual server process.
         with subprocess.Popen([BIN],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL) as proc:
             try:
@@ -156,10 +201,13 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
                     time.sleep(.1)
                 else:
                     raise AssertionError("restarted candidate health unavailable")
-                status,body=call("/research/batch/"+batch_id)
-                assert status==200
-                assert json.loads(body)["data"]==saved_batch
-                print("DURABLE_BATCH_PROCESS_PASS: real worker settled failure; identical status and result after restart")
+                for job_id,saved in saved_jobs.items():
+                    status,body=call("/research/batch/"+job_id)
+                    assert status==200
+                    assert json.loads(body)["data"]==saved
+                print("DURABLE_JOB_RESTART_PASS",json.dumps({"jobs":len(saved_jobs),"live":"--live-jobs" in sys.argv}))
+                if "--batch" in sys.argv:
+                    print("DURABLE_BATCH_PROCESS_PASS: real worker settled failure; identical status and result after restart")
             finally:
                 proc.terminate()
                 try:

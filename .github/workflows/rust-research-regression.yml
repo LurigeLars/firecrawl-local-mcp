@@ -72,9 +72,20 @@ jobs:
             --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
             --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py --live
+      - name: Live durable batch and bounded crawl (separate evidence)
+        id: live_jobs
+        continue-on-error: true
+        run: |
+          timeout 210s docker run --rm --pull=never --network bridge --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py --live-jobs
       - name: Report external availability separately from offline gate
         if: always()
-        run: echo 'Live public-source sample outcome = ${{ steps.live_sample.outcome }} (not offline acceptance)' >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo 'Live public-source sample outcome = ${{ steps.live_sample.outcome }} (not offline acceptance)' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Live durable jobs outcome = ${{ steps.live_jobs.outcome }} (not offline acceptance)' >> "$GITHUB_STEP_SUMMARY"
 
   durable-job-store:
     runs-on: ubuntu-latest
