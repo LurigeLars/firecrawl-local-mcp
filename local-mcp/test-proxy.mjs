@@ -30,7 +30,7 @@ check('custom instructions', (init.result?.instructions ?? '').includes('self-ho
 
 const list = await rpc('tools/list', {});
 const names = (list.result?.tools ?? []).map(t => t.name);
-check('bounded tools listed', names.length === 14 && names.includes('firecrawl_browser_network') && !names.includes('firecrawl_parse'), `${names.length}: ~${tokens(JSON.stringify(list.result.tools))} tokens`);
+check('bounded tools listed', names.length === 15 && names.includes('tool_usage') && names.includes('firecrawl_browser_network') && !names.includes('firecrawl_parse'), `${names.length}: ~${tokens(JSON.stringify(list.result.tools))} tokens`);
 
 const browsers = await rpc('tools/call', { name: 'firecrawl_browser_list', arguments: {} });
 check('browser sidecar reachable', browsers.result && !browsers.result.isError, browsers.result?.content?.[0]?.text?.slice(0, 120));
