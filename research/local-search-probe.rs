@@ -48,6 +48,9 @@ fn valid_domain(s: &str) -> bool {
 }
 
 impl Request {
+    pub(crate) fn limit(&self)->usize{self.limit}
+    pub(crate) fn timeout_ms(&self)->u64{self.timeout}
+
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if self.query.trim().is_empty() || self.query.len() > 4096 ||
             self.query.chars().any(char::is_control) ||
