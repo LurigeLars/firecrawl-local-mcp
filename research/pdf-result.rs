@@ -3,6 +3,7 @@ use serde_json::Value;
 pub(crate) const MAX_PDF:usize=32*1024*1024;
 pub(crate) const MAX_REPLY:usize=2*1024*1024;
 pub(crate) const MAX_OFFICE_MARKDOWN:usize=512*1024;
+pub(crate) const MAX_PAGES:usize=200;
 
 pub(crate) fn office_magic(bytes:&[u8])->bool{
     bytes.starts_with(b"PK\x03\x04")||
@@ -28,7 +29,13 @@ pub(crate) fn parse_reply(bytes:&[u8])->Result<Value,&'static str>{
         return Err("unexpected OCR verification or layout claim");
     }
     let pages=value["pages"].as_array().ok_or("missing PDF pages")?;
-    if pages.is_empty()||pages.len()>200{return Err("invalid page count");}
+    let total=value["total_pages"].as_u64().filter(|n|(1..=MAX_PAGES as u64).contains(n)).ok_or("invalid total pages")?;
+    let bound=match value.get("requested_max_pages"){
+        Some(Value::Null)=>total,
+        Some(v)=>v.as_u64().filter(|n|(1..=MAX_PAGES as u64).contains(n)).ok_or("invalid page bound")?,
+        None=>return Err("missing page bound")
+    };
+    if pages.is_empty()||pages.len() as u64!=total.min(bound){return Err("invalid page count");}
     let mut classified=Vec::new();
     let mut unresolved=0u64;
     let mut recognized=0u64;
@@ -72,9 +79,11 @@ mod tests{
             {"page":1,"source":"native","text":"native","warning":null},
             {"page":2,"source":"ocr","text":"42","native_text":"","warning":"unverified"},
             {"page":3,"source":"unresolved","text":"","warning":"unresolved"}
-        ],"pages_needing_ocr":[2,3],"ocr_attempted":2,"unresolved_pages":1});
+        ],"pages_needing_ocr":[2,3],"ocr_attempted":2,"unresolved_pages":1,"total_pages":3,"requested_max_pages":null});
         let encode=|v:&Value|serde_json::to_vec(v).unwrap();
         assert!(parse_reply(&encode(&value)).is_ok());
+        let mut limited=value.clone();limited["requested_max_pages"]=json!(1);
+        assert!(parse_reply(&encode(&limited)).is_err());
         value["pages"][1]["warning"]=Value::Null;
         assert!(parse_reply(&encode(&value)).is_err());
         value["pages"][1]["warning"]=json!("unverified");

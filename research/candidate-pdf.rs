@@ -3,6 +3,7 @@
 #[path="pdf-result.rs"]
 mod contract;
 use contract::{MAX_PDF,MAX_REPLY,parse_reply,parse_office_reply,office_magic};
+pub(super) use contract::MAX_PAGES;
 use super::{CandidateState,decode,refusal,bounded,render};
 use crate::fetch::{FetchOptions,FetchResult,FetchError,Fetcher};
 use axum::{body::Bytes,extract::State,http::{HeaderMap,StatusCode},response::{IntoResponse,Response},Json};
@@ -100,15 +101,16 @@ async fn download(fetcher:&Fetcher,initial:&url::Url,budget:Duration,expected:Op
 #[serde(deny_unknown_fields)]
 struct PdfRequest{url:String}
 
-async fn ocr_at(endpoint:&str,pdf:Bytes)->Result<Value,StatusCode>{
-    if pdf.len()>MAX_PDF||!pdf.starts_with(b"%PDF-"){
+async fn ocr_at(endpoint:&str,pdf:Bytes,max_pages:Option<usize>)->Result<Value,StatusCode>{
+    if pdf.len()>MAX_PDF||!pdf.starts_with(b"%PDF-")||max_pages.is_some_and(|n|!(1..=MAX_PAGES).contains(&n)){
         return Err(StatusCode::BAD_REQUEST);
     }
     let client=reqwest::Client::builder().no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(85)).build().map_err(|_|StatusCode::BAD_GATEWAY)?;
-    let mut res=client.post(endpoint).header("content-type","application/pdf").body(pdf)
-        .send().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+    let mut request=client.post(endpoint).header("content-type","application/pdf").body(pdf);
+    if let Some(n)=max_pages{request=request.header("x-firecrawl-max-pages",n.to_string());}
+    let mut res=request.send().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
     match res.status(){
         StatusCode::OK=>{},
         StatusCode::TOO_MANY_REQUESTS=>return Err(StatusCode::TOO_MANY_REQUESTS),
@@ -120,17 +122,19 @@ async fn ocr_at(endpoint:&str,pdf:Bytes)->Result<Value,StatusCode>{
         if chunk.len()>MAX_REPLY+1-bytes.len(){return Err(StatusCode::PAYLOAD_TOO_LARGE);}
         bytes.extend_from_slice(&chunk);
     }
-    parse_reply(&bytes).map_err(|_|StatusCode::BAD_GATEWAY)
+    let receipt=parse_reply(&bytes).map_err(|_|StatusCode::BAD_GATEWAY)?;
+    if receipt["requested_max_pages"]!=json!(max_pages){return Err(StatusCode::BAD_GATEWAY);}
+    Ok(receipt)
 }
 
 // Stage-specific errors carry only fixed codes and HTTP status, never URLs,
 // response bodies, credentials or parser stderr.
-pub(super) async fn document(state:&CandidateState,target:&url::Url,budget:Duration)
+pub(super) async fn document(state:&CandidateState,target:&url::Url,budget:Duration,max_pages:Option<usize>)
     ->Result<(url::Url,Value),(StatusCode,&'static str)>{
     if !state.pdf_enabled{return Err((StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED"));}
     let deadline=tokio::time::Instant::now()+budget;
     let (landed,bytes,_)=download(&state.crawler.fetcher,target,budget,Some(Kind::Pdf)).await.map_err(|s|(s,"PDF_DOWNLOAD_FAILED"))?;
-    let receipt=tokio::time::timeout_at(deadline,ocr_at(ENDPOINT,bytes)).await
+    let receipt=tokio::time::timeout_at(deadline,ocr_at(ENDPOINT,bytes,max_pages)).await
         .map_err(|_|(StatusCode::GATEWAY_TIMEOUT,"PDF_WORKER_TIMEOUT"))?
         .map_err(|s|(s,"PDF_WORKER_FAILED"))?;
     Ok((landed,receipt))
@@ -165,7 +169,7 @@ pub(super) async fn isolated_document(state:&CandidateState,target:&url::Url,bud
     if remaining.is_zero(){return Err((StatusCode::GATEWAY_TIMEOUT,"DOCUMENT_DEADLINE"));}
     match kind{
         Kind::Pdf=>{
-            let receipt=tokio::time::timeout_at(deadline,ocr_at(ENDPOINT,bytes)).await
+            let receipt=tokio::time::timeout_at(deadline,ocr_at(ENDPOINT,bytes,None)).await
                 .map_err(|_|(StatusCode::GATEWAY_TIMEOUT,"PDF_WORKER_TIMEOUT"))?
                 .map_err(|s|(s,"PDF_WORKER_FAILED"))?;
             v2_document(target,&landed,receipt).map_err(|s|(s,"PDF_INCOMPLETE"))
@@ -194,13 +198,15 @@ pub(super) fn v2_document(target:&url::Url,landed:&url::Url,receipt:Value)->Resu
     if pages.iter().all(|p|p["text"].as_str().is_none_or(|s|s.trim().is_empty())){
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
+    let total=receipt["total_pages"].as_u64().ok_or(StatusCode::BAD_GATEWAY)?;
     let warning=if receipt["ocr_attempted"]==0{
         "PDF parsed locally; page text and reading order are not independently verified."
     }else{
         "PDF includes OCR text; numbers, layout and completeness are not independently verified. See per-page evidence."
     };
+    let warning=if total>pages.len() as u64{format!("{warning} Page limit applied: {} of {total} pages returned.",pages.len())}else{warning.to_string()};
     Ok(json!({"markdown":text,"metadata":{"url":landed.as_str(),"sourceURL":target.as_str(),
-        "statusCode":200,"contentType":"application/pdf","numPages":pages.len()},
+        "statusCode":200,"contentType":"application/pdf","numPages":pages.len(),"totalPages":total},
         "source":"local","researchSourceVerified":false,"warning":warning,"researchPdf":receipt}))
 }
 
@@ -209,7 +215,7 @@ pub(super) async fn extract(State(state):State<CandidateState>,headers:HeaderMap
     let target=match target(&req.url){Ok(u)=>u,Err(s)=>return refusal(s,"DESTINATION_DENIED")};
     if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
     let Ok(_slot)=state.slots.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
-    match document(&state,&target,Duration::from_secs(110)).await{
+    match document(&state,&target,Duration::from_secs(110),None).await{
         Ok((landed,data))=>{
             let complete=data["unresolved_pages"]==0;
             let value=json!({"success":complete,"source_verified":false,"url":landed.as_str(),"sourceURL":target.as_str(),"data":data});
@@ -229,7 +235,7 @@ mod tests{
     fn v2_pdf_preserves_page_order_and_evidence(){
         let receipt=json!({"pages":[{"page":1,"source":"native","text":"Native 42","warning":null},
             {"page":2,"source":"ocr","text":"OCR 1.2","native_text":"","warning":"unverified"}],
-            "unresolved_pages":0,"ocr_attempted":1,"source_verified":false});
+            "unresolved_pages":0,"ocr_attempted":1,"source_verified":false,"total_pages":2,"requested_max_pages":null});
         let target=url::Url::parse("https://example.org/test.pdf").unwrap();
         let doc=v2_document(&target,&target,receipt.clone()).unwrap();
         assert!(doc["markdown"].as_str().unwrap().contains("Native 42\n\n<!-- PDF page 2 -->\nOCR 1.2"));
@@ -286,14 +292,14 @@ mod tests{
             assert_eq!(&body[..],b"%PDF-fixture");
             Json(json!({"source_verified":false,"layout":"auto","pages":[
                 {"page":1,"text":"native","source":"native","warning":null}
-            ],"pages_needing_ocr":[],"unresolved_pages":0,"ocr_attempted":0}))
+            ],"pages_needing_ocr":[],"unresolved_pages":0,"ocr_attempted":0,"total_pages":1,"requested_max_pages":null}))
         })).route("/bad",post(||async{Json(json!({"source_verified":true}))}));
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base=format!("http://{}",listener.local_addr().unwrap());
         let server=tokio::spawn(async move{axum::serve(listener,app).await.unwrap();});
-        assert!(ocr_at(&format!("{base}/extract"),Bytes::from_static(b"%PDF-fixture")).await.is_ok());
-        assert_eq!(ocr_at(&format!("{base}/bad"),Bytes::from_static(b"%PDF-fixture")).await.unwrap_err(),StatusCode::BAD_GATEWAY);
-        assert_eq!(ocr_at(&format!("{base}/extract"),Bytes::from_static(b"not PDF")).await.unwrap_err(),StatusCode::BAD_REQUEST);
+        assert!(ocr_at(&format!("{base}/extract"),Bytes::from_static(b"%PDF-fixture"),None).await.is_ok());
+        assert_eq!(ocr_at(&format!("{base}/bad"),Bytes::from_static(b"%PDF-fixture"),None).await.unwrap_err(),StatusCode::BAD_GATEWAY);
+        assert_eq!(ocr_at(&format!("{base}/extract"),Bytes::from_static(b"not PDF"),None).await.unwrap_err(),StatusCode::BAD_REQUEST);
         server.abort();
     }
 }

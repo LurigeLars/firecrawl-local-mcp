@@ -84,6 +84,18 @@ print("LIVE_PDF_SIDECAR_PASS", json.dumps({
     "elapsed_ms": round((time.monotonic() - started) * 1000),
 }))
 
+# Same pinned PDF, explicit typed parser option from the locked MCP SDK.
+bounded = request(CANDIDATE + "/v2/scrape", auth=True, timeout=50, payload={
+    "url": URL, "formats": ["markdown"], "parsers": [{"type":"pdf","maxPages":1}],
+    "maxAge":0, "storeInCache":False, "timeout":45000,
+})
+assert bounded["success"] is True
+assert bounded["data"]["metadata"]["totalPages"] == 1
+assert bounded["data"]["metadata"]["numPages"] == 1
+assert bounded["data"]["researchPdf"]["requested_max_pages"] == 1
+assert "Stock 421.5 million barrels" in bounded["data"]["markdown"]
+print("LIVE_PDF_PAGE_BOUND_PASS")
+
 # Same isolated worker, actual public spreadsheet download with exact markers.
 # The fixture uses stored ZIP parts and contains no real or private data.
 OFFICE_URL = "https://raw.githubusercontent.com/LurigeLars/firecrawl-local-mcp/ae200f184f3a2cc9aad17a17b7e82a8eb6e1a424/research/fixtures/office-transport.xlsx"

@@ -238,6 +238,7 @@ try{
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'Quote the value',mode:'directQuote'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['html','links'],waitFor:100},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:'https://example.org/test.pdf',formats:['markdown'],parsers:['pdf']},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:'https://example.org/test.pdf',formats:['markdown'],parsers:['pdf'],pdfOptions:{maxPages:1}},'POST','/v2/scrape'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2},'POST','/v2/search'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2,scrapeOptions:{formats:['markdown'],includeTags:['article']}},'POST','/v2/search'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2,scrapeOptions:{formats:['query'],queryOptions:{prompt:'What is the value?'}}},'POST','/v2/search'],
@@ -258,6 +259,10 @@ try{
         assert.deepEqual(request?.scrapeOptions?.formats,[{type:'query',prompt:args.scrapeOptions.queryOptions.prompt,mode:'freeform'}]);
       }else assert.deepEqual(request?.scrapeOptions?.formats,args.scrapeOptions.formats);
       assert.deepEqual(request?.scrapeOptions?.includeTags,args.scrapeOptions.includeTags);
+    }
+    if(args.pdfOptions){
+      const request=captured.find(x=>x.method===method&&x.path===path)?.body;
+      assert.deepEqual(request?.parsers,[{type:'pdf',maxPages:1}]);
     }
     if(args.jsonOptions){
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;

@@ -13,9 +13,11 @@ from ocr_benchmark import fixture
 BASE="http://127.0.0.1:3000"
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-def call(path, data=None, mime="application/pdf", timeout=2):
-    req=urllib.request.Request(BASE+path,data=data,
-        headers={"Content-Type":mime} if data is not None else {})
+def call(path, data=None, mime="application/pdf", timeout=2, max_pages=None):
+    headers={"Content-Type":mime} if data is not None else {}
+    if max_pages is not None:
+        headers["x-firecrawl-max-pages"]=str(max_pages)
+    req=urllib.request.Request(BASE+path,data=data,headers=headers)
     try:
         with opener.open(req,timeout=timeout) as res:
             return res.status,json.loads(res.read(2*1024*1024+512))
@@ -48,6 +50,14 @@ with tempfile.TemporaryDirectory(prefix="fc-ocr-http-") as tmp:
     assert result["pages"][0]["text"]==ref["pages"][0]["markdown"]
     assert all(p["warning"] and p["source"] in ("ocr","unresolved") for p in result["pages"][1:])
     assert result["unresolved_pages"]==sum(p["source"]=="unresolved" for p in result["pages"])
+    assert result["total_pages"]==3 and result["requested_max_pages"] is None
+    status,bounded=call("/extract",raw,timeout=75,max_pages=1)
+    assert status==200 and bounded["total_pages"]==3 and bounded["requested_max_pages"]==1
+    assert bounded["pages"]==[result["pages"][0]] and bounded["pages_needing_ocr"]==[]
+    assert bounded["ocr_attempted"]==0 and bounded["unresolved_pages"]==0
+    assert call("/extract",raw,max_pages=0)[0]==400
+    assert call("/extract",raw,max_pages=201)[0]==400
+    print("OCR_HTTP_PAGE_BOUND_PASS: first native page only, two OCR pages omitted")
     print("OCR_HTTP_PROCESS_PASS: native text preserved, OCR uncertainty and per-page accounting preserved")
     print(json.dumps({"ocr_attempted":result["ocr_attempted"],"unresolved":result["unresolved_pages"],
         "page_sources":[p["source"] for p in result["pages"]]}))
