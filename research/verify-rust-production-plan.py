@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix="fc-rust-plan-") as work:
         p=w/f;p.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(root/f,p)
     (w/"public").mkdir(exist_ok=True)
     (w/"public/gateway.env").write_text("")
-    (w/".env").write_text("")
+    (w/".env").write_text("MODEL_NAME=synthetic-model\n")
     env={**os.environ,"FIRECRAWL_POSTGRES_PASSWORD_SECRET":"synthetic-config-only","FIRECRAWL_SEARXNG_SECRET_SECRET":"synthetic-config-only",
          "FIRECRAWL_PUBLIC_PROXY_SERVER_SECRET":"synthetic-config-only",
          "FIRECRAWL_PUBLIC_PROXY_USERNAME_SECRET":"synthetic-config-only",
@@ -32,10 +32,12 @@ with tempfile.TemporaryDirectory(prefix="fc-rust-plan-") as work:
     extra=["-f",str(w/"research/compose.rust-production-plan.yaml")]
     rust=config(extra)
     s=rust["services"];old=legacy["services"]
+    assert old["api"]["environment"]["MODEL_NAME"]==s["api"]["environment"]["CANDIDATE_MODEL_NAME"]
     assert s["api"]["image"]=="firecrawl-rust-api:local"
     assert s["api"]["user"]=="65532:65532"
     assert s["api"]["read_only"] and s["api"]["cap_drop"]==["ALL"]
-    assert set(s["api"]["environment"])=={"CANDIDATE_NETWORK_MODE","CANDIDATE_TOKEN_FILE","CANDIDATE_JOB_DB_FILE","CANDIDATE_PDF_ENABLED","CANDIDATE_BROWSER_ENABLED"}
+    assert set(s["api"]["environment"])=={"CANDIDATE_NETWORK_MODE","CANDIDATE_TOKEN_FILE","CANDIDATE_JOB_DB_FILE","CANDIDATE_PDF_ENABLED","CANDIDATE_BROWSER_ENABLED","CANDIDATE_MODEL_NAME"}
+    assert s["api"]["environment"]["CANDIDATE_MODEL_NAME"]=="synthetic-model"
     inherited=[k for k in ("command","post_start","extra_hosts","privileged") if s["api"].get(k)]
     assert not inherited, f"nonempty legacy API settings: {inherited}"
     assert set(s["api"]["depends_on"])=={"rust-init","pdf-ocr"}

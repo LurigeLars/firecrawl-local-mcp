@@ -60,6 +60,9 @@ services:
       CANDIDATE_JOB_DB_FILE: /var/lib/research/jobs.sqlite
       CANDIDATE_PDF_ENABLED: "1"
       CANDIDATE_BROWSER_ENABLED: "1"
+      # Preserve the already configured legacy model name. The existing LLM
+      # proxy retains all provider routing, credentials, and quotas.
+      CANDIDATE_MODEL_NAME: ${MODEL_NAME:?Configured legacy model required for Rust promotion}
     volumes:
       - rust-token:/run/research-token:ro
       - rust-jobs:/var/lib/research
