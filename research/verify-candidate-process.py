@@ -184,6 +184,22 @@ with tempfile.TemporaryDirectory(prefix="fc-candidate-") as td:
             assert call("/v2/scrape",payload={"url":"https://www.iana.org/help","formats":["markdown"],"waitFor":100})[0]==503
             assert call("/research/pdf",payload={"url":"https://127.0.0.1/x.pdf"})[0]==403
             print("CANDIDATE_PROCESS_SMOKE_PASS: authenticated loopback, unsupported options and private destinations rejected")
+            if "--live-sitemap" in sys.argv:
+                # Separate positive evidence; RFC Editor explicitly declares
+                # its same-origin sitemap in robots.txt.
+                seed="https://www.rfc-editor.org/"
+                status,raw=call("/v2/map",payload={"url":seed,"limit":3,"sitemap":"only",
+                    "includeSubdomains":False,"filterByPath":False,"timeout":60000},timeout=75)
+                assert status==200,("RFC Editor sitemap not verified",status)
+                result=json.loads(raw)
+                receipt=result["research"]
+                assert receipt["sitemaps_read"]>=1 and receipt["seed_read"] is False
+                assert receipt["site_coverage_verified"] is False
+                links=[r["url"] for r in result["links"]]
+                assert 1<=len(links)<=3 and len(set(links))==len(links)
+                assert all(url.startswith(seed) for url in links)
+                print("LIVE_POSITIVE_SITEMAP_PASS",json.dumps({"links":len(links),
+                    "sitemaps_read":receipt["sitemaps_read"],"site_coverage_verified":False}))
             if "--live" in sys.argv:
                 verify_live(proc.pid)
                 # Actual default MCP request envelope, without research-only
