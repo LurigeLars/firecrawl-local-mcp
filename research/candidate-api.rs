@@ -90,9 +90,27 @@ struct StaticRequest {
     #[serde(default)]
     wait_for: u64,
     #[serde(default)]
-    parsers: Option<Vec<String>>,
+    parsers: Option<Vec<PdfParser>>,
     #[serde(default)]
     origin: Option<String>,
+}
+
+#[derive(Clone,Deserialize)]
+#[serde(untagged)]
+enum PdfParser { Name(String), Options(PdfParserOptions) }
+#[derive(Clone,Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct PdfParserOptions {
+    #[serde(rename="type")] kind:String,
+    max_pages:Option<usize>,
+}
+fn pdf_page_limit(req:&StaticRequest)->Option<Option<usize>>{
+    match req.parsers.as_deref(){
+        None=>Some(None),
+        Some([PdfParser::Name(name)]) if name=="pdf"=>Some(None),
+        Some([PdfParser::Options(opts)]) if opts.kind=="pdf"&&opts.max_pages.is_none_or(|n|(1..=pdf::MAX_PAGES).contains(&n))=>Some(opts.max_pages),
+        _=>None
+    }
 }
 
 fn default_formats()->Vec<String>{vec!["markdown".into()]}
@@ -272,11 +290,11 @@ fn browser_formats(req:&StaticRequest)->Option<Vec<Format>>{
 fn valid_pdf_options(req:&StaticRequest)->bool{
     valid_common(req)&&req.wait_for==0&&req.formats==[json!("markdown")]&&
         req.include_tags.is_empty()&&req.exclude_tags.is_empty()&&
-        req.parsers.as_ref().is_none_or(|p|p.as_slice()==["pdf"])&&
+        pdf_page_limit(req).is_some()&&
         (1..=110000).contains(&req.timeout.unwrap_or(110000))
 }
 fn pdf_request(req:&StaticRequest,target:&url::Url)->bool{
-    valid_pdf_options(req)&&(target.path().to_ascii_lowercase().ends_with(".pdf")||req.parsers.as_ref().is_some_and(|p|p.as_slice()==["pdf"]))
+    valid_pdf_options(req)&&(target.path().to_ascii_lowercase().ends_with(".pdf")||req.parsers.is_some())
 }
 
 // Single-page HTML accepts public HTTP(S), including query strings and
@@ -336,9 +354,10 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
         let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
         let budget=Duration::from_millis(req.timeout.unwrap_or(110000));
+        let max_pages=pdf_page_limit(&req).flatten();
         let result=tokio::spawn(async move{
             let _slot=slot;
-            let (landed,receipt)=pdf::document(&state,&target,budget).await?;
+            let (landed,receipt)=pdf::document(&state,&target,budget,max_pages).await?;
             pdf::v2_document(&target,&landed,receipt).map_err(|s|(s,"PDF_INCOMPLETE"))
         }).await;
         return match result{
@@ -747,6 +766,27 @@ mod tests {
         let base=format!("http://{}",listener.local_addr().unwrap());
         let task=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
         (base,task)
+    }
+
+    #[test]
+    fn typed_pdf_page_bound_is_explicit_and_closed(){
+        for (parsers,expected) in [
+            (json!(["pdf"]),Some(None)),
+            (json!([{"type":"pdf","maxPages":1}]),Some(Some(1))),
+            (json!([{"type":"pdf","maxPages":200}]),Some(Some(200))),
+            (json!([{"type":"pdf","maxPages":0}]),None),
+            (json!([{"type":"pdf","maxPages":201}]),None),
+            (json!([{"type":"unknown","maxPages":1}]),None),
+            (json!(["pdf","pdf"]),None)
+        ]{
+            let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/file.pdf",
+                "formats":["markdown"],"parsers":parsers})).unwrap();
+            assert_eq!(pdf_page_limit(&req),expected);
+            assert_eq!(valid_pdf_options(&req),expected.is_some());
+            assert!(!valid_static(&req));
+        }
+        assert!(serde_json::from_value::<StaticRequest>(json!({"url":"https://example.org/file.pdf",
+            "parsers":[{"type":"pdf","maxPages":1,"unknown":true}]})).is_err());
     }
 
     #[test]
