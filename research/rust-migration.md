@@ -370,3 +370,7 @@ Windows synthetic DPAPI fixture passed after correcting test array grouping. Sta
 ### Read-only legacy drain preflight
 
 Pinned NUQ schema supports queued/active job counters, backlog count and active groups; use a read-only transaction and statement timeout, only aggregate counts. Require default RabbitMQ vhost and ready/unacknowledged counts, exact production service identities and reviewed named writable state volumes. Report current running image IDs for later rollback reservation. A zero count is only an idle snapshot, not proof of drained ingress; repeat after quiescing ingress before any cutover. No production mutation, no job payload, no secret reads, no broad Compose action. Windows synthetic fixture verifies idle/pending/malformed counts and vhost refusal. Actual inventory and post-quiesce acceptance remain separate.
+
+### Preserve the configured local model in the production overlay
+
+The existing documented legacy stack uses MODEL_NAME and the fixed llm-proxy; candidate model requests already use that same fixed proxy endpoint. Require the existing configured MODEL_NAME at config render, not a guessed replacement or new provider/credential. The config-only test verifies the legacy and candidate values match using a synthetic name and unchanged LLM sidecar. No actual model invocation, credential exposure or production activation. Real model smoke test remains a separate gate, including confirmation of configured provider and no new paid service.
