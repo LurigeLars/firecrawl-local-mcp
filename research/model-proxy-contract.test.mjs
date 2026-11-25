@@ -1,7 +1,7 @@
 // Pure compatibility tests for existing model proxy exports. No providers.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { responsesToChat, chatToResponses, trim } from '../llm/trim-proxy.mjs';
+import { responsesToChat, chatToResponses, trim, validStrictRequest, fitsContext } from '../llm/trim-proxy.mjs';
 
 const request = {
   model: 'fixture',
@@ -43,6 +43,35 @@ test('local trimming retains instruction and emits a truncation marker', () => {
   assert.match(body.input[0].content[0].text, /content truncated/);
 });
 
-// Do not encode the current finish_reason loss as desired behavior.
-// The Rust research receipt explicitly leaves provider completion unverified;
-// fixing and testing the proxy's loss of finish_reason is a promotion gate.
+
+test('provider completion state is not fabricated from partial text', () => {
+  for (const [finish_reason,status,reason] of [
+    ['length','incomplete','max_output_tokens'],
+    ['content_filter','incomplete','content_filter'],
+    ['tool_calls','failed',null],
+    [undefined,'failed',null],
+  ]) {
+    const res=chatToResponses({choices:[{message:{content:'partial'},finish_reason}]},request);
+    assert.equal(res.status,status);
+    if(reason) assert.equal(res.incomplete_details.reason,reason);
+    else assert.equal(res.output.length,0);
+  }
+  for(const message of [{content:'x',refusal:'refused'},{content:'x',tool_calls:[{}]},{content:' '}]) {
+    assert.equal(chatToResponses({choices:[{message,finish_reason:'stop'}]},request).status,'failed');
+  }
+});
+
+test('strict request accepts exact bounded text and rejects implicit tools or truncation', () => {
+  assert.equal(validStrictRequest(request),true);
+  assert.equal(fitsContext(request,1),false);
+  const oversized=structuredClone(request);
+  oversized.input[0].content[0].text='x'.repeat(16001);
+  assert.equal(validStrictRequest(oversized),false);
+  for(const patch of [
+    {stream:true},{tools:[{}]},{model:''},{max_output_tokens:2049},{backend:'http://localhost'},
+    {input:[{role:'user',content:[{type:'input_image',text:'x'}]}]},
+    {text:{format:{type:'json_schema',name:'extraction',schema:{},extra:true}}},
+  ]) assert.equal(validStrictRequest({...request,...patch}),false);
+  assert.equal(fitsContext(request,NaN),false);
+  assert.equal(request.input[0].content[0].text,'Stock: 421.5 million barrels');
+});

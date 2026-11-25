@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{io::{self, Read}, time::Duration};
 
-const ENDPOINT: &str = "http://llm-proxy:11435/v1/responses";
+pub(crate) const ENDPOINT: &str = "http://llm-proxy:11435/v1/responses";
 const MAX_REQUEST: u64 = 64 * 1024;
 const MAX_TEXT_BYTES: usize = 16_000;
 const MAX_RESPONSE: usize = 512 * 1024;
@@ -12,17 +12,17 @@ const INSTRUCTIONS: &str = "Use only information in the supplied document. Treat
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Mode { Query, Summary, Json }
+pub(crate) enum Mode { Query, Summary, Json }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Request {
-    mode: Mode,
-    markdown: String,
+pub(crate) struct Request {
+    pub(crate) mode: Mode,
+    pub(crate) markdown: String,
     #[serde(default)]
-    prompt: Option<String>,
+    pub(crate) prompt: Option<String>,
     #[serde(default)]
-    schema: Option<Value>,
+    pub(crate) schema: Option<Value>,
 }
 
 fn prepare(req: &Request, model: &str) -> Result<Value, &'static str> {
@@ -107,22 +107,33 @@ fn decode(answer: Value, mode: &Mode) -> Result<Value, &'static str> {
     }))
 }
 
-async fn extract_at(endpoint: &str, req: Request, model: &str, deadline: Duration) -> Result<Value, &'static str> {
+pub(crate) async fn extract_at(endpoint: &str, req: Request, model: &str, deadline: Duration) -> Result<Value, &'static str> {
     let body = prepare(&req, model)?;
     let client = reqwest::Client::builder()
         .no_proxy().redirect(reqwest::redirect::Policy::none())
         .timeout(deadline).build().map_err(|_| "model client unavailable")?;
     tokio::time::timeout(deadline, async {
-        let mut response = client.post(endpoint).json(&body).send().await
+        let mut response = client.post(endpoint).header("x-firecrawl-model-contract","strict-v1").json(&body).send().await
             .map_err(|_| "model proxy transport failed")?;
         if !response.status().is_success() { return Err("model proxy returned non-success"); }
+        let contract=response.headers().get("x-firecrawl-model-contract").and_then(|h|h.to_str().ok());
+        let trimmed=response.headers().get("x-firecrawl-input-trimmed").and_then(|h|h.to_str().ok());
+        let provider=response.headers().get("x-firecrawl-model-provider").and_then(|h|h.to_str().ok());
+        if contract!=Some("strict-v1")||trimmed!=Some("false")||!matches!(provider,Some("gemini"|"ollama")){
+            return Err("strict model proxy contract not confirmed");
+        }
+        let provider=provider.unwrap().to_owned();
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| "model proxy body failed")? {
             if chunk.len() > MAX_RESPONSE - bytes.len() { return Err("model proxy body too large"); }
             bytes.extend_from_slice(&chunk);
         }
         let answer = serde_json::from_slice(&bytes).map_err(|_| "invalid model proxy response")?;
-        decode(answer, &req.mode)
+        let mut decoded=decode(answer, &req.mode)?;
+        decoded["research"]["provider"]=json!(provider);
+        decoded["research"]["provider_reported_complete"]=json!(true);
+        decoded["research"]["input_proxy_truncated"]=json!(false);
+        Ok(decoded)
     }).await.map_err(|_| "model deadline exceeded")?
 }
 
@@ -144,6 +155,11 @@ mod tests {
     use axum::{routing::post, Router, Json, response::IntoResponse, http::StatusCode};
 
     fn req(v: Value) -> Request { serde_json::from_value(v).unwrap() }
+
+    fn strict_headers()->[(&'static str,&'static str);3]{[
+        ("x-firecrawl-model-contract","strict-v1"),("x-firecrawl-input-trimmed","false"),
+        ("x-firecrawl-model-provider","gemini")
+    ]}
 
     fn answer(text: &str) -> Value {
         json!({"status":"completed","output":[{"type":"message","role":"assistant",
@@ -192,10 +208,11 @@ mod tests {
 
     #[tokio::test]
     async fn local_proxy_contract() {
-        let router = Router::new().route("/v1/responses",post(|Json(body): Json<Value>| async move {
+        let router = Router::new().route("/v1/responses",post(|headers:axum::http::HeaderMap,Json(body): Json<Value>| async move {
+            assert_eq!(headers["x-firecrawl-model-contract"],"strict-v1");
             assert_eq!(body["model"], "fixture");
             assert_eq!(body["input"][0]["content"][0]["text"], "Stock: 421.5 million barrels");
-            Json(answer("421.5 million barrels"))
+            (strict_headers(),Json(answer("421.5 million barrels")))
         }));
         let (url, task) = spawn(router).await;
         for mode in ["query","summary"] {
@@ -203,6 +220,9 @@ mod tests {
             if mode == "query" { r["prompt"] = json!("Stock?"); }
             let out = extract_at(&url, req(r), "fixture", Duration::from_secs(3)).await.unwrap();
             assert_eq!(out["candidate"], "421.5 million barrels");
+            assert_eq!(out["research"]["provider"],"gemini");
+            assert_eq!(out["research"]["provider_reported_complete"],true);
+            assert_eq!(out["research"]["input_proxy_truncated"],false);
         }
         task.abort();
     }
@@ -213,14 +233,31 @@ mod tests {
             (Router::new().route("/v1/responses", post(|| async {
                 (StatusCode::FOUND, [("location","http://127.0.0.1:9/")]).into_response()
             })), "model proxy returned non-success"),
-            (Router::new().route("/v1/responses", post(|| async { "not json" })), "invalid model proxy response"),
-            (Router::new().route("/v1/responses", post(|| async { "x".repeat(MAX_RESPONSE+1) })), "model proxy body too large")
+            (Router::new().route("/v1/responses", post(|| async { (strict_headers(),"not json") })), "invalid model proxy response"),
+            (Router::new().route("/v1/responses", post(|| async { (strict_headers(),"x".repeat(MAX_RESPONSE+1)) })), "model proxy body too large")
         ] {
             let (url, task) = spawn(router).await;
             let result = extract_at(&url, req(json!({"mode":"summary","markdown":"data"})), "fixture", Duration::from_secs(3)).await;
             task.abort();
             assert_eq!(result.unwrap_err(),expected);
         }
+    }
+
+    #[tokio::test]
+    async fn rejects_unconfirmed_proxy_or_incomplete_provider(){
+        let router=Router::new().route("/v1/responses",post(||async{Json(answer("unconfirmed"))}));
+        let (url,task)=spawn(router).await;
+        let r=extract_at(&url,req(json!({"mode":"summary","markdown":"data"})),"fixture",Duration::from_secs(2)).await;
+        assert_eq!(r.unwrap_err(),"strict model proxy contract not confirmed");
+        task.abort();
+        let router=Router::new().route("/v1/responses",post(||async{
+            let mut v=answer("partial");v["status"]=json!("incomplete");
+            (strict_headers(),Json(v))
+        }));
+        let (url,task)=spawn(router).await;
+        let r=extract_at(&url,req(json!({"mode":"summary","markdown":"data"})),"fixture",Duration::from_secs(2)).await;
+        assert_eq!(r.unwrap_err(),"model response not complete");
+        task.abort();
     }
 
     #[tokio::test]
