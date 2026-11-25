@@ -1,8 +1,57 @@
 diff --git a/apps/local/src/fetch.rs b/apps/local/src/fetch.rs
 --- a/apps/local/src/fetch.rs
 +++ b/apps/local/src/fetch.rs
-@@ -162,8 +162,16 @@
+@@ -121,8 +121,8 @@
+   }
  }
+ 
+-/// DNS resolver that drops every address the policy forbids. A hostname that
+-/// only resolves to forbidden addresses fails to connect.
++/// PublicOnly DNS resolution matches the gateway: any forbidden answer
++/// denies the entire set, including new answers at redirect/connect time.
+ struct GuardedResolver {
+   policy: NetworkPolicy,
+ }
+@@ -133,22 +133,28 @@
+     Box::pin(async move {
+       let host = name.as_str().to_string();
+       let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+-      let allowed: Vec<SocketAddr> = resolved
+-        .into_iter()
+-        .filter(|a| guard::check_ip(a.ip(), policy).is_ok())
+-        .collect();
+-      if allowed.is_empty() {
+-        let err: Box<dyn std::error::Error + Send + Sync> = Box::new(Blocked(format!(
+-          "{host} does not resolve to an address Firecrawl Local may reach"
+-        )));
+-        return Err(err);
+-      }
++      let allowed = validate_resolved(resolved, policy)
++        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+       let addrs: Addrs = Box::new(allowed.into_iter());
+       Ok(addrs)
+     })
+   }
+ }
+ 
++fn validate_resolved(mut resolved: Vec<SocketAddr>, policy: NetworkPolicy) -> Result<Vec<SocketAddr>, Blocked> {
++  if policy == NetworkPolicy::PublicOnly {
++    for address in &resolved {
++      guard::check_ip(address.ip(), policy)?;
++    }
++  } else {
++    resolved.retain(|a| guard::check_ip(a.ip(), policy).is_ok());
++  }
++  if resolved.is_empty() {
++    return Err(Blocked("DNS returned no allowed address".into()));
++  }
++  Ok(resolved)
++}
++
+ #[derive(Clone)]
+ pub struct Fetcher {
+   client: Client,
+@@ -163,6 +169,14 @@
  
  impl Fetcher {
    pub fn new(policy: NetworkPolicy, user_agent: Option<&str>) -> Result<Self, String> {
@@ -17,8 +66,7 @@ diff --git a/apps/local/src/fetch.rs b/apps/local/src/fetch.rs
      let mut default_headers = HeaderMap::new();
      default_headers.insert(
        ACCEPT,
-       HeaderValue::from_static(
-@@ -172,7 +180,7 @@
+@@ -172,7 +186,7 @@
      );
      default_headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
  
@@ -27,22 +75,19 @@ diff --git a/apps/local/src/fetch.rs b/apps/local/src/fetch.rs
        if attempt.previous().len() >= MAX_REDIRECTS {
          return attempt.error(Blocked(format!("more than {MAX_REDIRECTS} redirects")));
        }
-@@ -180,10 +188,11 @@
+@@ -180,9 +194,10 @@
          Ok(()) => attempt.follow(),
          Err(e) => attempt.error(e),
        }
 -    });
--
--    let client = Client::builder()
 +    }) } else { redirect::Policy::none() };
-+
-+    let client = Client::builder()
+ 
+     let client = Client::builder()
 +      .no_proxy()
        .user_agent(user_agent.unwrap_or(USER_AGENT))
        .default_headers(default_headers)
        .redirect(redirect_policy)
-       .dns_resolver(Arc::new(GuardedResolver { policy }))
-@@ -214,7 +223,7 @@
+@@ -214,7 +229,7 @@
      }
    }
  
@@ -51,6 +96,26 @@ diff --git a/apps/local/src/fetch.rs b/apps/local/src/fetch.rs
      guard::check_url(url, self.policy).map_err(|e| FetchError::Blocked(e.0))?;
  
      let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
+@@ -298,6 +313,19 @@
+   use super::*;
+ 
+   #[test]
++  fn public_dns_denies_mixed_answers_and_empty_sets() {
++    let public: SocketAddr = "93.184.216.34:0".parse().unwrap();
++    let v6: SocketAddr = "[2606:4700:4700::1111]:0".parse().unwrap();
++    assert_eq!(validate_resolved(vec![public,v6], NetworkPolicy::PublicOnly).unwrap(), vec![public,v6]);
++    assert!(validate_resolved(vec![], NetworkPolicy::PublicOnly).is_err());
++    for bad in ["127.0.0.1:0","169.254.169.254:0","[::ffff:10.0.0.1]:0","[64:ff9b::5db8:d822]:0","[100::1]:0"] {
++      let private: SocketAddr = bad.parse().unwrap();
++      assert!(validate_resolved(vec![public,private], NetworkPolicy::PublicOnly).is_err());
++      assert!(validate_resolved(vec![private,public], NetworkPolicy::PublicOnly).is_err());
++    }
++  }
++
++  #[test]
+   fn charset_header_wins() {
+     assert_eq!(
+       charset_from_content_type("text/html; charset=ISO-8859-1"),
 diff --git a/apps/local/src/crawl.rs b/apps/local/src/crawl.rs
 --- a/apps/local/src/crawl.rs
 +++ b/apps/local/src/crawl.rs
@@ -90,3 +155,46 @@ diff --git a/apps/local/src/crawl.rs b/apps/local/src/crawl.rs
      if !matches!(url.scheme(), "http" | "https") || has_skipped_extension(url) {
        return false;
      }
+diff --git a/apps/local/src/guard.rs b/apps/local/src/guard.rs
+--- a/apps/local/src/guard.rs
++++ b/apps/local/src/guard.rs
+@@ -90,6 +90,10 @@
+     || (s[0] & 0xffc0) == 0xfec0
+     // 2001:db8::/32 documentation
+     || (s[0] == 0x2001 && s[1] == 0x0db8)
++    // Match the gateway's explicit transition/discard prefix exclusions.
++    || s[..6].iter().all(|x| *x == 0)
++    || (s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0))
++    || (s[0] == 0x100 && s[1..4].iter().all(|x| *x == 0))
+ }
+ 
+ /// Addresses nobody may reach through the engine, whatever the policy.
+@@ -107,10 +111,8 @@
+ pub fn ip_is_private(ip: IpAddr) -> bool {
+   match ip {
+     IpAddr::V4(v4) => v4_is_private(v4) || v4_is_metadata_or_link_local(v4),
+-    IpAddr::V6(v6) => match v6_embedded_v4(v6) {
+-      Some(v4) => v4_is_private(v4) || v4_is_metadata_or_link_local(v4),
+-      None => v6_is_private(v6) || v6_is_link_local(v6),
+-    },
++    IpAddr::V6(v6) => v6_is_private(v6) || v6_is_link_local(v6) ||
++      v6_embedded_v4(v6).is_some_and(|v4| v4_is_private(v4) || v4_is_metadata_or_link_local(v4)),
+   }
+ }
+ 
+@@ -222,6 +224,15 @@
+   }
+ 
+   #[test]
++  fn gateway_transition_prefixes_are_blocked_even_with_public_embedded_ip() {
++    for raw in ["::5db8:d822","64:ff9b::5db8:d822","100::1","::ffff:127.0.0.1"] {
++      assert!(check_ip(raw.parse().unwrap(), NetworkPolicy::PublicOnly).is_err());
++    }
++    assert!(check_ip("::ffff:93.184.216.34".parse().unwrap(), NetworkPolicy::PublicOnly).is_ok());
++    assert!(check_ip("2606:4700:4700::1111".parse().unwrap(), NetworkPolicy::PublicOnly).is_ok());
++  }
++
++  #[test]
+   fn private_allowed_when_opted_in_but_metadata_never() {
+     assert!(check_url(&u("http://127.0.0.1:3000/"), NetworkPolicy::AllowPrivate).is_ok());
+     assert!(check_url(&u("http://localhost:3000/"), NetworkPolicy::AllowPrivate).is_ok());

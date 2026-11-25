@@ -1,0 +1,37 @@
+name: Rust release benchmark (opt-in)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-sample:
+    if: github.event_name == 'workflow_dispatch' || (github.event.label.name == 'rust-release-benchmark' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout reviewed research
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build optimized candidate
+        run: |
+          docker build --progress plain --target release-benchmark -t firecrawl-rust-release-sample:review -f research/Dockerfile.rust-table-ci research
+          docker build --progress plain --target release-runtime -t firecrawl-rust-release-runtime:review -f research/Dockerfile.rust-table-ci research
+          docker image inspect --format '{{.Size}}' firecrawl-rust-release-runtime:review
+      - name: Measure bounded release-mode source sample
+        run: |
+          timeout 180s docker run --rm --pull=never --network bridge --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            firecrawl-rust-release-sample:review
