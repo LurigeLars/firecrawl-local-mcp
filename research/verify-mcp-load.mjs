@@ -7,7 +7,8 @@ const modeArg=process.argv[2];
 assert.ok(['legacy','candidate'].includes(modeArg));
 const documentMode=process.argv[3]==='--documents';
 const searchMode=process.argv[3]==='--search';
-assert.ok(process.argv[3]===undefined||documentMode||searchMode,'unsupported workload');
+const browserMode=process.argv[3]==='--browser';
+assert.ok(process.argv[3]===undefined||documentMode||searchMode||browserMode,'unsupported workload');
 const deadline=performance.now()+120000;
 let session;
 let version = '2025-06-18';
@@ -86,7 +87,30 @@ assert.ok(list.result?.tools?.some(tool=>tool.name==='firecrawl_scrape'));
 
 // Separate document acceptance, not part of the ten-call HTML memory sample.
 // URLs refer to existing pinned public synthetic fixtures. Never print content.
-if(searchMode){
+if(browserMode){
+  const fixtures=[
+    ['explicit','https://www.iana.org/help/example-domains',['Example Domains','RFC 2606','RFC 6761'],{waitFor:100}],
+    ['dynamic','https://publicreporting.cftc.gov/stories/s/r4w3-av2u',['Public Reporting Environment','Legacy Futures Only Report','Disaggregated Futures Only Report'],{}]
+  ];
+  const results=[];
+  for(const [source,url,markers,extra] of fixtures){
+    const start=performance.now();let found=0,ok=false;
+    try{
+      const r=await rpc('tools/call',{name:'firecrawl_scrape',arguments:{url,formats:['markdown'],onlyMainContent:true,maxAge:0,storeInCache:false,timeout:40000,...extra}});
+      if(r.result&&!r.result.isError&&!r.error){
+        const payload=JSON.parse(r.result.content?.find(x=>x.type==='text')?.text??'null');
+        const doc=payload?.data??payload;
+        const normalized=(typeof doc?.markdown==='string'?doc.markdown:'').replace(/\s+/g,' ').toLowerCase();
+        found=markers.filter(m=>normalized.includes(m.toLowerCase())).length;
+        ok=doc?.metadata?.statusCode===200&&doc.metadata.sourceURL===url&&found===markers.length;
+      }
+    }catch{/* fixed failure, no remote content or exception text */}
+    results.push({source,verdict:ok?'PASS':'UNVERIFIED',markers:found,expected_markers:markers.length,elapsed_ms:Math.round((performance.now()-start)*10)/10});
+  }
+  const passed=results.every(r=>r.verdict==='PASS');
+  console.log(JSON.stringify({backend:modeArg,verdict:passed?'PASS':'UNVERIFIED',scope:'actual MCP browser content; route not independently verified',results}));
+  if(!passed)process.exitCode=1;
+}else if(searchMode){
   assert.ok(list.result.tools.some(tool=>tool.name==='firecrawl_search'),'search unavailable');
   const started=performance.now();
   let reason='transport_or_envelope',hits=0;
