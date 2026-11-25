@@ -89,7 +89,8 @@ const server=http.createServer(async(req,res)=>{
       const names=(body?.formats??[]).map(x=>typeof x==='string'?x:x?.type);
       data={success:true,data:{...doc,
         ...(names.includes('summary')?{summary:'Synthetic summary'}:{}),
-        ...(names.includes('query')?{answer:'42'}:{})
+        ...(names.includes('query')?{answer:'42'}:{}),
+        ...(names.includes('json')?{json:{value:42}}:{})
       }};
     }else if(req.method==='POST'&&u.pathname==='/v2/search'){
       data={success:true,data:{web:[{url:fixtureUrl,title:'Fixture',description:'Synthetic hit'}]}};
@@ -231,6 +232,8 @@ try{
     ['firecrawl_scrape',{url:fixtureUrl,formats:['markdown']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl+'?year=2026#data',formats:['markdown'],includeTags:['article'],excludeTags:['.ads']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['summary']},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:fixtureUrl,formats:['json'],jsonOptions:{prompt:'Extract value',schema:{
+      type:'object',properties:{value:{type:'number'}},required:['value'],additionalProperties:false}}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'What is the value?'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'Quote the value',mode:'directQuote'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['html','links'],waitFor:100},'POST','/v2/scrape'],
@@ -252,6 +255,10 @@ try{
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;
       assert.deepEqual(request?.scrapeOptions?.formats,args.scrapeOptions.formats);
       assert.deepEqual(request?.scrapeOptions?.includeTags,args.scrapeOptions.includeTags);
+    }
+    if(args.jsonOptions){
+      const request=captured.find(x=>x.method===method&&x.path===path)?.body;
+      assert.deepEqual(request?.formats,[{type:'json',prompt:args.jsonOptions.prompt,schema:args.jsonOptions.schema}]);
     }
     if(args.includeTags){
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;

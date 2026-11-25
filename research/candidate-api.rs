@@ -211,25 +211,41 @@ struct QueryFormat{
     mode:String,
 }
 
-fn model_format(req:&StaticRequest)->Option<(model::Mode,Option<String>)>{
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonFormat{
+    #[serde(rename="type")] kind:String,
+    prompt:String,
+    schema:Value,
+}
+
+fn model_format(req:&StaticRequest)->Option<(model::Mode,Option<String>,Option<Value>)>{
     if !valid_common(req)||req.wait_for!=0||req.parsers.is_some()||req.formats.len()!=1||!(1..=180000).contains(&req.timeout.unwrap_or(180000)){return None;}
     let f=&req.formats[0];
-    if f=="summary"{return Some((model::Mode::Summary,None));}
+    if f=="summary"{return Some((model::Mode::Summary,None,None));}
+    if f.get("type").and_then(Value::as_str)==Some("json"){
+        let j:JsonFormat=serde_json::from_value(f.clone()).ok()?;
+        if j.kind!="json"||j.prompt.trim().is_empty()||j.prompt.len()>2048||!model::valid_schema(&j.schema){return None;}
+        return Some((model::Mode::Json,Some(j.prompt),Some(j.schema)));
+    }
     let q:QueryFormat=serde_json::from_value(f.clone()).ok()?;
     if q.kind!="query"||q.prompt.trim().is_empty()||q.prompt.len()>2048{return None;}
     let mode=match q.mode.as_str(){"freeform"=>model::Mode::Query,"directQuote"=>model::Mode::DirectQuote,_=>return None};
-    Some((mode,Some(q.prompt)))
+    Some((mode,Some(q.prompt),None))
 }
 
-async fn add_model_result(data:&mut Value,mode:model::Mode,prompt:Option<String>,endpoint:&str,
+async fn add_model_result(data:&mut Value,mode:model::Mode,prompt:Option<String>,schema:Option<Value>,endpoint:&str,
     model_name:&str,budget:Duration)->Result<(),StatusCode>{
     let markdown=data["markdown"].as_str().ok_or(StatusCode::BAD_GATEWAY)?.to_owned();
-    let key=if matches!(mode,model::Mode::Summary){"summary"}else{"answer"};
+    let key=match &mode{model::Mode::Summary=>"summary",model::Mode::Json=>"json",_=>"answer"};
     let direct=matches!(mode,model::Mode::DirectQuote);
-    let result=model::extract_at(endpoint,model::Request{mode,markdown,prompt,schema:None},
+    let structured=matches!(mode,model::Mode::Json);
+    let result=model::extract_at(endpoint,model::Request{mode,markdown,prompt,schema},
         model_name,budget).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
-    let value=result["candidate"].as_str().ok_or(StatusCode::BAD_GATEWAY)?;
-    data[key]=json!(value);
+    data[key]=if structured{
+        if result["research"]["schema_validated"]!=true{return Err(StatusCode::BAD_GATEWAY);}
+        result.get("candidate").ok_or(StatusCode::BAD_GATEWAY)?.clone()
+    }else{json!(result["candidate"].as_str().ok_or(StatusCode::BAD_GATEWAY)?)};
     data["researchModel"]=result["research"].clone();
     data["warning"]=json!(if direct{
         "Selected original Markdown lines; quotation text is source-matched, but relevance and page completeness are unverified."
@@ -339,7 +355,7 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     // caller disconnects. Model and automatic browser dispatch share it.
     let result=tokio::spawn(async move{
     let _slot=slot;
-    if let Some((mode,prompt))=model_req{
+    if let Some((mode,prompt,schema))=model_req{
         let Some(name)=state.model_name.as_deref()else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"MODEL_DISABLED")};
         let Ok(_model_slot)=state.model_slot.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"MODEL_BUSY")};
         let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(180000));
@@ -349,7 +365,7 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         }).await{Ok(data)=>data,Err(status)=>return refusal(status,"STATIC_SCRAPE_FAILED")};
         let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero(){return refusal(StatusCode::GATEWAY_TIMEOUT,"MODEL_DEADLINE");}
-        if let Err(status)=add_model_result(&mut data,mode,prompt,model::ENDPOINT,name,remaining).await{
+        if let Err(status)=add_model_result(&mut data,mode,prompt,schema,model::ENDPOINT,name,remaining).await{
             return refusal(status,"MODEL_EXTRACTION_FAILED");
         }
         return bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}));
@@ -813,11 +829,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captured_json_format_requires_supported_schema_and_returns_structured_value(){
+        let schema=json!({"type":"object","properties":{"change":{"type":"number"}},"required":["change"],"additionalProperties":false});
+        let payload=json!({"url":"https://example.org/","formats":[{"type":"json","prompt":"Extract change","schema":schema}]});
+        let req:StaticRequest=serde_json::from_value(payload.clone()).unwrap();
+        let (mode,prompt,validated_schema)=model_format(&req).unwrap();
+        let mut bad=payload;
+        bad["formats"][0]["schema"]["$ref"]=json!("https://example.org/schema");
+        assert!(model_format(&serde_json::from_value(bad).unwrap()).is_none());
+        let (base,task)=spawn(Router::new().route("/v1/responses",post(move|Json(body):Json<Value>|{
+            let schema=schema.clone();
+            async move{
+                assert_eq!(body["text"]["format"]["schema"],schema);
+                ([("x-firecrawl-model-contract","strict-v1"),("x-firecrawl-input-trimmed","false"),
+                    ("x-firecrawl-model-provider","gemini")],
+                    Json(json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":"{\"change\":-1.2}"}]}]})))
+            }
+        }))).await;
+        let mut data=json!({"markdown":"Change -1.2","metadata":{"url":"https://example.org/"}});
+        add_model_result(&mut data,mode,prompt,validated_schema,&format!("{base}/v1/responses"),"fixture",Duration::from_secs(3)).await.unwrap();
+        assert_eq!(data["json"]["change"],-1.2);
+        assert_eq!(data["researchModel"]["schema_validated"],true);
+        assert_eq!(data["researchModel"]["source_verified"],false);
+        assert!(data.get("markdown").is_none());
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn captured_model_format_and_strict_quote_result(){
         let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
             "formats":[{"type":"query","prompt":"Quote the value","mode":"directQuote"}],
             "origin":"mcp-candidate-contract@3.40.0"})).unwrap();
-        let (mode,prompt)=model_format(&req).unwrap();
+        let (mode,prompt,schema)=model_format(&req).unwrap();
         let (base,task)=spawn(Router::new().route("/v1/responses",post(|Json(body):Json<Value>|async move{
             assert_eq!(body["input"][0]["content"][0]["text"],"0: Header\n1: Stock 421.5");
             ([("x-firecrawl-model-contract","strict-v1"),("x-firecrawl-input-trimmed","false"),
@@ -826,7 +870,7 @@ mod tests {
                     "content":[{"type":"output_text","text":"[1]"}]}]})))
         }))).await;
         let mut data=json!({"markdown":"Header\nStock 421.5","metadata":{"url":"https://example.org/"}});
-        add_model_result(&mut data,mode,prompt,&format!("{base}/v1/responses"),"fixture",Duration::from_secs(3)).await.unwrap();
+        add_model_result(&mut data,mode,prompt,schema,&format!("{base}/v1/responses"),"fixture",Duration::from_secs(3)).await.unwrap();
         assert_eq!(data["answer"],"Stock 421.5");
         assert_eq!(data["researchModel"]["quote_spans_verified"],true);
         assert!(data.get("markdown").is_none());
