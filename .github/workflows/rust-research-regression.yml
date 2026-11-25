@@ -1,0 +1,149 @@
+name: Rust research regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/**'
+      - 'playwright/public-proxy-router*'
+      - 'public/gateway/camofox-tools*'
+      - 'public/gateway/policy*'
+      - 'searxng/lang-proxy.mjs'
+      - 'llm/trim-proxy.mjs'
+      - '.github/workflows/rust-research-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-research-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-table-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout research
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check static scrape contract
+        run: node --test research/rust-scrape-contract.test.mjs research/searxng-proxy-contract.test.mjs research/model-proxy-contract.test.mjs playwright/public-proxy-router.test.mjs public/gateway/camofox-tools.test.mjs public/gateway/policy-ssrf.test.mjs
+      - name: Verify SQLite durability experiment
+        run: python3 research/sqlite-job-contract.py
+      - name: Build pinned candidate and run Markdown regression tests
+        run: docker build --progress plain --target table-test -t firecrawl-rust-table-ci:review -f research/Dockerfile.rust-table-ci research
+      - name: Check every captured EIA cell in both cleanup modes
+        run: python3 research/verify-eia-fixture.py
+      - name: Build isolated OCR research stage
+        run: docker build --progress plain --target ocr-test -t firecrawl-rust-ocr-ci:review -f research/Dockerfile.rust-table-ci research
+      - name: Verify selective OCR on synthetic mixed PDF
+        run: |
+          timeout 120s docker run --rm --pull=never --network none --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
+            firecrawl-rust-ocr-ci:review
+      - name: Smoke isolated OCR HTTP server and worker
+        run: |
+          cid=$(docker run -d --pull=never --network none --read-only --init=false \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
+            --entrypoint /usr/local/bin/pdf-ocr-service firecrawl-rust-ocr-ci:review)
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          timeout 100s docker exec "$cid" python3 -B /research/verify-ocr-service.py
+      - name: Smoke actual isolated candidate server process
+        run: |
+          timeout 75s docker run --rm --pull=never --network none --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py --batch
+
+      - name: Build existing pinned MCP image
+        run: docker build --progress plain -t firecrawl-locked-mcp:research -f public/Dockerfile.mcp public
+      - name: Capture actual MCP request envelopes using synthetic loopback API
+        run: |
+          timeout 140s docker run --rm --pull=never --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --memory 512m --memory-swap 512m --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
+            --mount type=bind,source="$PWD/research/locked-mcp-http-contract.mjs",target=/tmp/locked-mcp-http-contract.mjs,readonly \
+            --entrypoint node firecrawl-locked-mcp:research /tmp/locked-mcp-http-contract.mjs
+
+      - name: Actual locked MCP client against candidate (offline denials)
+        run: |
+          cid=$(docker run -d --pull=never --network none --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint sh firecrawl-rust-ocr-ci:review -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_JOB_DB_FILE=/tmp/jobs.sqlite; exec /usr/local/bin/candidate-main')
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          timeout 15s docker exec "$cid" python3 -B -c 'import time,urllib.request; r=urllib.request.Request("http://127.0.0.1:3002/health",headers={"Authorization":"Bearer synthetic-ci-token-not-a-real-secret-0123456789"}); exec("for i in range(50):\n try:\n  assert urllib.request.urlopen(r,timeout=1).status==200; break\n except OSError: time.sleep(.1)\nelse: raise RuntimeError(\"candidate not ready\")")'
+          timeout 150s docker run --rm --pull=never --network "container:$cid" --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --memory 512m --memory-swap 512m --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
+            --mount type=bind,source="$PWD/research/locked-mcp-http-contract.mjs",target=/tmp/locked-mcp-http-contract.mjs,readonly \
+            --entrypoint node firecrawl-locked-mcp:research /tmp/locked-mcp-http-contract.mjs --candidate
+      - name: Actual locked MCP client live source sample (separate evidence)
+        id: live_mcp
+        continue-on-error: true
+        run: |
+          cid=$(docker run -d --pull=never --network bridge --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint sh firecrawl-rust-ocr-ci:review -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_JOB_DB_FILE=/tmp/jobs.sqlite; exec /usr/local/bin/candidate-main')
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          timeout 15s docker exec "$cid" python3 -B -c 'import time,urllib.request; r=urllib.request.Request("http://127.0.0.1:3002/health",headers={"Authorization":"Bearer synthetic-ci-token-not-a-real-secret-0123456789"}); exec("for i in range(50):\n try:\n  assert urllib.request.urlopen(r,timeout=1).status==200; break\n except OSError: time.sleep(.1)\nelse: raise RuntimeError(\"candidate not ready\")")'
+          timeout 210s docker run --rm --pull=never --network "container:$cid" --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --memory 512m --memory-swap 512m --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
+            --mount type=bind,source="$PWD/research/locked-mcp-http-contract.mjs",target=/tmp/locked-mcp-http-contract.mjs,readonly \
+            --entrypoint node firecrawl-locked-mcp:research /tmp/locked-mcp-http-contract.mjs --candidate-live
+
+      - name: Live public-source candidate sample (separate evidence)
+        id: live_sample
+        continue-on-error: true
+        run: |
+          timeout 210s docker run --rm --pull=never --network bridge --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py --live
+      - name: Live durable batch and bounded crawl (separate evidence)
+        id: live_jobs
+        continue-on-error: true
+        run: |
+          timeout 210s docker run --rm --pull=never --network bridge --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --entrypoint python3 firecrawl-rust-ocr-ci:review -B /research/verify-candidate-process.py --live-jobs
+      - name: Report external availability separately from offline gate
+        if: always()
+        run: |
+          {
+            echo 'Live public-source sample outcome = ${{ steps.live_sample.outcome }} (not offline acceptance)'
+            echo 'Live durable jobs outcome = ${{ steps.live_jobs.outcome }} (not offline acceptance)'
+            echo 'Live locked MCP outcome = ${{ steps.live_mcp.outcome }} (not offline acceptance)'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  durable-job-store:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout research
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test standalone embedded SQLite research crate
+        run: |
+          rustc --version
+          cargo test --locked --manifest-path research/job-store/Cargo.toml
+          cargo tree --manifest-path research/job-store/Cargo.toml --locked

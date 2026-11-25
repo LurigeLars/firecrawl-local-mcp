@@ -1,0 +1,124 @@
+diff --git a/apps/local/src/scrape.rs b/apps/local/src/scrape.rs
+--- a/apps/local/src/scrape.rs
++++ b/apps/local/src/scrape.rs
+@@ -148,10 +148,11 @@
+ pub struct Engine {
+   fetcher: Fetcher,
+   browser: Option<Arc<BrowserPool>>,
+   browser_mode: BrowserMode,
+-  in_flight: std::sync::atomic::AtomicUsize,
+-  dirty: std::sync::atomic::AtomicBool,
+-  parse_slots: tokio::sync::Semaphore,
++  html_only: bool,
++  in_flight: std::sync::atomic::AtomicUsize,
++  dirty: std::sync::atomic::AtomicBool,
++  parse_slots: Arc<tokio::sync::Semaphore>,
+ }
+ 
+ struct InFlight<'a>(&'a Engine);
+@@ -251,8 +252,19 @@
+   out
+ }
+ 
++// Reject document MIME and magic before any native document parser or HTML
++// meta-refresh processing. This function does not parse the input document.
++fn check_html_only(fetched: &crate::fetch::FetchResult) -> Result<(), ScrapeError> {
++  let mime = fetched.mime();
++  if mime.as_deref() != Some("text/html") ||
++      crate::documents::sniff(&fetched.body, mime.as_deref(), &fetched.final_url).is_some() {
++    return Err(ScrapeError::new(415, "DOCUMENT_ISOLATION_REQUIRED", "Use the isolated PDF/document service."));
++  }
++  Ok(())
++}
++
+ impl Engine {
+   pub fn new(cfg: EngineConfig) -> Result<Self, String> {
+     let user_agent = cfg
+       .user_agent
+       .clone()
+@@ -264,18 +276,25 @@
+     Ok(Self {
+       fetcher: Fetcher::new(cfg.policy, cfg.user_agent.as_deref())?,
+       browser,
+       browser_mode: cfg.browser,
+-      in_flight: std::sync::atomic::AtomicUsize::new(0),
+-      dirty: std::sync::atomic::AtomicBool::new(false),
+-      parse_slots: tokio::sync::Semaphore::new(
+-        std::thread::available_parallelism()
+-          .map(|n| n.get())
+-          .unwrap_or(4),
+-      ),
+-    })
++      html_only: false,
++      in_flight: std::sync::atomic::AtomicUsize::new(0),
++      dirty: std::sync::atomic::AtomicBool::new(false),
++      parse_slots: Arc::new(tokio::sync::Semaphore::new(
++        std::thread::available_parallelism()
++          .map(|n| n.get())
++          .unwrap_or(4),
++      )),
++    })
++  }
++
++  /// Candidate HTTP service keeps document parsers out of its networked process.
++  pub(crate) fn require_html_only(mut self) -> Self {
++    self.html_only = true;
++    self
+   }
+ 
+   pub fn policy(&self) -> NetworkPolicy {
+     self.fetcher.policy()
+   }
+ 
+@@ -395,7 +414,10 @@
+           }
+           Err(e) => return Err(e.into()),
+         };
++        if self.html_only {
++          check_html_only(&fetched)?;
++        }
+         // Follow an instant <meta refresh> the way a browser would.
+         let next = if hops < 3 && looks_like_html(fetched.mime().as_deref(), &fetched.body) {
+           meta_refresh_target(&fetched.text(), &fetched.final_url)
+         } else {
+@@ -467,7 +489,16 @@
+           && (matches!(fetched.status, 403 | 503) || crate::cloud::looks_like_bot_check(&markdown));
+         let nav_only = looks_like_nav_only_shell(&raw_html, &markdown);
+         let needs_javascript =
+           (200..400).contains(&fetched.status) && (needs_browser(&raw_html, &markdown) || nav_only);
++        // Candidate routes rendering to the separate guarded Playwright service.
++        // BrowserMode::Never would otherwise silently accept a JavaScript shell.
++        // Do not retry authorization or rate-limit responses in another engine.
++        if self.html_only && ((fetched.status == 200 && needs_javascript) ||
++            (matches!(fetched.status, 200 | 403 | 503) &&
++                crate::cloud::looks_like_bot_check(&markdown))) {
++          return Err(ScrapeError::new(422, "BROWSER_RENDER_REQUIRED",
++              "The HTML result needs separate browser rendering."));
++        }
+         let shell = can_render && !challenged && needs_javascript;
+         let mut render = Render::NotNeeded;
+         let rendered = if challenged {
+@@ -666,12 +697,17 @@
+     let formats = formats.to_vec();
+     // Parsing is CPU-bound: more pages in memory than cores only raises the
+     // peak, not the throughput.
+-    let _permit = self
+-      .parse_slots
+-      .acquire()
+-      .await
+-      .map_err(|e| ScrapeError::new(500, "PARSE_FAILED", e.to_string()))?;
+-    tokio::task::spawn_blocking(move || process_html(raw_html, &final_url, &opts, &formats))
++    let permit = self
++      .parse_slots
++      .clone()
++      .acquire_owned()
++      .await
++      .map_err(|e| ScrapeError::new(500, "PARSE_FAILED", e.to_string()))?;
++    tokio::task::spawn_blocking(move || {
++      // A cancelled HTTP future must not release a live parser's permit.
++      let _permit = permit;
++      process_html(raw_html, &final_url, &opts, &formats)
++    })
+       .await
+       .map_err(|e| ScrapeError::new(500, "PARSE_FAILED", e.to_string()))?
+   }

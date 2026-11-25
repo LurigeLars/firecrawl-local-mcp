@@ -1,0 +1,59 @@
+name: Rust research dependency audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/job-store/Cargo.toml'
+      - 'research/job-store/Cargo.lock'
+      - 'research/job-store-lock.patch'
+      - 'research/Dockerfile.rust-table-ci'
+      - '.github/workflows/rust-research-dependency-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rustsec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout research
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install pinned RustSec auditor
+        working-directory: ${{ runner.temp }}
+        run: |
+          rustc --version
+          cargo install cargo-audit --version 0.23.0 --locked --no-default-features
+      - name: Reconstruct exact candidate lockfile
+        run: |
+          set -euo pipefail
+          upstream=$(sed -n 's/^RUN git init \&\& git fetch --depth 1 https:\/\/github\.com\/firecrawl\/firecrawl\.git \([0-9a-f]\{40\}\) .*$/\1/p' research/Dockerfile.rust-table-ci)
+          test "${#upstream}" -eq 40
+          work=$(mktemp -d "$RUNNER_TEMP/fc-audit.XXXXXX")
+          git -C "$work" init --quiet
+          git -C "$work" fetch --depth 1 https://github.com/firecrawl/firecrawl.git "$upstream"
+          git -C "$work" checkout --detach --quiet FETCH_HEAD
+          test "$(git -C "$work" rev-parse HEAD)" = "$upstream"
+          git -C "$work" apply --check "$GITHUB_WORKSPACE/research/job-store-lock.patch"
+          git -C "$work" apply "$GITHUB_WORKSPACE/research/job-store-lock.patch"
+          cp "$work/apps/local/Cargo.lock" "$RUNNER_TEMP/firecrawl-candidate-Cargo.lock"
+          rm -rf "$work"
+          sha256sum "$RUNNER_TEMP/firecrawl-candidate-Cargo.lock" research/job-store/Cargo.lock
+      - name: Audit candidate and standalone store (no advisory suppressions)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set +e
+          cargo audit --file "$RUNNER_TEMP/firecrawl-candidate-Cargo.lock"
+          candidate_status=$?
+          cargo audit --file "$GITHUB_WORKSPACE/research/job-store/Cargo.lock"
+          store_status=$?
+          printf 'Candidate audit exit: %s; standalone store audit exit: %s\n' "$candidate_status" "$store_status"
+          test "$candidate_status" -eq 0 && test "$store_status" -eq 0
