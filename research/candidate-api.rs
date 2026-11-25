@@ -507,12 +507,15 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
     Ok(data)
 }
 
-const MAX_ENRICHED_HITS:usize=5;
+const MAX_MODEL_ENRICHED_HITS:usize=5;
+const MAX_STATIC_ENRICHED_HITS:usize=100;
 const MAX_ENRICHED_DOC:usize=256*1024;
+const SEARCH_RECEIPT_RESERVE:usize=32*1024;
 
 // Do not let nested options select a destination or a different backend.
-// Deserialize against the existing strict scrape contract, excluding models,
-// PDF parsers and explicit browser waits in this first enrichment subset.
+// Deserialize against the existing strict scrape contract. Model enrichment
+// keeps the five-hit ceiling; static enrichment uses the bounded search limit.
+// PDF parsers and explicit browser waits remain unsupported here.
 fn search_options(raw:Value)->Result<(search::Request,Option<StaticRequest>),StatusCode>{
     let mut object=raw.as_object().cloned().ok_or(StatusCode::BAD_REQUEST)?;
     let options=object.remove("scrapeOptions");
@@ -520,14 +523,16 @@ fn search_options(raw:Value)->Result<(search::Request,Option<StaticRequest>),Sta
     req.validate().map_err(|_|StatusCode::BAD_REQUEST)?;
     let options=if let Some(value)=options{
         let mut fields=value.as_object().cloned().ok_or(StatusCode::BAD_REQUEST)?;
-        if fields.contains_key("url")||fields.contains_key("origin")||req.limit()>MAX_ENRICHED_HITS{
+        if fields.contains_key("url")||fields.contains_key("origin"){
             return Err(StatusCode::BAD_REQUEST);
         }
         // Placeholder only supplies the required serde field. Actual fetch
         // destination is independently derived and guarded for each hit.
         fields.insert("url".into(),json!(""));
         let opts:StaticRequest=serde_json::from_value(Value::Object(fields)).map_err(|_|StatusCode::BAD_REQUEST)?;
-        if !valid_common(&opts)||(!valid_static(&opts)&&model_format(&opts).is_none()){return Err(StatusCode::BAD_REQUEST);}
+        let model_requested=model_format(&opts).is_some();
+        if !valid_common(&opts)||(!valid_static(&opts)&&!model_requested)||
+            (model_requested&&req.limit()>MAX_MODEL_ENRICHED_HITS){return Err(StatusCode::BAD_REQUEST);}
         Some(opts)
     }else{None};
     Ok((req,options))
@@ -537,17 +542,24 @@ async fn enrich_search<F,Fut>(value:&mut Value,opts:StaticRequest,deadline:tokio
     ->Result<(),StatusCode>
 where F:FnMut(url::Url,StaticRequest)->Fut,
     Fut:std::future::Future<Output=Result<Value,StatusCode>>{
+    let model_requested=model_format(&opts).is_some();
+    // Reserve space for per-hit receipts and summary. Charge the full
+    // serialized document, conservatively including fields not merged.
+    let base=serde_json::to_vec(value).map_err(|_|StatusCode::BAD_GATEWAY)?.len();
+    let mut remaining_bytes=MAX_OUTPUT.checked_sub(base.saturating_add(SEARCH_RECEIPT_RESERVE))
+        .ok_or(StatusCode::PAYLOAD_TOO_LARGE)?;
     let hits=value["data"]["web"].as_array_mut().ok_or(StatusCode::BAD_GATEWAY)?;
-    if hits.len()>MAX_ENRICHED_HITS{return Err(StatusCode::BAD_GATEWAY);}
+    let cap=if model_requested{MAX_MODEL_ENRICHED_HITS}else{MAX_STATIC_ENRICHED_HITS};
+    if hits.len()>cap{return Err(StatusCode::BAD_GATEWAY);}
     let mut succeeded=0usize;
     let mut failed=0usize;
     for hit in hits.iter_mut(){
-        let model_requested=model_format(&opts).is_some();
         let cap=if model_requested{180000}else{45000};
         let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().min(cap) as u64;
         let target=hit["url"].as_str().ok_or(StatusCode::BAD_GATEWAY).and_then(scrape_target);
         let result=match target{
             Ok(_) if remaining==0=>Err(StatusCode::GATEWAY_TIMEOUT),
+            Ok(_) if remaining_bytes==0=>Err(StatusCode::PAYLOAD_TOO_LARGE),
             Ok(target)=>{
                 let mut options=opts.clone();
                 options.timeout=Some(options.timeout.unwrap_or(if model_requested{180000}else{30000}).min(remaining));
@@ -558,9 +570,10 @@ where F:FnMut(url::Url,StaticRequest)->Fut,
             Err(status)=>Err(status)
         };
         let result=result.and_then(|data|{
-            if !data.is_object()||serde_json::to_vec(&data).map_err(|_|StatusCode::BAD_GATEWAY)?.len()>MAX_ENRICHED_DOC{
-                return Err(StatusCode::PAYLOAD_TOO_LARGE);
-            }
+            if !data.is_object(){return Err(StatusCode::BAD_GATEWAY);}
+            let size=serde_json::to_vec(&data).map_err(|_|StatusCode::BAD_GATEWAY)?.len();
+            if size>MAX_ENRICHED_DOC||size>remaining_bytes{return Err(StatusCode::PAYLOAD_TOO_LARGE);}
+            remaining_bytes-=size;
             Ok(data)
         });
         let object=hit.as_object_mut().ok_or(StatusCode::BAD_GATEWAY)?;
@@ -825,8 +838,9 @@ mod tests {
             "formats":["html","links"],"onlyMainContent":false,"includeTags":["article"]}})).unwrap();
         assert_eq!(req.limit(),2);
         assert_eq!(opts.unwrap().formats,vec![json!("html"),json!("links")]);
+        assert!(search_options(json!({"query":"test","limit":100,"scrapeOptions":{"formats":["markdown"]}})).is_ok());
         for input in [
-            json!({"query":"test","limit":6,"scrapeOptions":{}}),
+            json!({"query":"test","limit":101,"scrapeOptions":{}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"url":"https://example.org/"}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"formats":["summary","markdown"]}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"maxAge":1}}),
@@ -861,6 +875,25 @@ mod tests {
         assert_eq!(value["research"]["scrape"]["failed"],2);
         assert_eq!(value["research"]["scrape"]["complete"],false);
         assert!(value["warning"].as_str().unwrap().starts_with("Web results only."));
+    }
+
+    #[tokio::test]
+    async fn static_enrichment_above_five_preserves_rank_with_aggregate_cap(){
+        let (_,opts)=search_options(json!({"query":"test","limit":12,"scrapeOptions":{"formats":["markdown"]}})).unwrap();
+        let rows=(0..12).map(|i|json!({"url":format!("https://example.org/{i}"),"position":i+1,"title":"original"}))
+            .collect::<Vec<_>>();
+        let mut value=json!({"success":true,"data":{"web":rows},"research":{}});
+        enrich_search(&mut value,opts.unwrap(),tokio::time::Instant::now()+Duration::from_secs(5),|_,_|async{
+            Ok(json!({"markdown":"x".repeat(240*1024)}))
+        }).await.unwrap();
+        let hits=value["data"]["web"].as_array().unwrap();
+        assert_eq!(hits.len(),12);
+        assert!(value["research"]["scrape"]["completed"].as_u64().unwrap()>5);
+        assert!(value["research"]["scrape"]["failed"].as_u64().unwrap()>0);
+        assert!(serde_json::to_vec(&value).unwrap().len()<=MAX_OUTPUT);
+        assert_eq!(hits[11]["researchScrape"]["http_status"],413);
+        assert_eq!(hits[11]["position"],12);
+        assert_eq!(hits[11]["title"],"original");
     }
 
     #[tokio::test]
