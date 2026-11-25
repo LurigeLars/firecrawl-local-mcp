@@ -146,9 +146,9 @@ async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url,policy:Optio
             let remaining=end.saturating_duration_since(Instant::now()).min(Duration::from_secs(8));
             if remaining.is_zero(){break;}
             attempted+=1;
-            let res=tokio::time::timeout(remaining,crawler.fetcher.fetch_once(&url,&FetchOptions{
+            let res=tokio::time::timeout(remaining,crawler.fetcher.fetch_once_limited(&url,&FetchOptions{
                 timeout:Some(remaining),..Default::default()
-            })).await;
+            },MAX_XML)).await;
             // Preserve spacing before any subsequent seed request, even if
             // the remaining map budget is exhausted.
             tokio::time::sleep(delay).await;

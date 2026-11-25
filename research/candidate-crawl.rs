@@ -111,9 +111,9 @@ impl Crawler{
     pub(super) async fn robots(&self,target:&Url)->Result<(u16,bytes::Bytes),StatusCode>{
         render::check_dns(target).await.map_err(|_|StatusCode::FORBIDDEN)?;
         let url=target.join("/robots.txt").map_err(|_|StatusCode::BAD_REQUEST)?;
-        let res=self.fetcher.fetch_once(&url,&FetchOptions{
+        let res=self.fetcher.fetch_once_limited(&url,&FetchOptions{
             timeout:Some(Duration::from_secs(8)),..Default::default()
-        }).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+        },ROBOTS_LIMIT).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
         if res.status==200 && (res.mime().as_deref()!=Some("text/plain") ||
             res.body.len()>ROBOTS_LIMIT || std::str::from_utf8(&res.body).is_err()){
             return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -170,9 +170,9 @@ impl Crawler{
             let delay=robots_delay.max(minimum_delay);
             tokio::time::sleep(delay).await;
             if !allowed{return Err(StatusCode::FORBIDDEN);}
-            let page=self.fetcher.fetch_once(&target,&FetchOptions{
+            let page=self.fetcher.fetch_once_limited(&target,&FetchOptions{
                 timeout:Some(Duration::from_secs(15)),..Default::default()
-            }).await;
+            },HTML_LIMIT).await;
             // The one crawl worker spaces the next robots/page request too.
             tokio::time::sleep(delay).await;
             let page=page.map_err(|_|StatusCode::BAD_GATEWAY)?;
