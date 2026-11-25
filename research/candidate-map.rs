@@ -183,6 +183,30 @@ async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url)->Result<Val
             "site_coverage_verified":false}}))
 }
 
+/// Called only by the seed worker while holding the shared serial lock.
+/// A missing/failed sitemap is reported explicitly; a successful seed page
+/// still contributes its HTML links. Never expand scope or bypass robots.
+pub(super) async fn crawl_sitemap(crawler:&crawl::Crawler,seed:&Url)->(Vec<String>,Value){
+    let req=MapRequest{url:seed.to_string(),limit:MAX_LINKS,search:None,sitemap:"only".into(),
+        include_subdomains:false,filter_by_path:true,ignore_query_parameters:false,use_index:Some(false),
+        timeout:20000,origin:None};
+    match discover(crawler,&req,seed).await{
+        Ok(data)=>{
+            let mut links=Vec::new();
+            if let Some(rows)=data["links"].as_array(){
+                for raw in rows.iter().filter_map(|r|r["url"].as_str()){
+                    if let Ok(url)=static_target(raw){
+                        if crawl::scoped(seed,&url){links.push(url.to_string());}
+                    }
+                }
+            }
+            (links,json!({"status":"read","discovery":data["research"]}))
+        }
+        Err(status)=>(Vec::new(),json!({"status":"no_readable_sitemap","http_status":status.as_u16(),
+            "site_coverage_verified":false}))
+    }
+}
+
 pub(super) async fn route(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response{
     let req:MapRequest=match decode(&headers,&body){Ok(v)=>v,Err(r)=>return r};
     if !req.valid(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_MAP_OPTIONS");}

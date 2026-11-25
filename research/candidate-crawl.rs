@@ -1,6 +1,6 @@
 //! Conservative durable crawl research path. No caller headers, cookies,
 //! cross-origin crawl requests or redirect following.
-use super::{static_target,render};
+use super::{static_target,render,map};
 use crate::{crawl::{CrawlOptions,Scope,ROBOTS_AGENT},fetch::{Fetcher,FetchOptions},
     guard::NetworkPolicy,scrape::{process_html,Format,ScrapeOptions},cloud};
 use axum::http::StatusCode;
@@ -80,13 +80,28 @@ impl Crawler{
         Ok((res.status,res.body))
     }
 
-    pub(super) async fn read(&self,raw_seed:&str,raw_target:&str)->Result<(Value,Vec<String>),StatusCode>{
+    pub(super) async fn read(&self,raw_seed:&str,raw_target:&str,include_sitemap:bool,
+        max_depth:u32,page_limit:usize)->Result<(Value,Vec<String>),StatusCode>{
         let seed=seed(raw_seed)?;
         let target=static_target(raw_target)?;
         if !scoped(&seed,&target){return Err(StatusCode::FORBIDDEN);}
         let _serial=self.serial.lock().await;
-        let (doc,links)=self.read_links(&target,Duration::from_secs(50)).await?;
-        Ok((doc,candidates(&seed,&links)))
+        let (mut doc,links)=self.read_links(&target,Duration::from_secs(50)).await?;
+        let mut frontier=candidates(&seed,&links);
+        if include_sitemap{
+            if max_depth==0||page_limit<=1{
+                doc["researchSitemap"]=json!({"status":"skipped_by_crawl_limit"});
+            }else{
+                let (sitemap,receipt)=map::crawl_sitemap(self,&seed).await;
+                doc["researchSitemap"]=receipt;
+                // Prefer sitemap candidates, then HTML discovery. Both enter
+                // the same atomic, depth- and count-limited SQLite frontier.
+                let mut seen=HashSet::new();
+                frontier=sitemap.into_iter().chain(frontier).filter(|s|s!=seed.as_str()&&seen.insert(s.clone()))
+                    .take(DISCOVERY_LIMIT).collect();
+            }
+        }
+        Ok((doc,frontier))
     }
 
     /// Caller holds the shared crawl/map serial lock. The target must already

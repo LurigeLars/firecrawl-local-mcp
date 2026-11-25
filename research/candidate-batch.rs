@@ -96,16 +96,15 @@ pub(super) async fn create_crawl(State(state):State<CandidateState>,headers:Head
     }
 }
 
-// A v2-compatible subset, deliberately requiring explicit sitemap skip and
-// one worker. Do not turn an ordinary sitemap-inclusive crawl into a narrower
-// crawl without the caller's knowledge.
+// Bounded v2-compatible subset. Default include uses the same guarded
+// sitemap discovery as map; one worker and same-origin scope remain explicit.
 #[derive(Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct V2CrawlRequest{
     url:String,
     limit:usize,
     max_concurrency:usize,
-    sitemap:String,
+    #[serde(default="default_sitemap")] sitemap:String,
     #[serde(default="default_depth")] max_discovery_depth:u32,
     #[serde(default)] scrape_options:Option<V2ScrapeOptions>,
     #[serde(default)] origin:Option<String>,
@@ -119,11 +118,12 @@ struct V2ScrapeOptions{
     #[serde(default)] store_in_cache:bool,
 }
 fn default_depth()->u32{10}
+fn default_sitemap()->String{"include".into()}
 
 impl V2CrawlRequest{
     fn valid(&self)->bool{
         (1..=100).contains(&self.limit)&&self.max_concurrency==1&&self.max_discovery_depth<=10&&
-        self.sitemap=="skip"&&self.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))&&
+        matches!(self.sitemap.as_str(),"include"|"skip")&&self.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))&&
         self.scrape_options.as_ref().is_none_or(|s|s.formats==["markdown"]&&s.only_main_content&&s.max_age==0&&!s.store_in_cache)
     }
 }
@@ -136,13 +136,15 @@ pub(super) async fn create_v2_crawl(State(state):State<CandidateState>,headers:H
     let seed=match crawl::seed(&req.url){Ok(v)=>v.to_string(),Err(s)=>return refusal(s,"DESTINATION_DENIED")};
     let id=uuid::Uuid::new_v4().to_string();
     let store_id=id.clone();
-    match batch.call(move|store|store.create_crawl(&store_id,&seed,req.limit,req.max_discovery_depth)).await{
+    let include_sitemap=req.sitemap=="include";
+    match batch.call(move|store|store.create_crawl_with_sitemap(&store_id,&seed,req.limit,req.max_discovery_depth,include_sitemap)).await{
         Ok(())=>{
             batch.notify.notify_one();
             // The candidate is loopback-only. Do not construct next URLs from
             // a caller-supplied Host or forwarded header.
             Json(json!({"success":true,"id":id,"url":format!("http://127.0.0.1:3002/v2/crawl/{id}"),
-                "warning":"Bounded local same-origin crawl; no sitemap or cache; site coverage unverified."})).into_response()
+                "warning":"Bounded local same-origin crawl; no cache; site coverage unverified. Sitemap scan is bounded and seed-dependent.",
+                "research":{"sitemap_mode":if include_sitemap{"include"}else{"skip"}}})).into_response()
         },
         Err(e)=>store_refusal(e)
     }
@@ -190,13 +192,18 @@ pub(super) async fn status_v2_crawl(State(state):State<CandidateState>,Path(id):
 mod v2_tests{
     use super::*;
     #[test]
-    fn requires_explicit_supported_crawl_scope(){
+    fn supports_default_include_and_explicit_skip_with_bounded_scope(){
         let base=json!({"url":"https://example.org/docs/","limit":2,"maxConcurrency":1,
             "sitemap":"skip","scrapeOptions":{"formats":["markdown"]},"origin":"mcp-candidate-contract@3.40.0"});
         assert!(serde_json::from_value::<V2CrawlRequest>(base.clone()).unwrap().valid());
         let mut unknown=base.clone();unknown["ignoreRobotsTxt"]=json!(true);
         assert!(serde_json::from_value::<V2CrawlRequest>(unknown).is_err());
         let mut sitemap=base.clone();sitemap["sitemap"]=json!("include");
+        assert!(serde_json::from_value::<V2CrawlRequest>(sitemap.clone()).unwrap().valid());
+        sitemap.as_object_mut().unwrap().remove("sitemap");
+        let req=serde_json::from_value::<V2CrawlRequest>(sitemap.clone()).unwrap();
+        assert!(req.valid());assert_eq!(req.sitemap,"include");
+        sitemap["sitemap"]=json!("only");
         assert!(!serde_json::from_value::<V2CrawlRequest>(sitemap).unwrap().valid());
         let mut concurrency=base;concurrency["maxConcurrency"]=json!(2);
         assert!(!serde_json::from_value::<V2CrawlRequest>(concurrency).unwrap().valid());
@@ -253,7 +260,8 @@ async fn work(state:&CandidateState,batch:&BatchState)->Result<(),StoreError>{
             continue;
         };
         let result=if let Some(info)=claim.crawl(){
-            state.crawler.read(&info.seed,claim.item()).await
+            state.crawler.read(&info.seed,claim.item(),info.include_sitemap&&info.depth==0,
+                info.max_depth,info.page_limit).await
         } else {
             match static_target(claim.item()){
                 Ok(target)=>static_document(state,target,25000).await.map(|doc|(doc,Vec::new())),

@@ -24,7 +24,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone)]
 pub struct Claim { job: String, item: String, generation: i64, crawl: Option<CrawlClaim> }
 #[derive(Debug, Clone)]
-pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32 }
+pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32, pub include_sitemap: bool, pub page_limit: usize }
 impl Claim {
     pub fn item(&self) -> &str { &self.item }
     pub fn job(&self)->&str { &self.job }
@@ -57,7 +57,7 @@ impl Store {
         db.busy_timeout(Duration::from_secs(2))?;
         let version:i64=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         let tables:i64=db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0))?;
-        if !matches!(version,1|2) && !(version==0 && tables==0) {
+        if !matches!(version,1|2|3) && !(version==0 && tables==0) {
             return Err(Error::Invalid("unsupported store schema"));
         }
         db.execute_batch("
@@ -82,12 +82,16 @@ impl Store {
             CREATE TABLE IF NOT EXISTS crawl_jobs (
                 job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
                 seed TEXT NOT NULL, page_limit INTEGER NOT NULL CHECK(page_limit BETWEEN 1 AND 100),
-                max_depth INTEGER NOT NULL CHECK(max_depth BETWEEN 0 AND 10)
+                max_depth INTEGER NOT NULL CHECK(max_depth BETWEEN 0 AND 10),
+                include_sitemap INTEGER NOT NULL DEFAULT 0 CHECK(include_sitemap IN (0,1))
             );")?;
         if version==1 {
             db.execute_batch("ALTER TABLE items ADD COLUMN depth INTEGER NOT NULL DEFAULT 0 CHECK(depth BETWEEN 0 AND 10);")?;
         }
-        db.execute_batch("PRAGMA user_version=2; COMMIT;")?;
+        if version==2 {
+            db.execute_batch("ALTER TABLE crawl_jobs ADD COLUMN include_sitemap INTEGER NOT NULL DEFAULT 0 CHECK(include_sitemap IN (0,1));")?;
+        }
+        db.execute_batch("PRAGMA user_version=3; COMMIT;")?;
         let journal:String=db.query_row("PRAGMA journal_mode",[],|r|r.get(0))?;
         if !journal.eq_ignore_ascii_case("wal") {return Err(Error::Invalid("WAL unavailable"));}
         let mut store=Self {db,_owner:owner};
@@ -101,13 +105,17 @@ impl Store {
     }
 
     pub fn create_crawl(&mut self,id:&str,seed:&str,limit:usize,max_depth:u32)->Result<()> {
+        self.create_crawl_with_sitemap(id,seed,limit,max_depth,false)
+    }
+
+    pub fn create_crawl_with_sitemap(&mut self,id:&str,seed:&str,limit:usize,max_depth:u32,include_sitemap:bool)->Result<()> {
         if !(1..=MAX_ITEMS).contains(&limit) || max_depth>10 {
             return Err(Error::Invalid("invalid crawl limits"));
         }
-        self.create_job(id,&[seed.to_owned()],Some((seed,limit,max_depth)))
+        self.create_job(id,&[seed.to_owned()],Some((seed,limit,max_depth,include_sitemap)))
     }
 
-    fn create_job(&mut self,id:&str,keys:&[String],crawl:Option<(&str,usize,u32)>)->Result<()> {
+    fn create_job(&mut self,id:&str,keys:&[String],crawl:Option<(&str,usize,u32,bool)>)->Result<()> {
         if id.is_empty() || id.len() > 128 || keys.is_empty() || keys.len() > MAX_ITEMS ||
             keys.iter().any(|k| k.is_empty() || k.len() > 8192) {
             return Err(Error::Invalid("invalid batch"));
@@ -118,8 +126,8 @@ impl Store {
         let count: i64 = tx.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))?;
         if count >= MAX_JOBS { return Err(Error::Invalid("job store full")); }
         tx.execute("INSERT INTO jobs(id,status,created_at) VALUES(?1,'scraping',?2)",params![id,now])?;
-        if let Some((seed,limit,max_depth))=crawl {
-            tx.execute("INSERT INTO crawl_jobs VALUES(?1,?2,?3,?4)",params![id,seed,limit as i64,max_depth])?;
+        if let Some((seed,limit,max_depth,include_sitemap))=crawl {
+            tx.execute("INSERT INTO crawl_jobs(job,seed,page_limit,max_depth,include_sitemap) VALUES(?1,?2,?3,?4,?5)",params![id,seed,limit as i64,max_depth,include_sitemap])?;
         }
         for (i, key) in keys.iter().enumerate() {
             tx.execute("INSERT INTO items(job,key,ordinal,state) VALUES(?1,?2,?3,'queued')",
@@ -145,8 +153,8 @@ impl Store {
              WHERE items.job=?1 AND jobs.status='scraping' AND items.state='queued'
              ORDER BY ordinal LIMIT 1", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let Some((item, old,depth)) = next else { return Ok(None); };
-        let crawl=tx.query_row("SELECT seed,max_depth FROM crawl_jobs WHERE job=?1",[id],
-            |r|Ok(CrawlClaim{seed:r.get(0)?,depth,max_depth:r.get(1)?})).optional()?;
+        let crawl=tx.query_row("SELECT seed,max_depth,include_sitemap,page_limit FROM crawl_jobs WHERE job=?1",[id],
+            |r|Ok(CrawlClaim{seed:r.get(0)?,depth,max_depth:r.get(1)?,include_sitemap:r.get(2)?,page_limit:r.get(3)?})).optional()?;
         let generation = old.checked_add(1).ok_or(Error::Invalid("claim generation exhausted"))?;
         tx.execute("UPDATE items SET state='running',generation=?3 WHERE job=?1 AND key=?2",
             params![id,item,generation])?;
@@ -263,9 +271,9 @@ impl Store {
         }
         self.purge_expired()?;
         let tx=self.db.transaction()?;
-        let (status,created,finished):(String,i64,Option<i64>)=tx.query_row(
-            "SELECT jobs.status,created_at,finished_at FROM jobs JOIN crawl_jobs ON crawl_jobs.job=jobs.id WHERE jobs.id=?1",
-            [id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(Error::Invalid("job not found"))?;
+        let (status,created,finished,include_sitemap):(String,i64,Option<i64>,bool)=tx.query_row(
+            "SELECT jobs.status,created_at,finished_at,include_sitemap FROM jobs JOIN crawl_jobs ON crawl_jobs.job=jobs.id WHERE jobs.id=?1",
+            [id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(Error::Invalid("job not found"))?;
         let (total,succeeded,failed,cancelled,attempts):(i64,i64,i64,i64,i64)=tx.query_row(
             "SELECT COUNT(*),SUM(state='done'),SUM(state='failed'),SUM(state='cancelled'),COALESCE(SUM(generation),0)
              FROM items WHERE job=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
@@ -295,7 +303,8 @@ impl Store {
         let value=json!({"status":api_status,"completed":succeeded,"total":total-failed-cancelled,
             "data":docs,"next_skip":next,"created_at":created,"finished_at":finished,
             "expires_at":expiry,"research":{"discovered":total,"failed":failed,"cancelled":cancelled,
-            "page_attempts":attempts,"site_coverage_verified":false,"cache_used":false}});
+            "page_attempts":attempts,"sitemap_mode":if include_sitemap{"include"}else{"skip"},
+                "site_coverage_verified":false,"cache_used":false}});
         tx.commit()?;
         Ok(value)
     }
@@ -339,14 +348,15 @@ impl Store {
             }
         }
         let next = if cursor < last || status == "scraping" { Some(cursor) } else { None };
-        let crawl_limits:Option<(i64,u32)>=tx.query_row("SELECT page_limit,max_depth FROM crawl_jobs WHERE job=?1",
-            [id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let crawl_limits:Option<(i64,u32,bool)>=tx.query_row("SELECT page_limit,max_depth,include_sitemap FROM crawl_jobs WHERE job=?1",
+            [id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let mut result=json!({"status":status,"total":total,"completed":succeeded,"failed":failed,
             "cancelled":cancelled,"results":rows,"next_after":next});
-        if let Some((page_limit,max_depth))=crawl_limits {
+        if let Some((page_limit,max_depth,include_sitemap))=crawl_limits {
             let attempts:i64=tx.query_row("SELECT COALESCE(SUM(generation),0) FROM items WHERE job=?1",[id],|r|r.get(0))?;
             result["crawl"]=json!({"page_limit":page_limit,"max_discovery_depth":max_depth,
-                "page_attempts":attempts,"page_attempt_limit":page_limit*3,"site_coverage_verified":false});
+                "page_attempts":attempts,"page_attempt_limit":page_limit*3,
+                "sitemap_mode":if include_sitemap{"include"}else{"skip"},"site_coverage_verified":false});
         }
         tx.commit()?;
         Ok(result)
@@ -504,6 +514,41 @@ mod tests {
         assert!(second["next_skip"].is_null());
         db.create("batch",&["a".into()]).unwrap();
         assert!(db.crawl_status_v2("batch",0,1).is_err());
+    }
+
+    #[test]
+    fn sitemap_mode_survives_restart_and_v2_schema_migration() {
+        let tmp=Temp::new();
+        let mut db=Store::open(&tmp.db()).unwrap();
+        db.create_crawl("legacy","old",2,1).unwrap();
+        // Simulate exact previous schema, without changing existing jobs.
+        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN include_sitemap; PRAGMA user_version=2;").unwrap();
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let old=db.claim("legacy").unwrap().unwrap();
+        assert!(!old.crawl().unwrap().include_sitemap);
+        db.settle(&old,true,&json!({"markdown":"legacy"})).unwrap();
+        db.create_crawl_with_sitemap("new","seed",3,1,true).unwrap();
+        let stale=db.claim("new").unwrap().unwrap();
+        assert!(stale.crawl().unwrap().include_sitemap);
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let seed=db.claim("new").unwrap().unwrap();
+        assert!(seed.crawl().unwrap().include_sitemap);
+        assert_eq!(seed.crawl().unwrap().page_limit,3);
+        assert!(db.settle_discovered(&stale,true,&json!({}),&["stale".into()]).is_err());
+        db.settle_discovered(&seed,true,&json!({"researchSitemap":{"status":"read"}}),
+            &["a".into(),"a".into(),"b".into(),"over-limit".into()]).unwrap();
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let next=db.claim("new").unwrap().unwrap();
+        assert_eq!(next.item(),"a");
+        assert_eq!(next.crawl().unwrap().depth,1);
+        let page=db.crawl_status_v2("new",0,10).unwrap();
+        assert_eq!(page["research"]["sitemap_mode"],"include");
+        assert_eq!(page["data"][0]["researchSitemap"]["status"],"read");
+        assert_eq!(page["total"],3);
+        assert_eq!(db.crawl_status_v2("legacy",0,10).unwrap()["research"]["sitemap_mode"],"skip");
     }
 
     #[test]

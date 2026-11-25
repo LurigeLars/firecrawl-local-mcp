@@ -22,13 +22,13 @@ const fixtureToken='fc-synthetic-ci-not-a-real-key';
 // contract. Forward the exact JSON body and auth to the fixed loopback Rust
 // listener, never a caller-supplied host; no redirect or fabricated response.
 async function relay(req,res,u,raw,record){
-  if(!['/v2/scrape','/v2/map','/v2/crawl'].includes(u.pathname) ||
-      u.search || req.method!=='POST' ||
-      req.headers.authorization!=='Bearer '+candidateToken){
+  const post=req.method==='POST'&&['/v2/scrape','/v2/map','/v2/crawl'].includes(u.pathname)&&!u.search;
+  const status=req.method==='GET'&&/^\/v2\/crawl\/[0-9a-f-]{36}$/.test(u.pathname)&&!u.search;
+  if(!(post||status)||req.headers.authorization!=='Bearer '+candidateToken){
     res.writeHead(400).end();return;
   }
   const upstream=await fetch('http://127.0.0.1:3002'+u.pathname,{
-    method:'POST',body:raw,headers:{authorization:req.headers.authorization,
+    method:req.method,...(post?{body:raw}:{}),headers:{authorization:req.headers.authorization,
       'content-type':'application/json'},redirect:'manual',
     signal:AbortSignal.timeout(35000)
   });
@@ -127,7 +127,7 @@ try{
     const cases=mode==='--candidate'?[
       {name:'firecrawl_scrape',args:{url:'https://127.0.0.1/',formats:['markdown']},path:'/v2/scrape',status:403},
       {name:'firecrawl_map',args:{url:'https://127.0.0.1/',limit:2},path:'/v2/map',status:403},
-      {name:'firecrawl_crawl',args:{url:fixtureUrl,limit:2,maxConcurrency:1,scrapeOptions:{formats:['markdown']}},path:'/v2/crawl',status:400}
+      {name:'firecrawl_crawl',args:{url:fixtureUrl,limit:2,maxConcurrency:2,scrapeOptions:{formats:['markdown']}},path:'/v2/crawl',status:400}
     ]:[
       {name:'firecrawl_scrape',args:{url:'https://www.iana.org/help/example-domains',formats:['markdown']},path:'/v2/scrape',status:200,markers:['Example Domains','RFC 2606','RFC 6761']},
       {name:'firecrawl_scrape',args:{url:'https://www.cftc.gov/sites/default/files/files/dea/cotarchives/2026/futures/petroleum_sf090826.htm',formats:['markdown']},path:'/v2/scrape',status:200,markers:['September 8, 2026','Open Interest','1,939,911']}
@@ -154,6 +154,38 @@ try{
       }
       console.log(JSON.stringify({actual_candidate:true,mode,tool:tc.name,http_status:exchange.status,
         markers:tc.markers?.length??0,mcp_error:!!reply.error||reply.result?.isError===true}));
+    }
+    if(mode==='--candidate-live'){
+      const offset=traffic.length;
+      const start=await rpc('tools/call',{name:'firecrawl_crawl',arguments:{
+        url:'https://www.iana.org/help',limit:2,maxConcurrency:1,scrapeOptions:{formats:['markdown']}}});
+      assert.ok(!start.error&&start.result&&!start.result.isError,'MCP crawl creation failed');
+      const created=traffic.slice(offset).find(x=>x.path==='/v2/crawl'&&x.status===200)?.response;
+      assert.equal(created?.research?.sitemap_mode,'include');
+      const jobId=created.id;
+      assert.match(jobId,/^[0-9a-f-]{36}$/);
+      assert.ok(JSON.stringify(start.result).includes(jobId),'MCP omitted crawl job ID');
+      const deadline=Date.now()+95000;
+      let result;
+      while(Date.now()<deadline){
+        const at=traffic.length;
+        const reply=await rpc('tools/call',{name:'firecrawl_check_crawl_status',arguments:{id:jobId}});
+        assert.ok(!reply.error&&reply.result&&!reply.result.isError,'MCP crawl status failed');
+        result=traffic.slice(at).find(x=>x.path==='/v2/crawl/'+jobId&&x.status===200)?.response;
+        assert.equal(result?.research?.sitemap_mode,'include');
+        if(result.status==='completed'||result.status==='failed'){
+          assert.equal(result.status,'completed');
+          assert.equal(result.completed,2);
+          assert.equal(result.research.failed,0);
+          assert.ok(result.data.some(d=>d.researchSitemap?.status),'sitemap outcome missing');
+          assert.ok(JSON.stringify(reply.result).includes('completed'),'MCP omitted terminal state');
+          console.log(JSON.stringify({actual_candidate:true,tool:'firecrawl_crawl',sitemap_mode:'include',
+            completed:result.completed,sitemap:result.data.find(d=>d.researchSitemap)?.researchSitemap}));
+          break;
+        }
+        await new Promise(resolve=>setTimeout(resolve,500));
+      }
+      assert.equal(result?.status,'completed','MCP crawl deadline exceeded');
     }
     console.log('LOCKED_MCP_ACTUAL_CANDIDATE_PASS '+mode);
   }else{
