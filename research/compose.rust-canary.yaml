@@ -1,0 +1,130 @@
+# Opt-in production-sidecar canary. Never use with production Compose.
+name: firecrawl-rust-canary
+services:
+  init:
+    image: node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
+    user: "0:0"
+    network_mode: none
+    environment:
+      RESEARCH_CI_FIXTURE: "0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 32
+    cpus: 0.25
+    volumes:
+      - candidate-token:/run/research-token
+      - candidate-jobs:/var/lib/research
+    command:
+      - node
+      - -e
+      - >-
+        const fs=require('node:fs'),crypto=require('node:crypto');
+        const token='/run/research-token/token';
+        const fixture=process.env.RESEARCH_CI_FIXTURE;
+        if(!['0','1'].includes(fixture)) throw Error('invalid research fixture mode');
+        const testOnly='0123456789abcdef'.repeat(4);
+        if(!fs.existsSync(token)) fs.writeFileSync(token,fixture==='1'?testOnly:crypto.randomBytes(32).toString('hex'),{mode:0o440,flag:'wx'});
+        const actual=fs.readFileSync(token,'utf8');
+        if(!/^[0-9a-f]{64}$/.test(actual)||(actual===testOnly)!==(fixture==='1')) throw Error('invalid research token');
+        fs.chownSync(token,65532,1000);
+        fs.chmodSync(token,0o440);
+        fs.chownSync('/var/lib/research',65532,65532);
+        fs.chmodSync('/var/lib/research',0o700);
+    restart: "no"
+
+  rust-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust-table-ci
+      target: release-runtime
+    user: "65532:65532"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      pdf-ocr:
+        condition: service_started
+    environment:
+      CANDIDATE_NETWORK_MODE: internal-api
+      CANDIDATE_TOKEN_FILE: /run/research-token/token
+      CANDIDATE_JOB_DB_FILE: /var/lib/research/jobs.sqlite
+      CANDIDATE_PDF_ENABLED: "1"
+      CANDIDATE_BROWSER_ENABLED: "1"
+    volumes:
+      - candidate-token:/run/research-token:ro
+      - candidate-jobs:/var/lib/research
+    networks:
+      private:
+        aliases: [api]
+      production_backend: {}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 64
+    cpus: 2.0
+    restart: "no"
+
+  pdf-ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust-table-ci
+      target: release-ocr-runtime
+    user: "65532:65532"
+    init: false
+    networks: [private]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 64
+    cpus: 2.0
+    restart: "no"
+
+  mcp:
+    build:
+      context: ../public
+      dockerfile: Dockerfile.mcp
+    user: node
+    environment:
+      FIRECRAWL_API_URL: http://api:3002
+      FIRECRAWL_API_KEY_FILE: /run/research-token/token
+      FIRECRAWL_MCP_ALLOWED_HOSTS: mcp
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      rust-api:
+        condition: service_started
+    volumes:
+      - candidate-token:/run/research-token:ro
+    networks: [private]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+      - /home/node
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 64
+    cpus: 2.0
+    restart: "no"
+
+networks:
+  private:
+    internal: true
+  production_backend:
+    external: true
+    name: firecrawl_backend
+volumes:
+  candidate-token:
+  candidate-jobs:
