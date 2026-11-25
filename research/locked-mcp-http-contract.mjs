@@ -230,6 +230,7 @@ try{
   }else{
   const calls=[
     ['firecrawl_scrape',{url:fixtureUrl,formats:['markdown']},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:fixtureUrl,formats:['images']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl+'?year=2026#data',formats:['markdown'],includeTags:['article'],excludeTags:['.ads']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['summary']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['json'],jsonOptions:{prompt:'Extract value',schema:{

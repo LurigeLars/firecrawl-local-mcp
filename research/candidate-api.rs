@@ -215,8 +215,8 @@ fn valid_common(req:&StaticRequest)->bool{
 }
 
 fn valid_static(req:&StaticRequest) -> bool {
-    req.max_age<=CACHE_MAX_AGE_MS&&valid_metadata(req)&&req.wait_for==0&&req.parsers.is_none()&&!req.formats.is_empty()&&req.formats.len()<=4&&
-        req.formats.iter().all(|s|matches!(s.as_str(),Some("markdown"|"html"|"rawHtml"|"links")))&&
+    req.max_age<=CACHE_MAX_AGE_MS&&valid_metadata(req)&&req.wait_for==0&&req.parsers.is_none()&&!req.formats.is_empty()&&req.formats.len()<=5&&
+        req.formats.iter().all(|s|matches!(s.as_str(),Some("markdown"|"html"|"rawHtml"|"links"|"images")))&&
         req.formats.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>().len()==req.formats.len()&&
         (1..=45000).contains(&req.timeout.unwrap_or(30000))
 }
@@ -277,13 +277,13 @@ async fn add_model_result(data:&mut Value,mode:model::Mode,prompt:Option<String>
 fn browser_formats(req:&StaticRequest)->Option<Vec<Format>>{
     if !valid_common(req)||req.parsers.is_some()||!(1..=10000).contains(&req.wait_for)||
         !(1..=60000).contains(&req.timeout.unwrap_or(60000))||
-        req.timeout.unwrap_or(60000)<=req.wait_for||req.formats.is_empty()||req.formats.len()>4||
+        req.timeout.unwrap_or(60000)<=req.wait_for||req.formats.is_empty()||req.formats.len()>5||
         req.formats.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>().len()!=req.formats.len(){
         return None;
     }
     req.formats.iter().map(|f|match f.as_str()?{
         "markdown"=>Some(Format::Markdown),"html"=>Some(Format::Html),
-        "rawHtml"=>Some(Format::RawHtml),"links"=>Some(Format::Links),_=>None
+        "rawHtml"=>Some(Format::RawHtml),"links"=>Some(Format::Links),"images"=>Some(Format::Images),_=>None
     }).collect()
 }
 
@@ -811,6 +811,30 @@ mod tests {
         }
         assert!(serde_json::from_value::<StaticRequest>(json!({"url":"https://example.org/",
             "headers":{"Cookie":"synthetic"}})).is_err());
+    }
+
+    #[test]
+    fn image_format_reuses_native_extractor_and_preserves_output_scope(){
+        let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/report",
+            "formats":["images"]})).unwrap();
+        assert!(valid_static(&req));
+        let explicit:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/report",
+            "formats":["images"],"waitFor":100})).unwrap();
+        assert_eq!(browser_formats(&explicit),Some(vec![Format::Images]));
+        let html=r#"<html><body><article><p>Report 42.</p><img src="/one.png" data-src="/two.png">
+            <img src="/one.png"><img src="javascript:alert(1)"><picture><source srcset="/three.webp 1x"><img src="/three.png"></picture></article></body></html>"#;
+        let target=url::Url::parse("https://example.org/report").unwrap();
+        let opts=ScrapeOptions{only_main_content:false,..Default::default()};
+        let (data,_,md)=crate::scrape::process_html(html.into(),&target,&opts,&[Format::Images]).unwrap();
+        assert!(md.contains("Report 42"));
+        let images=data["images"].as_array().unwrap();
+        assert!(images.iter().any(|v|v=="https://example.org/one.png"));
+        assert!(images.iter().any(|v|v=="https://example.org/three.png"));
+        assert_eq!(images.iter().filter(|v|*v=="https://example.org/one.png").count(),1);
+        assert!(!images.iter().any(|v|v.as_str().unwrap_or("").starts_with("javascript:")));
+        for k in ["markdown","html","rawHtml","links"]{assert!(!data.contains_key(k));}
+        let (plain,_,_)=crate::scrape::process_html(html.into(),&target,&opts,&[Format::Markdown]).unwrap();
+        assert!(!plain.contains_key("images"));
     }
 
     #[tokio::test]

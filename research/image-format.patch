@@ -1,0 +1,61 @@
+diff --git a/apps/api/native/src/html.rs b/apps/api/native/src/html.rs
+--- a/apps/api/native/src/html.rs
++++ b/apps/api/native/src/html.rs
+@@ -834,7 +834,7 @@
+   res.map_err(to_napi_err)
+ }
+ 
+-fn _extract_images(
++pub(crate) fn _extract_images(
+   html: &str,
+   base_url: &str,
+ ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+diff --git a/apps/local/src/scrape.rs b/apps/local/src/scrape.rs
+--- a/apps/local/src/scrape.rs
++++ b/apps/local/src/scrape.rs
+@@ -19,8 +19,9 @@
+   Markdown,
+   Html,
+   RawHtml,
+-  Links,
+-  Screenshot,
++  Links,
++  Images,
++  Screenshot,
+ }
+ 
+ impl Format {
+@@ -29,7 +30,8 @@
+       "markdown" => Some(Format::Markdown),
+       "html" => Some(Format::Html),
+       "rawHtml" | "raw_html" | "rawhtml" => Some(Format::RawHtml),
+-      "links" => Some(Format::Links),
++      "links" => Some(Format::Links),
++      "images" => Some(Format::Images),
+       "screenshot" | "screenshot@fullPage" => Some(Format::Screenshot),
+       _ => None,
+     }
+@@ -765,9 +767,20 @@
+   if formats.contains(&Format::Markdown) {
+     data.insert("markdown".into(), Value::String(md.clone()));
+   }
+-  if formats.contains(&Format::Html) {
+-    data.insert("html".into(), Value::String(cleaned.to_string()));
+-  }
++  // Same upstream native extraction as the legacy API, from cleaned HTML.
++  // Only explicit images requests pay the serialization/reparse cost.
++  if formats.contains(&Format::Images) {
++    let mut images = html::_extract_images(&cleaned.to_string(), final_url.as_str()).map_err(parse_err)?;
++    // Refuse oversized results rather than silently discard images.
++    if images.len() > 1024 || images.iter().map(String::len).sum::<usize>() > 256 * 1024 {
++      return Err(ScrapeError::new(413, "RESPONSE_TOO_LARGE", "Image URL result exceeds candidate bound."));
++    }
++    images.sort_unstable();
++    data.insert("images".into(), json!(images));
++  }
++  if formats.contains(&Format::Html) {
++    data.insert("html".into(), Value::String(cleaned.to_string()));
++  }
+   if formats.contains(&Format::RawHtml) {
+     data.insert("rawHtml".into(), Value::String(raw_html));
+   }
