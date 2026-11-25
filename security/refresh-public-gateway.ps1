@@ -42,6 +42,18 @@ function Invoke-FirecrawlPublicGatewayRefresh {
     if ($EnvProperties.Count -lt 5) { throw 'Expected gateway env configuration missing.' }
     foreach ($Property in $EnvProperties) {
         $Key = [string]$Property.Name
+        # The sole authorized change is the addition of the metadata-only report.
+        # Preserve all other tools, credential values, upstream and policy settings.
+        if ($Key -ceq 'ALLOWED_TOOLS' -and $RunningEnv.ContainsKey($Key)) {
+            $Before = @(([string]$RunningEnv[$Key]).Split(','))
+            $After = @(([string]$Property.Value).Split(','))
+            if ('tool_usage' -cnotin $Before -and
+                $After.Count -eq ($Before.Count + 1) -and
+                ($After | Where-Object { $_ -ceq 'tool_usage' }).Count -eq 1 -and
+                ((@($After | Where-Object { $_ -cne 'tool_usage' }) -join ',') -ceq ($Before -join ','))) {
+                continue
+            }
+        }
         if (-not $RunningEnv.ContainsKey($Key) -or
             [string]$RunningEnv[$Key] -cne [string]$Property.Value) {
             # Key names only. Neither secret values nor JSON contents are logged.
