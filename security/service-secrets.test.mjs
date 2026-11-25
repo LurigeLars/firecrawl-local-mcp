@@ -78,7 +78,7 @@ test('launcher no longer loads legacy secrets.env and supplies hook variables on
 });
 
 test('runtime recovery restores tmpfs secrets without rebuilding the stack', () => {
-  assert.match(launcher, /ValidateSet\([^)]*'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini'\)/);
+  assert.match(launcher, /ValidateSet\([^)]*'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini', 'rust-promote', 'rust-rollback'\)/);
   assert.match(launcher, /'redeploy' \{/);
   assert.match(launcher, /docker @compose up -d --build --force-recreate/);
   assert.match(launcher, /function Import-ServiceRuntimeSecrets/);
@@ -440,4 +440,10 @@ test('last two stale Firecrawl Node 26.10 containers are upgraded individually',
   assert.match(compose, /playwright-router:\s*\n\s*profiles: \["public-proxy"\]\s*\n\s*image: firecrawl-node-runtime:local\s*\n\s*build:/);
   assert.match(compose, /llm-proxy:\s*\n\s*image: firecrawl-node-runtime:local/);
   assert.doesNotMatch(source, /down -v|docker volume rm|--remove-orphans|docker compose down/);
+});
+
+test('explicit Rust transitions use the existing real runtime secret hooks', () => {
+  assert.match(launcher, /\$TransitionAction = \$Action -in @\('rust-promote','rust-rollback'\)/);
+  assert.match(launcher, /if \(\$TransitionAction -or \$Action -in \$composeActions\)/);
+  assert.match(launcher, /if \(\$TransitionAction -or \$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng"\)/);
 });
