@@ -101,7 +101,11 @@ async fn static_document(state:&CandidateState,target:url::Url,timeout:u64)->Res
         render::check_dns(&target).await.map_err(|_|StatusCode::FORBIDDEN)?;
         let opts=ScrapeOptions {timeout:Some(timeout),..Default::default()};
         let mut data=cloud::scrape_with_fallback(&state.auth.engine,&state.auth.cloud,target.as_str(),&opts).await
-            .map_err(|e|if e.code=="BLOCKED_TARGET" { StatusCode::FORBIDDEN } else { StatusCode::BAD_GATEWAY })?;
+            .map_err(|e|match e.code {
+                "BLOCKED_TARGET"=>StatusCode::FORBIDDEN,
+                "DOCUMENT_ISOLATION_REQUIRED"=>StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                _=>StatusCode::BAD_GATEWAY
+            })?;
         // Do not promote incomplete, blocked or non-HTML results to success.
         let markdown=data["markdown"].as_str().unwrap_or("");
         if data["source"]!="local" || data["blocked"]==true || !data["warning"].is_null() ||
@@ -145,7 +149,7 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         return Err("invalid candidate token".into());
     }
     let engine=Arc::new(Engine::new(EngineConfig{policy:NetworkPolicy::PublicOnly,
-        user_agent:None,browser:BrowserMode::Never})?);
+        user_agent:None,browser:BrowserMode::Never})?.require_html_only());
     // Even an accidental cloud invocation cannot contact a provider.
     let auth=Arc::new(AppState {
         engine,cloud:Cloud::new("http://127.0.0.1:9".into(),None,CloudMode::Off),
@@ -196,6 +200,28 @@ mod tests {
         let base=format!("http://{}",listener.local_addr().unwrap());
         let task=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
         (base,task)
+    }
+
+    #[tokio::test]
+    async fn static_engine_refuses_documents_before_native_parser() {
+        // Only the synthetic loopback test may use AllowPrivate.
+        let app=Router::new()
+            .route("/page",get(||async{axum::response::Html("<html><body><p>Native HTML fixture 42.</p></body></html>")}))
+            .route("/pdf",get(||async{([("content-type","application/pdf")],"%PDF-invalid-fixture")}))
+            .route("/mislabelled",get(||async{([("content-type","text/html")],"%PDF-invalid-fixture")}))
+            .route("/redirect",get(||async{axum::response::Redirect::temporary("/pdf")}));
+        let (base,task)=spawn(app).await;
+        let engine=Engine::new(EngineConfig{policy:NetworkPolicy::AllowPrivate,user_agent:None,
+            browser:BrowserMode::Never}).unwrap().require_html_only();
+        let opts=ScrapeOptions::default();
+        let doc=engine.scrape(&format!("{base}/page"),&opts).await.unwrap();
+        assert!(doc["markdown"].as_str().unwrap().contains("Native HTML fixture 42."));
+        for path in ["/pdf","/mislabelled","/redirect"]{
+            let err=engine.scrape(&format!("{base}{path}"),&opts).await.unwrap_err();
+            assert_eq!(err.code,"DOCUMENT_ISOLATION_REQUIRED");
+            assert_eq!(err.status,415);
+        }
+        task.abort();
     }
 
     #[tokio::test]

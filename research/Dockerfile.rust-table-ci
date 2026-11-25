@@ -4,10 +4,10 @@ WORKDIR /src
 RUN git init && git fetch --depth 1 https://github.com/firecrawl/firecrawl.git 283bc7c662cf7b14801eb8b6f82b1b26533d8008 \
     && git checkout --detach FETCH_HEAD \
     && test "$(git rev-parse HEAD)" = 283bc7c662cf7b14801eb8b6f82b1b26533d8008
-COPY nested-label-tables.patch job-store-lock.patch strict-crawl-fetch.patch /tmp/
+COPY nested-label-tables.patch job-store-lock.patch strict-crawl-fetch.patch document-isolation.patch /tmp/
 COPY job-store /tmp/job-store
-RUN git apply --check /tmp/nested-label-tables.patch /tmp/job-store-lock.patch /tmp/strict-crawl-fetch.patch \
-    && git apply /tmp/nested-label-tables.patch /tmp/job-store-lock.patch /tmp/strict-crawl-fetch.patch
+RUN git apply --check /tmp/nested-label-tables.patch /tmp/job-store-lock.patch /tmp/strict-crawl-fetch.patch /tmp/document-isolation.patch \
+    && git apply /tmp/nested-label-tables.patch /tmp/job-store-lock.patch /tmp/strict-crawl-fetch.patch /tmp/document-isolation.patch
 WORKDIR /src/apps/local
 COPY table-fixture-probe.rs pdf-page-probe.rs local-search-probe.rs local-model-probe.rs local-render-probe.rs composed-api-test.rs candidate-api.rs candidate-batch.rs candidate-crawl.rs candidate-main.rs pdf-ocr-worker.rs pdf-ocr-service.rs candidate-pdf.rs pdf-result.rs /tmp/
 RUN test "$(grep -c '^fn process_html(' src/scrape.rs)" = 1 \

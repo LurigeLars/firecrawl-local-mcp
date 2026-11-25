@@ -100,3 +100,22 @@ jobs:
           rustc --version
           cargo test --locked --manifest-path research/job-store/Cargo.toml
           cargo tree --manifest-path research/job-store/Cargo.toml --locked
+
+  locked-mcp-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout locked MCP client
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build existing pinned MCP image
+        run: docker build --progress plain -t firecrawl-locked-mcp:research -f public/Dockerfile.mcp public
+      - name: Capture actual MCP request envelopes using synthetic loopback API
+        run: |
+          timeout 140s docker run --rm --pull=never --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --memory 512m --memory-swap 512m --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
+            --mount type=bind,source="$PWD/research/locked-mcp-http-contract.mjs",target=/tmp/locked-mcp-http-contract.mjs,readonly \
+            --entrypoint node firecrawl-locked-mcp:research /tmp/locked-mcp-http-contract.mjs
