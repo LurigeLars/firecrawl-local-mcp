@@ -9,10 +9,23 @@ import {createToolUsageStore,createUsageTracker,appendUsageTool,isUsageCall,usag
 import { fileURLToPath } from 'node:url';
 import { ensureLockedRuntime } from './locked-runtime.mjs';
 import { candidateApiEnvironment } from '../public/mcp-api-env.mjs';
+import { shouldDelegateRustClient } from './rust-client-mode.mjs';
 import {
   parseAllowedTools, checkRequest, urlSafetyReason, wantsCompactResult, rememberCrawlRequest, rewriteResponse, rpcError, rpcToolError,
 } from '../public/gateway/policy.mjs';
 import { BROWSER_TOOL_NAMES, appendBrowserTools, callBrowserTool, isBrowserTool } from '../public/gateway/browser-tools.mjs';
+
+// The delegated Node child receives an explicit credential, so this
+// branch cannot recursively delegate. No client registration changes.
+if (shouldDelegateRustClient(process.env)) {
+  const delegated=spawn('pwsh.exe',['-NoProfile','-File',fileURLToPath(new URL('./rust-client.ps1',import.meta.url)),'-Mode','Stdio'],
+    {stdio:'inherit',windowsHide:true});
+  const code=await new Promise(resolve=>{
+    delegated.once('error',()=>{process.stderr.write('Rust local client launcher unavailable.\n');resolve(1);});
+    delegated.once('exit',(code)=>resolve(code??1));
+  });
+  process.exit(code);
+}
 
 const childEnv = candidateApiEnvironment(process.env, 'http://127.0.0.1:3002', 'http://127.0.0.1:3002');
 

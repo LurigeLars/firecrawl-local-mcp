@@ -52,6 +52,7 @@ jobs:
           node --check security/dependency-pins.test.mjs
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
+          node --check local-mcp/verify-rust-client.mjs
           node --check public/gateway/gateway.mjs
           node --check public/gateway/policy.mjs
           node --check public/gateway/policy-crawl.test.mjs
@@ -103,7 +104,7 @@ jobs:
 
       - name: Run browser security regression
         shell: bash
-        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs public/gateway/camofox-tools.test.mjs local-mcp/locked-runtime.test.mjs
+        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs public/gateway/camofox-tools.test.mjs local-mcp/locked-runtime.test.mjs local-mcp/rust-client-mode.test.mjs
 
       - name: Run public proxy routing regression
         shell: bash
@@ -184,6 +185,7 @@ jobs:
           node --check playwright/public-proxy-live-smoke.mjs
           node --check local-mcp/stdio-proxy.mjs
           node --check local-mcp/test-proxy.mjs
+          node --check local-mcp/verify-rust-client.mjs
           node --check public/gateway/gateway.mjs
           node --check public/gateway/policy.mjs
           node --check public/gateway/policy-crawl.test.mjs
@@ -196,7 +198,7 @@ jobs:
 
       - name: Run browser security regression
         shell: bash
-        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs public/gateway/camofox-tools.test.mjs local-mcp/locked-runtime.test.mjs
+        run: node --test browser/safety.test.mjs browser/config.test.mjs public/gateway/browser-tools.test.mjs public/gateway/camofox-tools.test.mjs local-mcp/locked-runtime.test.mjs local-mcp/rust-client-mode.test.mjs
 
       - name: Run public proxy routing regression
         shell: bash
