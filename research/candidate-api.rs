@@ -305,11 +305,27 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     let target=scrape_target(&req.url);
     let target=match target{Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")};
     let is_pdf=pdf_request(&req,&target);
-    if target.path().to_ascii_lowercase().ends_with(".pdf")&&(req.max_age>0||req.store_in_cache){
+    let is_office=pdf::office_url(&target)&&req.parsers.is_none()&&valid_pdf_options(&req);
+    if (target.path().to_ascii_lowercase().ends_with(".pdf")||pdf::office_url(&target))&&(req.max_age>0||req.store_in_cache){
         return refusal(StatusCode::BAD_REQUEST,"PDF_CACHE_UNSUPPORTED");
     }
-    if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!is_pdf{
+    if !valid_static(&req)&&model_req.is_none()&&render_formats.is_none()&&!is_pdf&&!is_office{
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
+    }
+    if is_office{
+        if let Err(status)=pdf::target(target.as_str()){return refusal(status,"UNSUPPORTED_DOCUMENT_URL");}
+        if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"DOCUMENT_WORKER_DISABLED");}
+        let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
+        let budget=Duration::from_millis(req.timeout.unwrap_or(110000));
+        let result=tokio::spawn(async move{
+            let _slot=slot;
+            pdf::isolated_document(&state,&target,budget,Some(pdf::Kind::Office)).await
+        }).await;
+        return match result{
+            Ok(Ok(data))=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+            Ok(Err((status,code)))=>refusal(status,code),
+            Err(_)=>refusal(StatusCode::BAD_GATEWAY,"DOCUMENT_TASK_FAILED")
+        };
     }
     if is_pdf{
         if let Err(status)=pdf::target(target.as_str()){return refusal(status,"UNSUPPORTED_PDF_URL");}
@@ -370,7 +386,20 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         }
         return bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}));
     }
+    // Only a typed document-isolation refusal may trigger one guarded
+    // download retry. No retry after rate limits, private target or other errors.
+    let fallback=state.pdf_enabled&&req.parsers.is_none()&&valid_pdf_options(&req)&&target.scheme()=="https";
+    let original=target.clone();
+    let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(30000));
     match static_html_request(&state,target,req).await {
+        Err(StatusCode::UNSUPPORTED_MEDIA_TYPE) if fallback=>{
+            let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero(){return refusal(StatusCode::GATEWAY_TIMEOUT,"DOCUMENT_DEADLINE");}
+            match pdf::isolated_document(&state,&original,remaining,None).await{
+                Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+                Err((status,code))=>refusal(status,code)
+            }
+        },
         Ok(mut data)=>{
             let receipt=data.as_object_mut().and_then(|m|m.remove("researchCache"))
                 .unwrap_or_else(||cache_receipt(false,false,None,0));

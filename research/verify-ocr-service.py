@@ -1,5 +1,7 @@
 """Exercise PID-1 OCR server and its actual worker in a network-none container."""
 import json
+import io
+import zipfile
 import subprocess
 import tempfile
 import time
@@ -49,4 +51,25 @@ with tempfile.TemporaryDirectory(prefix="fc-ocr-http-") as tmp:
     print("OCR_HTTP_PROCESS_PASS: native text preserved, OCR uncertainty and per-page accounting preserved")
     print(json.dumps({"ocr_attempted":result["ocr_attempted"],"unresolved":result["unresolved_pages"],
         "page_sources":[p["source"] for p in result["pages"]]}))
+assert call("/health")[0]==200
+
+# Minimal valid OOXML, generated entirely inside the network-none container.
+def ooxml(parts):
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as archive:
+        for name,value in parts.items():
+            archive.writestr(name,value)
+    return out.getvalue()
+
+docx=ooxml({
+    "[Content_Types].xml":'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+    "_rels/.rels":'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    "word/document.xml":'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Office fixture stock 421.5 change -1.2</w:t></w:r></w:p></w:body></w:document>',
+})
+assert call("/extract-office",b"not document","application/octet-stream")[0]==400
+assert call("/extract-office",b"%PDF-fixture","application/pdf")[0]==415
+status,result=call("/extract-office",docx,"application/octet-stream",timeout=20)
+assert status==200 and result["parser"]=="upstream-anydoc" and result["source_verified"] is False
+assert all(marker in result["markdown"] for marker in ("Office fixture","421.5","-1.2"))
+print("OFFICE_HTTP_PROCESS_PASS")
 assert call("/health")[0]==200
