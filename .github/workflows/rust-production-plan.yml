@@ -1,0 +1,23 @@
+name: Rust production configuration plan
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'research/compose.rust-production-plan.yaml'
+      - 'research/verify-rust-production-plan.py'
+      - 'compose*.yaml'
+      - 'upstream/firecrawl.json'
+      - '.github/workflows/rust-production-plan.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  config-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate pinned upstream and wrapper merge without starting services
+        run: python3 research/verify-rust-production-plan.py
