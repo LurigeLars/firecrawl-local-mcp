@@ -11,7 +11,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $project = 'fc-rust-bench-' + ([Guid]::NewGuid().ToString('N').Substring(0,12))
 if ($project -notmatch '^fc-rust-bench-[0-9a-f]{12}$') { throw 'Unsafe project name.' }
 $compose = @('compose','-p',$project,'-f',(Join-Path $PSScriptRoot 'compose.rust-research.yaml'),'--profile','search')
-$load = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-load.mjs')
+$load = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-mcp-load.mjs')
 
 function Invoke-Docker {
     param([string[]]$Arguments)
@@ -75,7 +75,7 @@ function Measure-Backend {
         param($Container,$Mode,$Source)
         $ErrorActionPreference = 'Stop'
         $result = $Source | & docker exec -i $Container node --input-type=module - $Mode
-        if ($LASTEXITCODE -ne 0) { throw 'Bounded API workload failed.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Bounded MCP workload failed.' }
         return ($result -join "`n")
     }
     try {
@@ -127,6 +127,8 @@ foreach ($volume in $config.volumes.PSObject.Properties) {
 $attempted = $false
 try {
     $attempted = $true
+    # Local mode always uses a random credential, not the public CI fixture.
+    $env:RESEARCH_CI_FIXTURE = '0'
     & docker @compose up -d --build
     if ($LASTEXITCODE -ne 0) { throw 'Disposable release build/start failed.' }
     $candidate = @{}
@@ -139,7 +141,7 @@ try {
     if ($old.sampled_peak_bytes -le 0) { throw 'Invalid legacy sample.' }
     [pscustomobject]@{
         revision=$revision;project=$project
-        scope='same host, bounded HTML workload, replaceable subsystem only; production remains active'
+        scope='same host, actual MCP HTTP, bounded HTML workload, replaceable subsystem only; production remains active'
         limits='sampled Docker CLI memory, not exact peak; concurrent production traffic and other services may confound; not full feature parity'
         sampled_peak_reduction_pct=[Math]::Round(100*(1-$new.sampled_peak_bytes/$old.sampled_peak_bytes),2)
         legacy=$old;candidate=$new
