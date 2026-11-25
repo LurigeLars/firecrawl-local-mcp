@@ -120,7 +120,7 @@ async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>, range:
     // The pinned native parser performs document-wide analysis. Keep its
     // existing hard page cap, then apply the requested output/OCR bound.
     let total_pages=parsed.pages.len();
-    let (start,end)=if let Some(range)=range{
+    let (start_index,end_page)=if let Some(range)=range{
         (range.start-1,range.end.min(total_pages))
     }else{(0,max_pages.unwrap_or(total_pages).min(total_pages))};
     let mut classified = Vec::new();
@@ -130,7 +130,7 @@ async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>, range:
     // Bound the entire OCR stage, not just each renderer/recognizer call.
     // Classification itself is bounded by the external sandbox wall clock.
     let end = tokio::time::Instant::now() + Duration::from_secs(45);
-    for (i, p) in parsed.pages.iter().take(end).enumerate().skip(start) {
+    for (i, p) in parsed.pages.iter().take(end_page).enumerate().skip(start_index) {
         if p.page as usize != i || p.markdown.len() > MAX_TEXT {return Err("invalid page order or page text too large");}
         let native = p.markdown.as_str();
         let result = if !p.needs_ocr {None}
