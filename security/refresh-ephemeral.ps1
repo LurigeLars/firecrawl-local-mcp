@@ -44,6 +44,8 @@ function Invoke-FirecrawlEphemeralRefresh {
             if ([int64]$Value -gt 0) { throw 'RabbitMQ has in-flight unacknowledged messages; refusing reset.' }
         }
     }
+    $RollbackRepository = if ($Service -eq 'redis') { 'firecrawl-redis' } else { 'rabbitmq' }
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $RunningImage -Repository $RollbackRepository
     # Redis is rebuilt from the already-reviewed pinned 8.10.3 Alpine image.
     # RabbitMQ 4.3.7 is already pulled and the exact image ID is expected.
     if ($Service -eq 'redis') {
@@ -65,8 +67,7 @@ function Invoke-FirecrawlEphemeralRefresh {
         if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$TargetId) {
             throw 'Target image identity changed during security scan.'
         }
-        $RollbackRepository = if ($Service -eq 'redis') { 'firecrawl-redis' } else { 'rabbitmq' }
-        $null = Save-FirecrawlRollbackImage -Container $Container -BaselineId $RunningImage -Repository $RollbackRepository
+        Assert-FirecrawlRollbackImage -Container $Container -BaselineId $RunningImage -RollbackTag $Rollback -RollbackId $RunningImage
         # Intentionally discard only this service's old ephemeral data.
         # New dedicated named volumes stabilize future routine updates.
         & docker @ComposeArguments up -d --no-deps --no-build --force-recreate --renew-anon-volumes $Service
