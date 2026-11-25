@@ -1,9 +1,31 @@
 //! Shared bounded PDF worker response contract.
 use serde_json::Value;
+use serde::{Deserialize,Serialize};
 pub(crate) const MAX_PDF:usize=32*1024*1024;
 pub(crate) const MAX_REPLY:usize=2*1024*1024;
 pub(crate) const MAX_OFFICE_MARKDOWN:usize=512*1024;
 pub(crate) const MAX_PAGES:usize=200;
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Deserialize,Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PageRange{
+    pub(crate) start:usize,
+    pub(crate) end:usize,
+}
+
+impl PageRange{
+    pub(crate) fn parse(value:&str)->Option<Self>{
+        let (start,end)=value.split_once('-').unwrap_or((value,value));
+        let number=|s:&str| {
+            if s.is_empty()||s.len()>3||!s.bytes().all(|b|b.is_ascii_digit()){return None;}
+            s.parse().ok()
+        };
+        let range=Self{start:number(start)?,end:number(end)?};
+        range.valid().then_some(range)
+    }
+
+    fn valid(self)->bool{self.start>=1&&self.start<=self.end&&self.end<=MAX_PAGES}
+}
 
 pub(crate) fn office_magic(bytes:&[u8])->bool{
     bytes.starts_with(b"PK\x03\x04")||
@@ -35,12 +57,25 @@ pub(crate) fn parse_reply(bytes:&[u8])->Result<Value,&'static str>{
         Some(v)=>v.as_u64().filter(|n|(1..=MAX_PAGES as u64).contains(n)).ok_or("invalid page bound")?,
         None=>return Err("missing page bound")
     };
-    if pages.is_empty()||pages.len() as u64!=total.min(bound){return Err("invalid page count");}
+    let range=match value.get("requested_page_range"){
+        None|Some(Value::Null)=>None,
+        Some(v)=>{
+            let r:PageRange=serde_json::from_value(v.clone()).map_err(|_|"invalid page range")?;
+            if !r.valid()||value["requested_max_pages"]!=Value::Null{return Err("invalid page selection");}
+            Some(r)
+        }
+    };
+    let (first,count)=if let Some(r)=range{
+        let start=r.start as u64;
+        (start,(r.end as u64).min(total).saturating_sub(start-1))
+    }else{(1,total.min(bound))};
+    if pages.len() as u64!=count{return Err("invalid page count");}
     let mut classified=Vec::new();
     let mut unresolved=0u64;
     let mut recognized=0u64;
     for (i,page) in pages.iter().enumerate(){
-        if page["page"].as_u64()!=Some((i+1) as u64)||page["text"].as_str().is_none(){
+        let number=first+i as u64;
+        if page["page"].as_u64()!=Some(number)||page["text"].as_str().is_none(){
             return Err("invalid PDF page");
         }
         match page["source"].as_str(){
@@ -49,7 +84,7 @@ pub(crate) fn parse_reply(bytes:&[u8])->Result<Value,&'static str>{
                 if page["warning"].as_str().is_none_or(|s|s.trim().is_empty()){
                     return Err("missing OCR uncertainty");
                 }
-                classified.push(Value::from(i+1));
+                classified.push(Value::from(number));
                 if page["source"]=="unresolved"{unresolved+=1;}
                 else{
                     recognized+=1;
@@ -73,6 +108,26 @@ pub(crate) fn parse_reply(bytes:&[u8])->Result<Value,&'static str>{
 mod tests{
     use super::*;
     use serde_json::json;
+    #[test]
+    fn validates_physical_page_numbers_in_a_selected_range(){
+        assert_eq!(PageRange::parse("12-15"),Some(PageRange{start:12,end:15}));
+        assert_eq!(PageRange::parse("12"),Some(PageRange{start:12,end:12}));
+        for invalid in ["","0","15-12","201","1-201","12-","12-15-16","12,15"," 12","%31"]{
+            assert_eq!(PageRange::parse(invalid),None);
+        }
+        let mut result=json!({"source_verified":false,"layout":"auto","pages":[
+            {"page":12,"source":"native","text":"fixture","warning":null}
+        ],"pages_needing_ocr":[],"unresolved_pages":0,"ocr_attempted":0,"total_pages":12,
+            "requested_max_pages":null,"requested_page_range":{"start":12,"end":15}});
+        let encode=|v:&Value|serde_json::to_vec(v).unwrap();
+        assert!(parse_reply(&encode(&result)).is_ok());
+        result["pages"][0]["page"]=json!(1);
+        assert!(parse_reply(&encode(&result)).is_err());
+        result["pages"]=json!([]);
+        assert!(parse_reply(&encode(&result)).is_err());
+        result["requested_page_range"]["start"]=json!(13);
+        assert!(parse_reply(&encode(&result)).is_ok());
+    }
     #[test]
     fn validates_page_accounting_and_uncertainty(){
         let mut value=json!({"source_verified":false,"layout":"auto","pages":[

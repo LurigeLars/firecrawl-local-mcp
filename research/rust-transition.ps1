@@ -240,11 +240,32 @@ function Invoke-RustRollback([string[]]$LegacyCompose,[string]$ProjectRoot) {
     Restore-LegacyTransition -LegacyCompose $LegacyCompose -ProjectRoot $ProjectRoot -Journal $journal
 }
 
-function Restart-RustDocumentService([string[]]$ComposeArguments,[string]$Image) {
-    Set-TransitionTag -Id $Image -Tag 'firecrawl-rust-document:local'
-    $null=Invoke-McpDocker -Arguments ($ComposeArguments+@('up','-d','--no-deps','--no-build','--pull','never','--force-recreate','pdf-ocr')) -TimeoutSeconds 100
-    $state=Get-TransitionService pdf-ocr
-    if ($null -eq $state -or -not $state.running -or $state.image -cne $Image) { throw 'Unexpected running PDF image.' }
+function Assert-RustLocalClient([string]$ProjectRoot) {
+    $authReady=$false
+    for ($i=0;$i -lt 15;$i++) {
+        try {
+            $unauth=Invoke-WebRequest -Uri 'http://127.0.0.1:3002/health' -TimeoutSec 3 -MaximumRedirection 0 -SkipHttpErrorCheck
+            if ($unauth.StatusCode -eq 401) { $authReady=$true;break }
+            if ($unauth.StatusCode -eq 200) { throw 'Unexpected unauthenticated health success.' }
+        } catch {
+            if ($_.Exception.Message -ceq 'Unexpected unauthenticated health success.') { throw }
+        }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $authReady) { throw 'Rust loopback authentication check failed.' }
+    & node (Join-Path $ProjectRoot 'local-mcp/verify-rust-client.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Actual local Rust client test failed.' }
+}
+
+function Restart-RustRuntimeService([string[]]$ComposeArguments,[string]$ProjectRoot,[string]$Service,[string]$Repository,[string]$Image) {
+    Set-TransitionTag -Id $Image -Tag "${Repository}:local"
+    $null=Invoke-McpDocker -Arguments ($ComposeArguments+@('up','-d','--no-deps','--no-build','--pull','never','--force-recreate',$Service)) -TimeoutSeconds 120
+    $state=Get-TransitionService $Service
+    if ($null -eq $state -or -not $state.running -or $state.image -cne $Image) { throw 'Unexpected running Rust image.' }
+    if ($Service -ceq 'api') {
+        Assert-RustLocalClient -ProjectRoot $ProjectRoot
+        return
+    }
     $probe=@'
 for(let i=0;i<8;i++){
   try{
@@ -260,39 +281,57 @@ process.exit(1);
     if ($result -cne 'HEALTH_OK') { throw 'Private PDF service health was not verified.' }
 }
 
-function Invoke-RustDocumentUpdate([string[]]$ComposeArguments,[string]$ProjectRoot,[string]$Revision,[string]$Digest) {
+function Invoke-RustRuntimeUpdate([string[]]$ComposeArguments,[string]$ProjectRoot,[string]$Service,[string]$Revision,[string]$Digest) {
     $ErrorActionPreference='Stop'
+    if ($Service -cnotin @('api','pdf-ocr')) { throw 'Unreviewed Rust update service.' }
+    $isApi=$Service -ceq 'api'
+    $repository=if($isApi){'firecrawl-rust-api'}else{'firecrawl-rust-document'}
     Assert-TransitionSource -ProjectRoot $ProjectRoot -Revision $Revision
-    if ((Get-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Raw).Trim() -cne 'rust-active-v1') { throw 'Active Rust is required to update the PDF service.' }
+    if ((Get-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Raw).Trim() -cne 'rust-active-v1') { throw 'Active Rust is required for a runtime update.' }
     $journal=Get-RustRollbackJournal
-    $baseline=Get-TransitionService pdf-ocr
-    if ($null -eq $baseline -or -not $baseline.running -or $baseline.image -cne $journal.candidate['pdf-ocr'] -or
-        (Get-TransitionImageId 'firecrawl-rust-document:local') -cne $baseline.image) { throw 'PDF baseline identity is unavailable.' }
-    $candidate=Get-AcceptedCandidateImage 'firecrawl-rust-document:staged' $Digest
-    if ($candidate -ceq $baseline.image) { throw 'The staged PDF image already serves production.' }
+    $baseline=Get-TransitionService $Service
+    if ($null -eq $baseline -or -not $baseline.running -or $baseline.image -cne $journal.candidate[$Service] -or
+        (Get-TransitionImageId "${repository}:local") -cne $baseline.image) { throw 'Rust baseline identity is unavailable.' }
+    $candidate=Get-AcceptedCandidateImage "${repository}:staged" $Digest
+    if ($candidate -ceq $baseline.image) { throw 'The staged image already serves production.' }
     $null=Invoke-McpDocker -Arguments ($ComposeArguments+@('config','--quiet'))
-    $network=Invoke-McpDocker -Arguments @('network','inspect','--format','{{.Internal}}','firecrawl_rust_documents')
-    if ($network -cne 'true') { throw 'PDF service network is not private.' }
+    if (-not $isApi) {
+        $network=Invoke-McpDocker -Arguments @('network','inspect','--format','{{.Internal}}','firecrawl_rust_documents')
+        if ($network -cne 'true') { throw 'PDF service network is not private.' }
+    }
     $null=Invoke-McpDocker -Arguments @('scout','cves','--only-severity','critical,high','--only-fixed','--exit-code',"local://$candidate") -TimeoutSeconds 300
-    $activity=Invoke-McpDocker -Arguments @('top','firecrawl-pdf-ocr-1','-eo','pid,comm') -TimeoutSeconds 10
-    if (@($activity -split '\r?\n').Count -ne 2 -or $activity -cnotmatch 'pdf-ocr-service$') { throw 'The PDF worker appears busy.' }
-    Set-TransitionTag -Id $baseline.image -Tag 'firecrawl-rust-document:staged-rollback'
+    if (-not $isApi) {
+        $activity=Invoke-McpDocker -Arguments @('top','firecrawl-pdf-ocr-1','-eo','pid,comm') -TimeoutSeconds 10
+        if (@($activity -split '\r?\n').Count -ne 2 -or $activity -cnotmatch 'pdf-ocr-service$') { throw 'The PDF worker appears busy.' }
+    }
+    Set-TransitionTag -Id $baseline.image -Tag "${repository}:staged-rollback"
     $journalPath=Get-TransitionPath 'rust-transition.json'
     $temp="$journalPath.$([guid]::NewGuid().ToString('N')).tmp"
     try {
-        $journal.candidate['pdf-ocr']=$candidate
+        $journal.candidate[$Service]=$candidate
         [IO.File]::WriteAllText($temp,($journal | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        if ($isApi) {
+            try {
+                Stop-TransitionService api
+                if ((Get-RustStoppedQueueCount) -ne 0) { throw 'Rust still has active durable jobs.' }
+            } catch {
+                Start-OriginalTransitionService -Service api -Id $baseline.id -Image $baseline.image
+                throw 'Rust durable jobs were not verified idle; the original API was resumed.'
+            }
+        }
+        $restart=@{ComposeArguments=$ComposeArguments;ProjectRoot=$ProjectRoot;Service=$Service;Repository=$repository}
         try {
-            Restart-RustDocumentService -ComposeArguments $ComposeArguments -Image $candidate
+            Restart-RustRuntimeService @restart -Image $candidate
             [IO.File]::Move($temp,$journalPath,$true)
         } catch {
-            Restart-RustDocumentService -ComposeArguments $ComposeArguments -Image $baseline.image
+            Restart-RustRuntimeService @restart -Image $baseline.image
+            if ($isApi) { throw 'API update failed; original Rust API verified.' }
             throw 'PDF update failed; original PDF service verified.'
         }
     } finally {
         if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
     }
-    'RUST_PDF_ONLY_UPDATE_VERIFIED'
+    if ($isApi) { 'RUST_API_ONLY_UPDATE_VERIFIED' } else { 'RUST_PDF_ONLY_UPDATE_VERIFIED' }
 }
 
 function Invoke-RustPromotion {
@@ -357,20 +396,7 @@ function Invoke-RustPromotion {
         # passed as an argument, written to stdout or copied into the repo.
         $promotionStage='local-client'
         & (Join-Path $ProjectRoot 'local-mcp/rust-client.ps1') -Mode Import | Out-Null
-        $authReady=$false
-        for ($i=0;$i -lt 15;$i++) {
-            try {
-                $unauth=Invoke-WebRequest -Uri 'http://127.0.0.1:3002/health' -TimeoutSec 3 -MaximumRedirection 0 -SkipHttpErrorCheck
-                if ($unauth.StatusCode -eq 401) { $authReady=$true;break }
-                if ($unauth.StatusCode -eq 200) { throw 'Unexpected unauthenticated health success.' }
-            } catch {
-                if ($_.Exception.Message -ceq 'Unexpected unauthenticated health success.') { throw }
-            }
-            Start-Sleep -Seconds 1
-        }
-        if (-not $authReady) { throw 'Rust loopback authentication check failed.' }
-        & node (Join-Path $ProjectRoot 'local-mcp/verify-rust-client.mjs')
-        if ($LASTEXITCODE -ne 0) { throw 'Actual local Rust client test failed.' }
+        Assert-RustLocalClient -ProjectRoot $ProjectRoot
         $promotionStage='start-mcp'
         Set-TransitionTag -Id $candidate.mcp -Tag 'firecrawl-mcp:latest'
         $null=Invoke-McpDocker -Arguments ($rustCompose+@('up','-d','--no-deps','--no-build','--pull','never','--force-recreate','mcp')) -TimeoutSeconds 180
