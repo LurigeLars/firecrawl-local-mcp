@@ -14,5 +14,6 @@ ENV PATH="/app/node_modules/.bin:$PATH" \
     HTTP_STREAMABLE_SERVER=true \
     HOST=0.0.0.0 \
     PORT=3000
+COPY mcp-api-env.mjs mcp-api-bootstrap.mjs ./
 USER node
-CMD ["firecrawl-mcp"]
+CMD ["node", "--import", "./mcp-api-bootstrap.mjs", "./node_modules/firecrawl-mcp/dist/index.js"]
