@@ -417,7 +417,8 @@ async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:
         let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout_ms());
         let mut value=search::search_at(&state.search_endpoint,req).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
         if let Some(opts)=options{
-            enrich_search(&mut value,opts,deadline,|target,opts|static_html_request(&state,target,opts)).await?;
+            let reader=&state;
+            enrich_search(&mut value,opts,deadline,|target,opts|static_html_request(reader,target,opts)).await?;
         }
         Ok::<Value,StatusCode>(value)
     }).await;
@@ -590,6 +591,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_enrichment_fails_closed_on_deadline_and_size(){
+        let (_,opts)=search_options(json!({"query":"test","limit":1,"scrapeOptions":{}})).unwrap();
+        let opts=opts.unwrap();
+        let fixture=json!({"success":true,"data":{"web":[{"url":"https://example.org/a"}]},"research":{}});
+        let mut expired=fixture.clone();
+        enrich_search(&mut expired,opts.clone(),tokio::time::Instant::now(),|_,_|async{
+            panic!("no network work after deadline");
+            #[allow(unreachable_code)]
+            Ok(json!({}))
+        }).await.unwrap();
+        assert_eq!(expired["data"]["web"][0]["researchScrape"]["http_status"],504);
+        let mut oversized=fixture;
+        enrich_search(&mut oversized,opts,tokio::time::Instant::now()+Duration::from_secs(3),|_,_|async{
+            Ok(json!({"markdown":"x".repeat(MAX_ENRICHED_DOC)}))
+        }).await.unwrap();
+        assert_eq!(oversized["data"]["web"][0]["researchScrape"]["http_status"],413);
+        assert!(oversized["data"]["web"][0].get("markdown").is_none());
+    }
+
+    #[tokio::test]
     async fn captured_model_format_and_strict_quote_result(){
         let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
             "formats":[{"type":"query","prompt":"Quote the value","mode":"directQuote"}],
@@ -672,6 +693,20 @@ mod tests {
         })).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
         assert!(actual["warning"].as_str().unwrap().contains("Web results only"));
         assert_eq!(actual["data"]["web"][0]["position"],1);
+        // Exclude the ordinary result using a separate fixed mock source;
+        // explicit nested scrape cannot fetch an unsupported target port.
+        let (limited_backend,limited_worker)=spawn(Router::new().route("/search",get(||async{
+            Json(json!({"results":[{"url":"https://93.184.216.34:8443/denied","title":"Unsupported port"}]}))
+        }))).await;
+        let (limited,limited_server)=spawn(router(TOKEN.into(),format!("{limited_backend}/search"),
+            format!("{backend}/scrape"),None,false,None,false).unwrap().0).await;
+        let enriched:Value=c.post(format!("{limited}/v2/search")).bearer_auth(TOKEN).json(&json!({
+            "query":"stock","limit":1,"scrapeOptions":{"formats":["markdown"]}}))
+            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(enriched["data"]["web"][0]["researchScrape"]["http_status"],400);
+        assert_eq!(enriched["research"]["scrape"]["complete"],false);
+        assert!(enriched["data"]["web"][0].get("markdown").is_none());
+        limited_server.abort();limited_worker.abort();
         let denied=c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({
             "url":"https://127.0.0.1/","formats":["markdown"],"origin":"mcp-candidate-contract@3.40.0"
         })).send().await.unwrap();
