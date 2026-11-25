@@ -37,10 +37,14 @@ jobs:
           mcp=$("${compose[@]}" ps -q mcp)
           pdf=$("${compose[@]}" ps -q pdf-ocr)
           test -n "$api" && test -n "$mcp" && test -n "$pdf"
-          test "$(docker network inspect --format '{{.Internal}}' "${project}_private")" = true
-          for cid in "$mcp" "$pdf"; do
-            test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$cid")" = 1
+          for network in private document_private search_private; do
+            test "$(docker network inspect --format '{{.Internal}}' "${project}_$network")" = true
           done
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$mcp")" = 1
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$pdf")" = 1
+          # The document worker is not on MCP or search networks.
+          test "$(docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$pdf")" = "${project}_document_private"
+          test "$(docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$mcp")" = "${project}_private"
           for cid in "$api" "$mcp" "$pdf"; do
             test "$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$cid")" = 0
           done
@@ -57,6 +61,7 @@ jobs:
           proxy=$("${compose[@]}" ps -q searxng-proxy)
           test -n "$search" && test -n "$proxy"
           test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$proxy")" = 1
+          test "$(docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$proxy")" = "${project}_search_private"
           # Search engines can refuse CI egress. Record that separately.
           if timeout 75s "${compose[@]}" exec -T mcp node --input-type=module - < research/verify-release-search.mjs; then
             echo 'Release SearXNG integration: PASS (external evidence)' >> "$GITHUB_STEP_SUMMARY"

@@ -56,7 +56,7 @@ services:
     volumes:
       - candidate-token:/run/research-token:ro
       - candidate-jobs:/var/lib/research
-    networks: [private, egress]
+    networks: [private, document_private, search_private, egress]
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
@@ -75,7 +75,7 @@ services:
       target: release-ocr-runtime
     user: "65532:65532"
     init: false
-    networks: [private]
+    networks: [document_private]
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
@@ -108,7 +108,7 @@ services:
       - search-token:/run/research-search-token:ro
       - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
       - ../searxng/limiter.toml:/etc/searxng/limiter.toml:ro
-    networks: [private, egress]
+    networks: [search_private, search_egress]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
@@ -128,7 +128,7 @@ services:
     volumes:
       - ../searxng/lang-proxy.mjs:/app/lang-proxy.mjs:ro
     depends_on: [searxng]
-    networks: [private]
+    networks: [search_private]
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -170,7 +170,13 @@ services:
 networks:
   private:
     internal: true
+  document_private:
+    internal: true
+  search_private:
+    internal: true
   egress:
+    driver: bridge
+  search_egress:
     driver: bridge
 volumes:
   candidate-token:
