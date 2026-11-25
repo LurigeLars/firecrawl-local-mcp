@@ -1,7 +1,7 @@
 # Shared baseline handling for the one-service refresh scripts.
 # The running image is the baseline: it is read before the candidate is built, must
 # not change while the candidate is built and scanned, and is kept under a rollback
-# tag before the container is replaced. No script hard-codes an old image id, so a
+# tag BEFORE any build or pull replaces its original tag. No script hard-codes an old image id, so a
 # refresh never goes stale after another deployment replaced the image.
 function Get-FirecrawlRunningImage {
     param([Parameter(Mandatory)][string]$Container)
@@ -36,4 +36,22 @@ function Get-FirecrawlPinnedNodeVersion {
         throw "$Dockerfile is not a digest-pinned, npm-free Node Alpine image."
     }
     return "v$($Pin.Groups[1].Value)"
+}
+
+
+# Recheck both the running service and retained image after staging.
+function Assert-FirecrawlRollbackImage {
+    param(
+        [Parameter(Mandatory)][string]$Container,
+        [Parameter(Mandatory)][string]$BaselineId,
+        [Parameter(Mandatory)][string]$RollbackTag,
+        [Parameter(Mandatory)][string]$RollbackId
+    )
+    if ((Get-FirecrawlRunningImage -Container $Container) -cne $BaselineId) {
+        throw 'Running service changed during staging; deployment aborted.'
+    }
+    $Actual = [string](& docker image inspect --format '{{.Id}}' $RollbackTag)
+    if ($LASTEXITCODE -ne 0 -or $Actual -cne $RollbackId) {
+        throw 'Retained rollback image changed or disappeared; deployment aborted.'
+    }
 }
