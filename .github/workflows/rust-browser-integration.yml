@@ -83,4 +83,8 @@ jobs:
           test "$(docker network inspect --format '{{.Internal}}' "$net")" = true
           test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$router")" = 1
           test "$(docker inspect --format '{{len .Mounts}}' "$browser")" = 0
-          timeout 180s docker exec "$candidate" python3 -B /tmp/verify-browser-sidecar.py
+          if ! timeout 180s docker exec "$candidate" python3 -B /tmp/verify-browser-sidecar.py; then
+            # Fixed-category debug diagnostics only; never dump arbitrary logs.
+            docker logs "$candidate" 2>&1 | grep -E '^CANDIDATE_BROWSER_DIAG (engine|static_rejected|render)=' || true
+            exit 1
+          fi
