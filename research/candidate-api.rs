@@ -44,7 +44,7 @@ struct CandidateState {
     browser_enabled: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct StaticRequest {
     url: String,
@@ -163,7 +163,7 @@ fn valid_pdf_options(req:&StaticRequest)->bool{
         (1..=110000).contains(&req.timeout.unwrap_or(110000))
 }
 fn pdf_request(req:&StaticRequest,target:&url::Url)->bool{
-    valid_pdf_options(req)&&target.path().to_ascii_lowercase().ends_with(".pdf")
+    valid_pdf_options(req)&&(target.path().to_ascii_lowercase().ends_with(".pdf")||req.parsers.as_ref().is_some_and(|p|p.as_slice()==["pdf"]))
 }
 
 // Single-page HTML accepts public HTTP(S), including query strings and
@@ -196,16 +196,19 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");
     }
     if is_pdf{
-        // Preserve the existing no-query/no-fragment PDF subset. No
-        // silently narrowed document request or native PDF parser fallback.
-        if static_target(target.as_str()).is_err(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_PDF_URL");}
+        if let Err(status)=pdf::target(target.as_str()){return refusal(status,"UNSUPPORTED_PDF_URL");}
         if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
-        let Ok(_slot)=state.slots.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
-        let result=pdf::document(&state,&target,Duration::from_millis(req.timeout.unwrap_or(110000))).await
-            .and_then(|receipt|pdf::v2_document(&target,receipt));
+        let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
+        let budget=Duration::from_millis(req.timeout.unwrap_or(110000));
+        let result=tokio::spawn(async move{
+            let _slot=slot;
+            let (landed,receipt)=pdf::document(&state,&target,budget).await?;
+            pdf::v2_document(&target,&landed,receipt).map_err(|s|(s,"PDF_INCOMPLETE"))
+        }).await;
         return match result{
-            Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
-            Err(status)=>refusal(status,"PDF_EXTRACTION_FAILED")
+            Ok(Ok(data))=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+            Ok(Err((status,code)))=>refusal(status,code),
+            Err(_)=>refusal(StatusCode::BAD_GATEWAY,"PDF_TASK_FAILED")
         };
     }
     if let Some(formats)=render_formats{
@@ -251,19 +254,8 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         }
         return bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}));
     }
-    let mut formats=req.formats.clone();
-    // Markdown is used internally for block/empty-content detection even if
-    // the client requests only HTML or links. Do not return extra fields.
-    let wants_markdown=req.formats.iter().any(|s|s=="markdown");
-    if !wants_markdown{formats.push(json!("markdown"));}
-    let opts=ScrapeOptions{formats,only_main_content:req.only_main_content,
-        include_tags:req.include_tags,exclude_tags:req.exclude_tags,
-        timeout:Some(req.timeout.unwrap_or(30000)),..Default::default()};
-    match static_document_with_options(&state,target,opts).await {
-        Ok(mut data)=>{
-            if !wants_markdown{data.as_object_mut().unwrap().remove("markdown");}
-            bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}))
-        },
+    match static_html_request(&state,target,req).await {
+        Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
         Err(status)=>refusal(status,"STATIC_SCRAPE_FAILED")
     }
     }).await;
@@ -271,6 +263,20 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         Ok(response)=>response,
         Err(_)=>refusal(StatusCode::BAD_GATEWAY,"SCRAPE_TASK_FAILED")
     }
+}
+
+// Shared single-page HTML path for direct scrape and search enrichment.
+// Admission is owned by the caller for the whole operation.
+async fn static_html_request(state:&CandidateState,target:url::Url,req:StaticRequest)->Result<Value,StatusCode>{
+    let mut formats=req.formats.clone();
+    let wants_markdown=req.formats.iter().any(|s|s=="markdown");
+    if !wants_markdown{formats.push(json!("markdown"));}
+    let opts=ScrapeOptions{formats,only_main_content:req.only_main_content,
+        include_tags:req.include_tags,exclude_tags:req.exclude_tags,
+        timeout:Some(req.timeout.unwrap_or(30000)),..Default::default()};
+    let mut data=static_document_with_options(state,target,opts).await?;
+    if !wants_markdown{data.as_object_mut().ok_or(StatusCode::BAD_GATEWAY)?.remove("markdown");}
+    Ok(data)
 }
 
 async fn static_document(state:&CandidateState,target:url::Url,timeout:u64)->Result<Value,StatusCode>{
@@ -325,13 +331,104 @@ async fn static_document_with_options(state:&CandidateState,target:url::Url,opts
     Ok(data)
 }
 
+const MAX_ENRICHED_HITS:usize=5;
+const MAX_ENRICHED_DOC:usize=256*1024;
+
+// Do not let nested options select a destination or a different backend.
+// Deserialize against the existing strict scrape contract, excluding models,
+// PDF parsers and explicit browser waits in this first enrichment subset.
+fn search_options(raw:Value)->Result<(search::Request,Option<StaticRequest>),StatusCode>{
+    let mut object=raw.as_object().cloned().ok_or(StatusCode::BAD_REQUEST)?;
+    let options=object.remove("scrapeOptions");
+    let req:search::Request=serde_json::from_value(Value::Object(object)).map_err(|_|StatusCode::BAD_REQUEST)?;
+    req.validate().map_err(|_|StatusCode::BAD_REQUEST)?;
+    let options=if let Some(value)=options{
+        let mut fields=value.as_object().cloned().ok_or(StatusCode::BAD_REQUEST)?;
+        if fields.contains_key("url")||fields.contains_key("origin")||req.limit()>MAX_ENRICHED_HITS{
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        // Placeholder only supplies the required serde field. Actual fetch
+        // destination is independently derived and guarded for each hit.
+        fields.insert("url".into(),json!(""));
+        let opts:StaticRequest=serde_json::from_value(Value::Object(fields)).map_err(|_|StatusCode::BAD_REQUEST)?;
+        if !valid_static(&opts){return Err(StatusCode::BAD_REQUEST);}
+        Some(opts)
+    }else{None};
+    Ok((req,options))
+}
+
+async fn enrich_search<F,Fut>(value:&mut Value,opts:StaticRequest,deadline:tokio::time::Instant,mut read:F)
+    ->Result<(),StatusCode>
+where F:FnMut(url::Url,StaticRequest)->Fut,
+    Fut:std::future::Future<Output=Result<Value,StatusCode>>{
+    let hits=value["data"]["web"].as_array_mut().ok_or(StatusCode::BAD_GATEWAY)?;
+    if hits.len()>MAX_ENRICHED_HITS{return Err(StatusCode::BAD_GATEWAY);}
+    let mut succeeded=0usize;
+    let mut failed=0usize;
+    for hit in hits.iter_mut(){
+        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().min(45000) as u64;
+        let target=hit["url"].as_str().ok_or(StatusCode::BAD_GATEWAY).and_then(scrape_target);
+        let result=match target{
+            Ok(_) if remaining==0=>Err(StatusCode::GATEWAY_TIMEOUT),
+            Ok(target)=>{
+                let mut options=opts.clone();
+                options.timeout=Some(options.timeout.unwrap_or(30000).min(remaining));
+                // The inner reader bounds network work and retains parser
+                // admission until completion. Do not cancel a blocking parser.
+                read(target,options).await
+            }
+            Err(status)=>Err(status)
+        };
+        let result=result.and_then(|data|{
+            if !data.is_object()||serde_json::to_vec(&data).map_err(|_|StatusCode::BAD_GATEWAY)?.len()>MAX_ENRICHED_DOC{
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            Ok(data)
+        });
+        let object=hit.as_object_mut().ok_or(StatusCode::BAD_GATEWAY)?;
+        match result{
+            Ok(doc)=>{
+                // Preserve original search URL, rank, title and snippet.
+                // Only requested document fields and source evidence may be merged.
+                for key in ["markdown","html","rawHtml","links","metadata","researchBrowser","researchSourceVerified"]{
+                    if let Some(field)=doc.get(key){object.insert(key.into(),field.clone());}
+                }
+                object.insert("researchScrape".into(),json!({"status":"completed","source_verified":false}));
+                succeeded+=1;
+            }
+            Err(status)=>{
+                object.insert("researchScrape".into(),json!({"status":"failed","http_status":status.as_u16()}));
+                failed+=1;
+            }
+        }
+    }
+    value["research"]["scrape"]=json!({"requested":succeeded+failed,"completed":succeeded,
+        "failed":failed,"complete":failed==0,"cache_used":false,"source_verified":false});
+    if failed>0{
+        let prefix=value["warning"].as_str().unwrap_or("");
+        value["warning"]=json!(format!("{prefix}{}One or more search hits could not be scraped; search snippets are not page content.",if prefix.is_empty(){""}else{" "}));
+    }
+    Ok(())
+}
+
 async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
-    let req:search::Request=match decode(&headers,&body) {Ok(v)=>v,Err(r)=>return r};
-    if req.validate().is_err() {return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");}
-    let Ok(_slot)=state.slots.try_acquire() else {return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");};
-    match search::search_at(&state.search_endpoint,req).await {
-        Ok(value)=>bounded(value),
-        Err(_)=>refusal(StatusCode::BAD_GATEWAY,"SEARCH_FAILED"),
+    let raw:Value=match decode(&headers,&body){Ok(v)=>v,Err(r)=>return r};
+    let (req,options)=match search_options(raw){Ok(v)=>v,Err(status)=>return refusal(status,"UNSUPPORTED_OPTIONS")};
+    let Ok(slot)=state.slots.clone().try_acquire_owned() else {return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");};
+    let result=tokio::spawn(async move{
+        let _slot=slot;
+        let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout_ms());
+        let mut value=search::search_at(&state.search_endpoint,req).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+        if let Some(opts)=options{
+            let reader=&state;
+            enrich_search(&mut value,opts,deadline,|target,opts|static_html_request(reader,target,opts)).await?;
+        }
+        Ok::<Value,StatusCode>(value)
+    }).await;
+    match result{
+        Ok(Ok(value))=>bounded(value),
+        Ok(Err(status))=>refusal(status,"SEARCH_FAILED"),
+        Err(_)=>refusal(StatusCode::BAD_GATEWAY,"SEARCH_TASK_FAILED")
     }
 }
 
@@ -452,6 +549,70 @@ mod tests {
         assert!(!valid_static(&bad));
     }
 
+    #[test]
+    fn nested_search_scrape_uses_strict_options(){
+        let (req,opts)=search_options(json!({"query":"test","limit":2,"scrapeOptions":{
+            "formats":["html","links"],"onlyMainContent":false,"includeTags":["article"]}})).unwrap();
+        assert_eq!(req.limit(),2);
+        assert_eq!(opts.unwrap().formats,vec![json!("html"),json!("links")]);
+        for input in [
+            json!({"query":"test","limit":6,"scrapeOptions":{}}),
+            json!({"query":"test","limit":1,"scrapeOptions":{"url":"https://example.org/"}}),
+            json!({"query":"test","limit":1,"scrapeOptions":{"formats":["summary"]}}),
+            json!({"query":"test","limit":1,"scrapeOptions":{"maxAge":1}}),
+            json!({"query":"test","limit":1,"scrapeOptions":{"waitFor":1}}),
+            json!({"query":"test","limit":1,"scrapeOptions":null})
+        ]{assert!(search_options(input).is_err());}
+    }
+
+    #[tokio::test]
+    async fn search_enrichment_keeps_rank_and_explicit_failure_receipts(){
+        let (_,opts)=search_options(json!({"query":"test","limit":3,"scrapeOptions":{"formats":["markdown"]}})).unwrap();
+        let mut value=json!({"success":true,"data":{"web":[
+            {"url":"https://example.org/a","title":"A","position":1},
+            {"url":"https://example.org/b","title":"B","position":2},
+            {"url":"https://127.0.0.1/","title":"C","position":3}
+        ]},"research":{},"warning":"Web results only."});
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(5);
+        enrich_search(&mut value,opts.unwrap(),deadline,|target,options|async move{
+            assert!(options.timeout.unwrap()<=5000);
+            if target.path()=="/b"{return Err(StatusCode::BAD_GATEWAY);}
+            assert_eq!(target.path(),"/a");
+            Ok(json!({"url":"unexpected","position":99,"title":"other",
+                "markdown":"Stock 421.5","metadata":{"url":target.as_str()}}))
+        }).await.unwrap();
+        assert_eq!(value["data"]["web"][0]["markdown"],"Stock 421.5");
+        assert_eq!(value["data"]["web"][0]["position"],1);
+        assert_eq!(value["data"]["web"][0]["title"],"A");
+        assert_eq!(value["data"]["web"][1]["researchScrape"]["http_status"],502);
+        assert_eq!(value["data"]["web"][2]["researchScrape"]["http_status"],403);
+        assert!(value["data"]["web"][1].get("markdown").is_none());
+        assert_eq!(value["research"]["scrape"]["completed"],1);
+        assert_eq!(value["research"]["scrape"]["failed"],2);
+        assert_eq!(value["research"]["scrape"]["complete"],false);
+        assert!(value["warning"].as_str().unwrap().starts_with("Web results only."));
+    }
+
+    #[tokio::test]
+    async fn search_enrichment_fails_closed_on_deadline_and_size(){
+        let (_,opts)=search_options(json!({"query":"test","limit":1,"scrapeOptions":{}})).unwrap();
+        let opts=opts.unwrap();
+        let fixture=json!({"success":true,"data":{"web":[{"url":"https://example.org/a"}]},"research":{}});
+        let mut expired=fixture.clone();
+        enrich_search(&mut expired,opts.clone(),tokio::time::Instant::now(),|_,_|async{
+            panic!("no network work after deadline");
+            #[allow(unreachable_code)]
+            Ok(json!({}))
+        }).await.unwrap();
+        assert_eq!(expired["data"]["web"][0]["researchScrape"]["http_status"],504);
+        let mut oversized=fixture;
+        enrich_search(&mut oversized,opts,tokio::time::Instant::now()+Duration::from_secs(3),|_,_|async{
+            Ok(json!({"markdown":"x".repeat(MAX_ENRICHED_DOC)}))
+        }).await.unwrap();
+        assert_eq!(oversized["data"]["web"][0]["researchScrape"]["http_status"],413);
+        assert!(oversized["data"]["web"][0].get("markdown").is_none());
+    }
+
     #[tokio::test]
     async fn captured_model_format_and_strict_quote_result(){
         let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
@@ -535,6 +696,20 @@ mod tests {
         })).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
         assert!(actual["warning"].as_str().unwrap().contains("Web results only"));
         assert_eq!(actual["data"]["web"][0]["position"],1);
+        // Exclude the ordinary result using a separate fixed mock source;
+        // explicit nested scrape cannot fetch an unsupported target port.
+        let (limited_backend,limited_worker)=spawn(Router::new().route("/search",get(||async{
+            Json(json!({"results":[{"url":"https://93.184.216.34:8443/denied","title":"Unsupported port"}]}))
+        }))).await;
+        let (limited,limited_server)=spawn(router(TOKEN.into(),format!("{limited_backend}/search"),
+            format!("{backend}/scrape"),None,false,None,false).unwrap().0).await;
+        let enriched:Value=c.post(format!("{limited}/v2/search")).bearer_auth(TOKEN).json(&json!({
+            "query":"stock","limit":1,"scrapeOptions":{"formats":["markdown"]}}))
+            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(enriched["data"]["web"][0]["researchScrape"]["http_status"],400);
+        assert_eq!(enriched["research"]["scrape"]["complete"],false);
+        assert!(enriched["data"]["web"][0].get("markdown").is_none());
+        limited_server.abort();limited_worker.abort();
         let denied=c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({
             "url":"https://127.0.0.1/","formats":["markdown"],"origin":"mcp-candidate-contract@3.40.0"
         })).send().await.unwrap();
