@@ -68,7 +68,10 @@ jobs:
           metrics() {
             for service in api mcp pdf-ocr searxng searxng-proxy; do
               echo "CGROUP service=$service phase=$1"
-              "${compose[@]}" exec -T "$service" sh -c 'for f in memory.current memory.peak cpu.stat; do if test -r "/sys/fs/cgroup/$f"; then printf "%s\n" "$f"; cat "/sys/fs/cgroup/$f"; fi; done' || true
+              for metric in memory.current memory.peak cpu.stat; do
+                echo "$metric"
+                "${compose[@]}" exec -T "$service" cat "/sys/fs/cgroup/$metric" || true
+              done
             done
           }
           metrics before_html
