@@ -1,0 +1,138 @@
+# Config-only production transition candidate. NOT selected by fc.ps1.
+# Requires upstream + local + public Compose files in that order.
+# Do not activate until canary, client authentication, drain, rollback and maintenance gates pass.
+x-image-revision: &image-revision
+  org.opencontainers.image.source: https://github.com/LurigeLars/firecrawl-local-mcp
+  org.opencontainers.image.revision: ${SOURCE_REVISION:-unknown}
+
+services:
+  rust-init:
+    image: node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
+    user: "0:0"
+    network_mode: none
+    environment:
+      RESEARCH_CI_FIXTURE: "0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 32
+    cpus: 0.25
+    volumes:
+      - rust-token:/run/research-token
+      - rust-jobs:/var/lib/research
+    command:
+      - node
+      - -e
+      - >-
+        const fs=require('node:fs'),crypto=require('node:crypto');
+        const token='/run/research-token/token';
+        const fixture=process.env.RESEARCH_CI_FIXTURE;
+        if(!['0','1'].includes(fixture)) throw Error('invalid research fixture mode');
+        const testOnly='0123456789abcdef'.repeat(4);
+        if(!fs.existsSync(token)) fs.writeFileSync(token,fixture==='1'?testOnly:crypto.randomBytes(32).toString('hex'),{mode:0o440,flag:'wx'});
+        const actual=fs.readFileSync(token,'utf8');
+        if(!/^[0-9a-f]{64}$/.test(actual)||(actual===testOnly)!==(fixture==='1')) throw Error('invalid research token');
+        fs.chownSync(token,65532,1000);
+        fs.chmodSync(token,0o440);
+        fs.chownSync('/var/lib/research',65532,65532);
+        fs.chmodSync('/var/lib/research',0o700);
+    restart: "no"
+
+  api: !override
+    image: firecrawl-rust-api:local
+    build:
+      context: ../research
+      dockerfile: Dockerfile.rust-table-ci
+      target: release-runtime
+      labels: *image-revision
+    user: "65532:65532"
+    depends_on:
+      rust-init:
+        condition: service_completed_successfully
+      pdf-ocr:
+        condition: service_started
+    environment:
+      CANDIDATE_NETWORK_MODE: internal-api
+      CANDIDATE_TOKEN_FILE: /run/research-token/token
+      CANDIDATE_JOB_DB_FILE: /var/lib/research/jobs.sqlite
+      CANDIDATE_PDF_ENABLED: "1"
+      CANDIDATE_BROWSER_ENABLED: "1"
+    volumes:
+      - rust-token:/run/research-token:ro
+      - rust-jobs:/var/lib/research
+    networks: [backend, rust_documents]
+    ports:
+      - "127.0.0.1:3002:3002"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 64
+    cpus: 2.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  pdf-ocr:
+    image: firecrawl-rust-document:local
+    build:
+      context: ../research
+      dockerfile: Dockerfile.rust-table-ci
+      target: release-ocr-runtime
+      labels: *image-revision
+    user: "65532:65532"
+    init: false
+    networks: [rust_documents]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 64
+    cpus: 2.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Preserve the original MCP service and public gateway address.
+  mcp:
+    environment:
+      FIRECRAWL_API_URL: http://api:3002
+      FIRECRAWL_API_KEY_FILE: /run/research-token/token
+    volumes:
+      - rust-token:/run/research-token:ro
+    depends_on: !override
+      rust-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+
+  # Keep definitions and named volumes for explicit rollback. Default Rust
+  # config does NOT schedule these legacy queue services.
+  redis:
+    profiles: ["legacy-rollback"]
+  rabbitmq:
+    profiles: ["legacy-rollback"]
+  nuq-postgres:
+    profiles: ["legacy-rollback"]
+
+networks:
+  rust_documents:
+    internal: true
+volumes:
+  rust-token:
+  rust-jobs:
