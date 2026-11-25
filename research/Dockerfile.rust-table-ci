@@ -73,17 +73,20 @@ FROM prepared AS release-build
 ENV CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
 RUN cargo build --locked --release --jobs 2 --bin candidate-main
 
-FROM debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS release-runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
+FROM registry.fedoraproject.org/fedora-minimal:44@sha256:f04e34eae3415e94623793dea3ace05885a33b4e062d976dc3b293ebb14c289f AS release-base
+# Fedora 44 ships fixes for the GCC runtime CVEs still open in Debian 13.
+RUN microdnf upgrade -y --setopt=install_weak_deps=0 \
+    && microdnf clean all
+
+FROM release-base AS release-runtime
 COPY --from=release-build /src/apps/local/target/release/candidate-main /usr/local/bin/candidate-main
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/candidate-main"]
 
 FROM release-runtime AS release-benchmark
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends python3 \
-    && rm -rf /var/lib/apt/lists/*
+RUN microdnf install -y --setopt=install_weak_deps=0 python3 \
+    && microdnf clean all
 COPY release-benchmark.py /research/release-benchmark.py
 USER 65532:65532
 ENTRYPOINT ["python3","-B","/research/release-benchmark.py"]
@@ -92,10 +95,10 @@ ENTRYPOINT ["python3","-B","/research/release-benchmark.py"]
 FROM release-build AS release-ocr-build
 RUN cargo build --locked --release --jobs 2 --bin pdf-ocr-worker --bin pdf-ocr-service
 
-FROM debian@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS release-ocr-runtime
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libstdc++6 poppler-utils tesseract-ocr tesseract-ocr-eng fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/*
+FROM release-base AS release-ocr-runtime
+RUN microdnf install -y --setopt=install_weak_deps=0 \
+    poppler-utils tesseract tesseract-langpack-eng dejavu-sans-fonts dejavu-sans-mono-fonts dejavu-serif-fonts \
+    && microdnf clean all
 COPY --from=release-ocr-build /src/apps/local/target/release/pdf-ocr-worker /usr/local/bin/pdf-ocr-worker
 COPY --from=release-ocr-build /src/apps/local/target/release/pdf-ocr-service /usr/local/bin/pdf-ocr-service
 USER 65532:65532
