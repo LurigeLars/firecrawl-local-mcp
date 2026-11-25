@@ -43,6 +43,30 @@ struct CandidateState {
     model_slot: Arc<Semaphore>,
     browser_enabled: bool,
     html_cache:Arc<Mutex<HtmlCache>>,
+    network:NetworkMode,
+}
+
+// Default loopback remains unchanged. Internal mode is operator-selected,
+// has one fixed service name, and never disables bearer authentication.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum NetworkMode{Loopback,InternalApi}
+impl NetworkMode{
+    fn parse(raw:&str)->Result<Self,String>{
+        match raw{"loopback"=>Ok(Self::Loopback),"internal-api"=>Ok(Self::InternalApi),
+            _=>Err("invalid candidate network mode".into())}
+    }
+    fn bind(self)->&'static str{
+        match self{Self::Loopback=>"127.0.0.1:3002",Self::InternalApi=>"0.0.0.0:3002"}
+    }
+    fn allowed_hosts(self)->Vec<String>{
+        match self{Self::Loopback=>vec![],Self::InternalApi=>vec!["api".into()]}
+    }
+    fn base(self,headers:&HeaderMap)->&'static str{
+        let host=headers.get("host").and_then(|v|v.to_str().ok()).unwrap_or("");
+        if self==Self::InternalApi&&super::host_without_port(host).eq_ignore_ascii_case("api"){
+            "http://api:3002"
+        }else{"http://127.0.0.1:3002"}
+    }
 }
 
 #[derive(Clone,Deserialize)]
@@ -537,7 +561,12 @@ async fn render_route(State(state):State<CandidateState>,headers:HeaderMap,body:
     }
 }
 
+#[cfg(test)]
 fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>,pdf_enabled:bool,model_name:Option<String>,browser_enabled:bool)->Result<(Router,CandidateState),String> {
+    router_with_network(token,search_endpoint,render_endpoint,batch,pdf_enabled,model_name,browser_enabled,NetworkMode::Loopback)
+}
+
+fn router_with_network(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>,pdf_enabled:bool,model_name:Option<String>,browser_enabled:bool,network:NetworkMode)->Result<(Router,CandidateState),String> {
     if !(32..=256).contains(&token.len()) || token.chars().any(|c|c.is_control()||c.is_whitespace()) {
         return Err("invalid candidate token".into());
     }
@@ -547,12 +576,12 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
     // Even an accidental cloud invocation cannot contact a provider.
     let auth=Arc::new(AppState {
         engine,cloud:Cloud::new("http://127.0.0.1:9".into(),None,CloudMode::Off),
-        token:Some(token),use_client_key:false,allowed_hosts:vec![],
+        token:Some(token),use_client_key:false,allowed_hosts:network.allowed_hosts(),
         jobs:Mutex::new(HashMap::new())
     });
     let state=CandidateState{auth:auth.clone(),slots:Arc::new(Semaphore::new(4)),
         search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled,model_name,model_slot:Arc::new(Semaphore::new(1)),browser_enabled,
-        html_cache:Arc::new(Mutex::new(HtmlCache::default()))};
+        html_cache:Arc::new(Mutex::new(HtmlCache::default())),network};
     let app=Router::new()
         .route("/health",get(|State(state):State<CandidateState>|async move{
             let job_store=match &state.batch{None=>"disabled",Some(b) if b.ready()=>"ready",Some(_)=>"degraded"};
@@ -575,7 +604,9 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
     Ok((app,state))
 }
 
-/// Research binary always binds loopback. Secret file is operator configuration.
+/// Research binary defaults to loopback. The explicit internal-api mode is
+/// intended only for a private Docker network with no published public port.
+/// Secret file and bind mode are operator configuration.
 pub async fn run_candidate()->Result<(),String> {
     let path=std::env::var("CANDIDATE_TOKEN_FILE").unwrap_or_else(|_|"/run/secrets/firecrawl_candidate_token".into());
     let token=std::fs::read_to_string(path).map_err(|_|"candidate token file unavailable".to_string())?;
@@ -583,8 +614,9 @@ pub async fn run_candidate()->Result<(),String> {
     let pdf_enabled=std::env::var("CANDIDATE_PDF_ENABLED").as_deref()==Ok("1");
     let model_name=std::env::var("CANDIDATE_MODEL_NAME").ok();
     let browser_enabled=std::env::var("CANDIDATE_BROWSER_ENABLED").as_deref()==Ok("1");
-    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch,pdf_enabled,model_name,browser_enabled)?;
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:3002").await.map_err(|e|e.to_string())?;
+    let network=NetworkMode::parse(&std::env::var("CANDIDATE_NETWORK_MODE").unwrap_or_else(|_|"loopback".into()))?;
+    let (app,state)=router_with_network(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch,pdf_enabled,model_name,browser_enabled,network)?;
+    let listener=tokio::net::TcpListener::bind(network.bind()).await.map_err(|e|e.to_string())?;
     let worker=state.batch.is_some().then(||tokio::spawn(batch::supervise(state)));
     let result=axum::serve(listener,app).with_graceful_shutdown(super::shutdown_signal()).await.map_err(|e|e.to_string());
     if let Some(worker)=worker {worker.abort();let _=worker.await;}
@@ -624,6 +656,28 @@ mod tests {
         }
         assert!(serde_json::from_value::<StaticRequest>(json!({"url":"https://example.org/",
             "headers":{"Cookie":"synthetic"}})).is_err());
+    }
+
+    #[tokio::test]
+    async fn internal_api_mode_uses_fixed_host_and_required_token(){
+        assert!(NetworkMode::parse("anything").is_err());
+        assert_eq!(NetworkMode::Loopback.bind(),"127.0.0.1:3002");
+        assert_eq!(NetworkMode::InternalApi.bind(),"0.0.0.0:3002");
+        let mut headers=HeaderMap::new();
+        headers.insert("host","api:3002".parse().unwrap());
+        headers.insert("x-forwarded-host","attacker.example".parse().unwrap());
+        assert_eq!(NetworkMode::InternalApi.base(&headers),"http://api:3002");
+        assert_eq!(NetworkMode::Loopback.base(&headers),"http://127.0.0.1:3002");
+        let (app,_)=router_with_network(TOKEN.into(),"http://127.0.0.1:9/search".into(),
+            "http://127.0.0.1:9/scrape".into(),None,false,None,false,NetworkMode::InternalApi).unwrap();
+        let (base,task)=spawn(app).await;
+        let client=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
+        for (host,token,status) in [("api:3002",TOKEN,200),("api:3002","wrong",401),("evil.example",TOKEN,403),
+            ("127.0.0.1:3002",TOKEN,200)]{
+            assert_eq!(client.get(format!("{base}/health")).header("Host",host).bearer_auth(token)
+                .send().await.unwrap().status().as_u16(),status);
+        }
+        task.abort();
     }
 
     #[test]

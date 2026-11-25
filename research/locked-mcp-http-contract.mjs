@@ -14,8 +14,11 @@ const doc={markdown:'Synthetic source fixture 42',metadata:{
 }};
 const traffic=[];
 const mode=process.argv[2]??'fixture';
-assert.ok(['fixture','--candidate','--candidate-live'].includes(mode));
+assert.ok(['fixture','--candidate','--candidate-live','--candidate-network-live'].includes(mode));
 const candidateMode=mode!=='fixture';
+const networkMode=mode==='--candidate-network-live';
+const liveMode=mode==='--candidate-live'||networkMode;
+const candidateBase=networkMode?'http://api:3002':'http://127.0.0.1:3002';
 const candidateToken='synthetic-ci-token-not-a-real-secret-0123456789';
 const fixtureToken='fc-synthetic-ci-not-a-real-key';
 // The relay is an isolated test observer, not a general reverse proxy.
@@ -33,9 +36,9 @@ async function relay(req,res,u,raw,record){
   const post=req.method==='POST';
   if(post){
     switch(u.pathname){
-      case '/v2/scrape':target='http://127.0.0.1:3002/v2/scrape';break;
-      case '/v2/map':target='http://127.0.0.1:3002/v2/map';break;
-      case '/v2/crawl':target='http://127.0.0.1:3002/v2/crawl';break;
+      case '/v2/scrape':target=networkMode?'http://api:3002/v2/scrape':'http://127.0.0.1:3002/v2/scrape';break;
+      case '/v2/map':target=networkMode?'http://api:3002/v2/map':'http://127.0.0.1:3002/v2/map';break;
+      case '/v2/crawl':target=networkMode?'http://api:3002/v2/crawl':'http://127.0.0.1:3002/v2/crawl';break;
     }
   }else if(req.method==='GET'&&candidatePollUrl!==null&&u.pathname===candidatePollPath){
     target=candidatePollUrl;
@@ -55,12 +58,13 @@ async function relay(req,res,u,raw,record){
   const body=Buffer.concat(chunks);
   record.status=upstream.status;
   record.response=JSON.parse(body.toString('utf8'));
-  if(post&&target==='http://127.0.0.1:3002/v2/crawl'&&upstream.status===200){
+  if(post&&(target==='http://127.0.0.1:3002/v2/crawl'||target==='http://api:3002/v2/crawl')&&upstream.status===200){
     const job=record.response?.id;
     assert.ok(typeof job==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(job),
       'candidate returned invalid job ID');
     candidatePollPath='/v2/crawl/'+job;
-    candidatePollUrl='http://127.0.0.1:3002/v2/crawl/'+job;
+    candidatePollUrl=candidateBase+'/v2/crawl/'+job;
+    assert.equal(record.response?.url,candidatePollUrl,'creation URL must match the fixed service base');
   }
   res.writeHead(upstream.status,{'content-type':'application/json'});
   res.end(body);
@@ -176,7 +180,7 @@ try{
       console.log(JSON.stringify({actual_candidate:true,mode,tool:tc.name,http_status:exchange.status,
         markers:tc.markers?.length??0,mcp_error:!!reply.error||reply.result?.isError===true}));
     }
-    if(mode==='--candidate-live'){
+    if(liveMode){
       const offset=traffic.length;
       const start=await rpc('tools/call',{name:'firecrawl_crawl',arguments:{
         url:'https://www.iana.org/help',limit:3,maxConcurrency:2,includePaths:['^/help/'],delay:1,
@@ -201,6 +205,11 @@ try{
         result=traffic.slice(at).find(x=>x.path==='/v2/crawl/'+jobId&&x.status===200)?.response;
         assert.equal(result?.research?.sitemap_mode,'include');
         assert.equal(result?.research?.requested_max_concurrency,2);
+        if(result.next!==undefined){
+          const next=new URL(result.next);
+          assert.equal(next.origin,candidateBase);
+          assert.equal(next.pathname,'/v2/crawl/'+jobId);
+        }
         if(result.status==='completed'||result.status==='failed'){
           assert.equal(result.status,'completed');
           assert.equal(result.completed,3);
