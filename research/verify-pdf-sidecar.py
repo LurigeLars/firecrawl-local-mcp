@@ -83,3 +83,34 @@ print("LIVE_PDF_SIDECAR_PASS", json.dumps({
     "ocr_attempted": receipt["ocr_attempted"], "source_verified": False,
     "elapsed_ms": round((time.monotonic() - started) * 1000),
 }))
+
+# Same isolated worker, actual public spreadsheet download with exact markers.
+# The fixture uses stored ZIP parts and contains no real or private data.
+OFFICE_URL = "https://raw.githubusercontent.com/LurigeLars/firecrawl-local-mcp/ae200f184f3a2cc9aad17a17b7e82a8eb6e1a424/research/fixtures/office-transport.xlsx"
+started = time.monotonic()
+try:
+    body = request(CANDIDATE + "/v2/scrape", auth=True, timeout=50, payload={
+        "url": OFFICE_URL, "formats": ["markdown"], "maxAge": 0,
+        "storeInCache": False, "timeout": 45000,
+    })
+except urllib.error.HTTPError as error:
+    try:
+        result = json.loads(error.read(4096))
+        code = result.get("code", result.get("error", "unknown"))
+    except (ValueError, TypeError):
+        code = "invalid-envelope"
+    print("LIVE_OFFICE_SIDECAR_FAIL", json.dumps({"status": error.code, "stage": code}))
+    raise
+doc = body["data"]
+assert body["success"] is True
+assert doc["metadata"]["sourceURL"] == OFFICE_URL
+assert doc["metadata"]["statusCode"] == 200
+assert doc["researchSourceVerified"] is False
+assert doc["researchDocument"]["parser"] == "upstream-anydoc"
+assert doc["researchDocument"]["source_verified"] is False
+for marker in ("Stock", "Change", "421.5", "-1.2"):
+    assert marker in doc["markdown"]
+print("LIVE_OFFICE_SIDECAR_PASS", json.dumps({
+    "source": "pinned synthetic XLSX", "markers": 4, "source_verified": False,
+    "elapsed_ms": round((time.monotonic() - started) * 1000),
+}))
