@@ -358,17 +358,10 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
     if let Some((mode,prompt,schema))=model_req{
         let Some(name)=state.model_name.as_deref()else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"MODEL_DISABLED")};
         let Ok(_model_slot)=state.model_slot.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"MODEL_BUSY")};
-        let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(180000));
-        let mut data=match static_document_with_options(&state,target,ScrapeOptions{
-            timeout:Some(req.timeout.unwrap_or(180000).min(45000)),only_main_content:req.only_main_content,
-            include_tags:req.include_tags,exclude_tags:req.exclude_tags,..Default::default()
-        }).await{Ok(data)=>data,Err(status)=>return refusal(status,"STATIC_SCRAPE_FAILED")};
-        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero(){return refusal(StatusCode::GATEWAY_TIMEOUT,"MODEL_DEADLINE");}
-        if let Err(status)=add_model_result(&mut data,mode,prompt,schema,model::ENDPOINT,name,remaining).await{
-            return refusal(status,"MODEL_EXTRACTION_FAILED");
-        }
-        return bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}));
+        return match model_html_request(&state,target,req,(mode,prompt,schema),name).await{
+            Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
+            Err(status)=>refusal(status,"MODEL_EXTRACTION_FAILED")
+        };
     }
     match static_html_request(&state,target,req).await {
         Ok(mut data)=>{
@@ -383,6 +376,21 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         Ok(response)=>response,
         Err(_)=>refusal(StatusCode::BAD_GATEWAY,"SCRAPE_TASK_FAILED")
     }
+}
+
+// Shared model route: caller holds global admission and the one model slot.
+// The search caller clamps the requested deadline to its own remaining budget.
+async fn model_html_request(state:&CandidateState,target:url::Url,req:StaticRequest,
+    (mode,prompt,schema):(model::Mode,Option<String>,Option<Value>),name:&str)->Result<Value,StatusCode>{
+    let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(180000));
+    let mut data=static_document_with_options(state,target,ScrapeOptions{
+        timeout:Some(req.timeout.unwrap_or(180000).min(45000)),only_main_content:req.only_main_content,
+        include_tags:req.include_tags,exclude_tags:req.exclude_tags,..Default::default()
+    }).await?;
+    let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero(){return Err(StatusCode::GATEWAY_TIMEOUT);}
+    add_model_result(&mut data,mode,prompt,schema,model::ENDPOINT,name,remaining).await?;
+    Ok(data)
 }
 
 // Shared single-page HTML path for direct scrape and search enrichment.
@@ -486,7 +494,7 @@ fn search_options(raw:Value)->Result<(search::Request,Option<StaticRequest>),Sta
         // destination is independently derived and guarded for each hit.
         fields.insert("url".into(),json!(""));
         let opts:StaticRequest=serde_json::from_value(Value::Object(fields)).map_err(|_|StatusCode::BAD_REQUEST)?;
-        if !valid_static(&opts)||!valid_common(&opts){return Err(StatusCode::BAD_REQUEST);}
+        if !valid_common(&opts)||(!valid_static(&opts)&&model_format(&opts).is_none()){return Err(StatusCode::BAD_REQUEST);}
         Some(opts)
     }else{None};
     Ok((req,options))
@@ -501,13 +509,15 @@ where F:FnMut(url::Url,StaticRequest)->Fut,
     let mut succeeded=0usize;
     let mut failed=0usize;
     for hit in hits.iter_mut(){
-        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().min(45000) as u64;
+        let model_requested=model_format(&opts).is_some();
+        let cap=if model_requested{180000}else{45000};
+        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().min(cap) as u64;
         let target=hit["url"].as_str().ok_or(StatusCode::BAD_GATEWAY).and_then(scrape_target);
         let result=match target{
             Ok(_) if remaining==0=>Err(StatusCode::GATEWAY_TIMEOUT),
             Ok(target)=>{
                 let mut options=opts.clone();
-                options.timeout=Some(options.timeout.unwrap_or(30000).min(remaining));
+                options.timeout=Some(options.timeout.unwrap_or(if model_requested{180000}else{30000}).min(remaining));
                 // The inner reader bounds network work and retains parser
                 // admission until completion. Do not cancel a blocking parser.
                 read(target,options).await
@@ -525,7 +535,8 @@ where F:FnMut(url::Url,StaticRequest)->Fut,
             Ok(doc)=>{
                 // Preserve original search URL, rank, title and snippet.
                 // Only requested document fields and source evidence may be merged.
-                for key in ["markdown","html","rawHtml","links","metadata","researchBrowser","researchSourceVerified"]{
+                for key in ["markdown","html","rawHtml","links","metadata","researchBrowser","researchSourceVerified",
+                    "answer","summary","json","researchModel","warning"]{
                     if let Some(field)=doc.get(key){object.insert(key.into(),field.clone());}
                 }
                 object.insert("researchScrape".into(),json!({"status":"completed","source_verified":false}));
@@ -549,6 +560,9 @@ where F:FnMut(url::Url,StaticRequest)->Fut,
 async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
     let raw:Value=match decode(&headers,&body){Ok(v)=>v,Err(r)=>return r};
     let (req,options)=match search_options(raw){Ok(v)=>v,Err(status)=>return refusal(status,"UNSUPPORTED_OPTIONS")};
+    if options.as_ref().is_some_and(|opts|model_format(opts).is_some())&&state.model_name.is_none(){
+        return refusal(StatusCode::SERVICE_UNAVAILABLE,"MODEL_DISABLED");
+    }
     let Ok(slot)=state.slots.clone().try_acquire_owned() else {return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");};
     let result=tokio::spawn(async move{
         let _slot=slot;
@@ -556,7 +570,13 @@ async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:
         let mut value=search::search_at(&state.search_endpoint,req).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
         if let Some(opts)=options{
             let reader=&state;
-            enrich_search(&mut value,opts,deadline,|target,opts|static_html_request(reader,target,opts)).await?;
+            enrich_search(&mut value,opts,deadline,|target,opts|async move{
+                if let Some(model)=model_format(&opts){
+                    let name=reader.model_name.as_deref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+                    let _model_slot=reader.model_slot.try_acquire().map_err(|_|StatusCode::TOO_MANY_REQUESTS)?;
+                    model_html_request(reader,target,opts,model,name).await
+                }else{static_html_request(reader,target,opts).await}
+            }).await?;
         }
         Ok::<Value,StatusCode>(value)
     }).await;
@@ -826,6 +846,29 @@ mod tests {
         }).await.unwrap();
         assert_eq!(oversized["data"]["web"][0]["researchScrape"]["http_status"],413);
         assert!(oversized["data"]["web"][0].get("markdown").is_none());
+    }
+
+    #[tokio::test]
+    async fn search_model_enrichment_preserves_evidence_and_partial_failures(){
+        let raw=json!({"query":"stock","limit":2,"scrapeOptions":{"formats":[{"type":"query","prompt":"Stock?","mode":"freeform"}]}});
+        let (_,opts)=search_options(raw.clone()).unwrap();
+        let mut too_many=raw;too_many["limit"]=json!(6);
+        assert!(search_options(too_many).is_err());
+        let mut value=json!({"data":{"web":[{"url":"https://example.org/a","title":"Original","description":"Snippet","position":1},
+            {"url":"https://example.org/b","title":"Second","description":"Other","position":2}]},"research":{}});
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(3);
+        enrich_search(&mut value,opts.unwrap(),deadline,|target,opts|async move{
+            assert!(model_format(&opts).is_some());
+            assert!(opts.timeout.unwrap()<=3000);
+            if target.path()=="/b"{return Err(StatusCode::TOO_MANY_REQUESTS);}
+            Ok(json!({"answer":"421.5","researchModel":{"source_verified":false},"warning":"Model output",
+                "metadata":{"url":target.as_str()},"title":"Do not overwrite"}))
+        }).await.unwrap();
+        assert_eq!(value["data"]["web"][0]["title"],"Original");
+        assert_eq!(value["data"]["web"][0]["answer"],"421.5");
+        assert_eq!(value["data"]["web"][0]["researchModel"]["source_verified"],false);
+        assert_eq!(value["data"]["web"][1]["researchScrape"]["http_status"],429);
+        assert_eq!(value["research"]["scrape"]["complete"],false);
     }
 
     #[tokio::test]
