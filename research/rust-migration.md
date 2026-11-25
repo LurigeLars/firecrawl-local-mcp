@@ -272,3 +272,7 @@ Strengthen the existing Office implementation rather than introduce a parallel c
 Rebased the Office/Compose increment onto the synchronized JSON/model-search branch; preserve model search, strict JSON validation and unrelated maintenance changes. No production changes.
 
 Release Compose additionally runs the same bounded 10-request IANA/CFTC static workload as the earlier candidate-only sample (6 serial, 4 concurrency-two), checks all markers and per-source hash stability, and records per-container cgroup memory.current/peak and CPU counters before/after. These are lifetime per-container peaks, not simultaneous aggregate peak or a paired Windows measurement. No extra build or paid provider.
+
+### Bounded query-aware crawl/map
+
+Accept HTTPS default-port crawl/map seeds and discovered page URLs with query strings up to 2048 encoded bytes; strip fragments before frontier deduplication and preserve query order/bytes. Reuse upstream scope path rules, exact same-origin crawl guard, existing DNS/connect-time policy, actual full URL robots decision and durable page/depth limits. Map keeps its existing ignoreQueryParameters option; sitemap index fetches remain same-origin and query-free. Tests cover distinct query variants, fragment deduplication, path/origin and query-specific robots decisions. No cross-origin crawl/redirect/browser relaxation or production change. Results pending.

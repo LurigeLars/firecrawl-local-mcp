@@ -272,7 +272,7 @@ mod tests{
             "https://user:pw@example.com/docs/a"
         ]);
         assert_eq!(candidates(&seed,&Policy::default().scope(&seed).unwrap(),links.as_array().unwrap()),
-            vec!["https://example.com/docs/a","https://example.com/docs/a/"]);
+            vec!["https://example.com/docs/a","https://example.com/docs/a/","https://example.com/docs/b?q=1"]);
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests{
         let scope=policy.scope(&seed).unwrap();
         let links=json!(["https://example.com/reports/a","https://example.com/reports/private",
             "https://example.com/docs/b","https://other.org/reports/a","https://example.com/reports/a?q=1"]);
-        assert_eq!(candidates(&seed,&scope,links.as_array().unwrap()),vec!["https://example.com/reports/a"]);
+        assert_eq!(candidates(&seed,&scope,links.as_array().unwrap()),vec!["https://example.com/reports/a","https://example.com/reports/a?q=1"]);
         assert_eq!(policy.delay(),Duration::from_millis(1250));
         for bad in [Policy{include_paths:vec!["[".into()],..Default::default()},
             Policy{exclude_paths:vec!["x".repeat(257)],..Default::default()},
@@ -307,6 +307,19 @@ mod tests{
         let shell="<html><body><div id=\"root\">Loading...</div><script src=\"app.js\"></script></body></html>";
         assert_eq!(convert_page(shell.into(),&target,&ScrapeOptions::default(),vec![Format::Markdown]).unwrap_err(),
             StatusCode::PRECONDITION_REQUIRED);
+    }
+
+    #[test]
+    fn query_variants_keep_exact_scope_and_robots_rules(){
+        let seed=seed("https://example.com/docs/?page=1#top").unwrap();
+        assert_eq!(seed.as_str(),"https://example.com/docs/?page=1");
+        let links=json!(["https://example.com/docs/?page=2#top","https://example.com/docs/?page=2#bottom",
+            "https://example.com/docs/?page=3","https://other.example/docs/?page=2"]);
+        assert_eq!(candidates(&seed,&Policy::default().scope(&seed).unwrap(),links.as_array().unwrap()),
+            vec!["https://example.com/docs/?page=2","https://example.com/docs/?page=3"]);
+        let rules=b"User-agent: *\nDisallow: /docs/?page=2\n";
+        assert!(!robots_decision(200,rules,&Url::parse("https://example.com/docs/?page=2").unwrap()).unwrap().0);
+        assert!(robots_decision(200,rules,&Url::parse("https://example.com/docs/?page=3").unwrap()).unwrap().0);
     }
 
     #[test]

@@ -280,7 +280,7 @@ fn pdf_request(req:&StaticRequest,target:&url::Url)->bool{
 }
 
 // Single-page HTML accepts public HTTP(S), including query strings and
-// fragments. Crawl/map keep their narrower URL contract until separately tested.
+// fragments. Crawl/map retain HTTPS-only, default-port and same-origin fetch guards.
 fn scrape_target(raw:&str)->Result<url::Url,StatusCode>{
     let target=render::public_url(raw).map_err(|_|StatusCode::FORBIDDEN)?;
     if target.port().is_some(){return Err(StatusCode::BAD_REQUEST);}
@@ -288,10 +288,14 @@ fn scrape_target(raw:&str)->Result<url::Url,StatusCode>{
 }
 
 fn static_target(raw:&str)->Result<url::Url,StatusCode>{
-    let target=render::public_url(raw).map_err(|_|StatusCode::FORBIDDEN)?;
-    if target.scheme()!="https" || target.query().is_some() || target.fragment().is_some() || target.port().is_some(){
+    let mut target=render::public_url(raw).map_err(|_|StatusCode::FORBIDDEN)?;
+    if target.scheme()!="https"||target.port().is_some()||
+        target.query().is_some_and(|q|q.len()>2048){
         return Err(StatusCode::BAD_REQUEST);
     }
+    // A fragment never changes the HTTP request; remove it before storing
+    // the frontier key. Preserve query bytes/order and all path boundaries.
+    target.set_fragment(None);
     Ok(target)
 }
 
@@ -796,10 +800,12 @@ mod tests {
 
     #[test]
     fn single_page_public_query_and_bounded_selector_contract(){
-        for url in ["http://example.org/article","https://example.org/report?year=2026#data"]{
-            assert!(scrape_target(url).is_ok());
-            assert!(static_target(url).is_err());
-        }
+        assert!(scrape_target("http://example.org/article").is_ok());
+        assert!(static_target("http://example.org/article").is_err());
+        let query="https://example.org/report?year=2026#data";
+        assert!(scrape_target(query).is_ok());
+        assert_eq!(static_target(query).unwrap().as_str(),"https://example.org/report?year=2026");
+        assert!(static_target(&format!("https://example.org/?q={}","x".repeat(2049))).is_err());
         for url in ["http://127.0.0.1/?q=1","https://user:pass@example.org/","https://[64:ff9b::5db8:d822]/"]{
             assert!(scrape_target(url).is_err());
         }

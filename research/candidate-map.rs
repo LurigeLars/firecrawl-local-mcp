@@ -1,6 +1,6 @@
 //! Bounded local map: reuse the crawl fetcher, robots rules, upstream sitemap
 //! parser and path scope. No remote index or arbitrary sitemap backend.
-use super::{CandidateState,decode,refusal,bounded,static_target,render,crawl};
+use super::{CandidateState,decode,refusal,bounded,static_target,crawl};
 use crate::{crawl::{CrawlOptions,Scope,ROBOTS_AGENT},crawler,fetch::FetchOptions};
 use axum::{body::Bytes,extract::State,http::{HeaderMap,StatusCode},response::Response};
 use serde::Deserialize;
@@ -48,7 +48,6 @@ struct Results<'a>{
     scope:Scope,
     seen:HashSet<String>,
     links:Vec<Value>,
-    crawl_policy:bool,
 }
 
 impl<'a> Results<'a>{
@@ -62,7 +61,7 @@ impl<'a> Results<'a>{
             crawl_entire_domain:!request.filter_by_path,
             ..Default::default()
         }).map_err(|_|StatusCode::BAD_REQUEST)?};
-        Ok(Self{request,seed,scope,seen:HashSet::new(),links:Vec::new(),crawl_policy:policy.is_some()})
+        Ok(Self{request,seed,scope,seen:HashSet::new(),links:Vec::new()})
     }
 
     fn full(&self)->bool{self.links.len()>=self.request.limit}
@@ -70,11 +69,8 @@ impl<'a> Results<'a>{
     // Results are inert URLs. Cross-origin *sitemap fetches* are never allowed.
     fn push(&mut self,raw:&str){
         if self.full(){return;}
-        let Ok(mut url)=render::public_url(raw)else{return;};
-        if url.scheme()!="https"||url.port().is_some(){return;}
-        url.set_fragment(None);
+        let Ok(mut url)=static_target(raw)else{return;};
         if self.request.ignore_query_parameters{url.set_query(None);}
-        if self.crawl_policy&&url.query().is_some(){return;}
         if (!self.request.include_subdomains && url.origin()!=self.seed.origin()) ||
             !self.scope.allows(&url){return;}
         let key=url.to_string();
@@ -86,7 +82,9 @@ impl<'a> Results<'a>{
 fn enqueue(seed:&Url,raw:&str,seen:&mut HashSet<String>,queue:&mut VecDeque<Url>)->bool{
     if seen.len()>=MAX_SITEMAPS{return false;}
     let Ok(url)=static_target(raw)else{return false;};
-    if url.origin()!=seed.origin(){return false;}
+    // Sitemap index fetches remain a narrower contract than inert page
+    // results: same origin and no query expansion of sitemap documents.
+    if url.origin()!=seed.origin()||url.query().is_some(){return false;}
     if seen.insert(url.to_string()){queue.push_back(url);true}else{false}
 }
 
@@ -258,6 +256,23 @@ mod tests{
             {"url":"https://example.org/docs/a"},{"url":"https://sub.example.org/docs/b"}
         ]).as_array().unwrap().clone());
         assert!(results.full());
+    }
+
+    #[test]
+    fn map_query_handling_preserves_or_collapses_by_explicit_option(){
+        let mut req:MapRequest=serde_json::from_value(json!({"url":"https://example.org/docs/?page=1",
+            "limit":5,"ignoreQueryParameters":false})).unwrap();
+        let seed=static_target(&req.url).unwrap();
+        let mut kept=Results::new(&req,&seed).unwrap();
+        for raw in ["https://example.org/docs/?page=2#top","https://example.org/docs/?page=2#bottom",
+            "https://example.org/docs/?page=3"]{kept.push(raw);}
+        assert_eq!(kept.links,json!([{"url":"https://example.org/docs/?page=2"},
+            {"url":"https://example.org/docs/?page=3"}]).as_array().unwrap().clone());
+        drop(kept);
+        req.ignore_query_parameters=true;
+        let mut stripped=Results::new(&req,&seed).unwrap();
+        stripped.push("https://example.org/docs/?page=2");stripped.push("https://example.org/docs/?page=3");
+        assert_eq!(stripped.links,json!([{"url":"https://example.org/docs/"}]).as_array().unwrap().clone());
     }
 
     #[tokio::test]
