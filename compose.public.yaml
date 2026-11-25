@@ -56,9 +56,10 @@ services:
       CAMOFOX_RESEARCH_URL: http://camofox-research:9377
       CAMOFOX_RESEARCH_PROXY_URL: http://camofox-research-proxy:9377
       CAMOFOX_RESEARCH_PROXY_HOSTS: 5e.tools
-      ALLOWED_TOOLS: firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,firecrawl_browser_open,firecrawl_browser_list,firecrawl_browser_navigate,firecrawl_browser_tabs,firecrawl_browser_snapshot,firecrawl_browser_network,firecrawl_browser_console,firecrawl_browser_screenshot,firecrawl_browser_close,firecrawl_camofox_read
+      ALLOWED_TOOLS: tool_usage,firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,firecrawl_browser_open,firecrawl_browser_list,firecrawl_browser_navigate,firecrawl_browser_tabs,firecrawl_browser_snapshot,firecrawl_browser_network,firecrawl_browser_console,firecrawl_browser_screenshot,firecrawl_browser_close,firecrawl_camofox_read
     volumes:
       - ../public/gateway:/app:ro
+      - firecrawl-tool-usage:/var/lib/firecrawl-tool-usage
       - camofox-research-secrets:/run/camofox-research-secrets:ro
     networks:
       edge:
@@ -80,3 +81,6 @@ networks:
   browser_edge:
     driver: bridge
     internal: true
+
+volumes:
+  firecrawl-tool-usage:

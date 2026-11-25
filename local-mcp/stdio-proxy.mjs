@@ -5,6 +5,7 @@
 // Node standard library only. Usage: node stdio-proxy.mjs   (env FIRECRAWL_API_URL, optional ALLOWED_TOOLS)
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import {createToolUsageStore,createUsageTracker,appendUsageTool,isUsageCall,usageResult} from '../public/gateway/tool-usage.mjs';
 import { fileURLToPath } from 'node:url';
 import { ensureLockedRuntime } from './locked-runtime.mjs';
 import { candidateApiEnvironment } from '../public/mcp-api-env.mjs';
@@ -19,8 +20,12 @@ const childEnv = candidateApiEnvironment(process.env, 'http://127.0.0.1:3002', '
 const { entry: mcpEntry } = ensureLockedRuntime(
   fileURLToPath(new URL('../public/', import.meta.url)), fileURLToPath(new URL('./.runtime/', import.meta.url)));
 
-const DEFAULT_LOCAL_TOOLS = `firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,${BROWSER_TOOL_NAMES.join(',')}`;
+const DEFAULT_LOCAL_TOOLS = `tool_usage,firecrawl_scrape,firecrawl_map,firecrawl_search,firecrawl_crawl,firecrawl_check_crawl_status,${BROWSER_TOOL_NAMES.join(',')}`;
 const allowedTools = parseAllowedTools(process.env.ALLOWED_TOOLS ?? DEFAULT_LOCAL_TOOLS);
+const usageStore=createToolUsageStore({root:process.env.FIRECRAWL_TOOL_USAGE_DIR,enabled:process.env.FIRECRAWL_MCP_TOOL_USAGE!=='off'&&!process.env.NODE_TEST_CONTEXT});
+for(const name of allowedTools)usageStore.register(name);
+const usage=createUsageTracker(usageStore,allowedTools);
+process.once('exit',()=>{usage.finish('ABORTED');usageStore.flush();});
 const browserServiceUrl = process.env.BROWSER_SERVICE_URL ?? 'http://127.0.0.1:3010';
 const compactIds = new Set();
 const crawlRequests = new Map();
@@ -38,6 +43,13 @@ async function handleClientLine(line) {
   let msg;
   try { msg = JSON.parse(line); } catch { child.stdin.write(line + '\n'); return; }
   const messages = [msg].flat();
+  const usageCalls=messages.filter(isUsageCall);
+  if(usageCalls.length){
+    const m=usageCalls[0];
+    if(messages.length!==1||!allowedTools.has('tool_usage'))return toClient(rpcError(m.id,'Tool usage requires one allowed tool call.'));
+    usage.expire();
+    return toClient(usageResult(m,usageStore,'local_stdio_proxy'));
+  }
   const browserCalls = messages.filter(m => m?.method === 'tools/call' && isBrowserTool(m.params?.name));
   if (browserCalls.length) {
     if (messages.length !== 1) return toClient(rpcError(browserCalls[0]?.id, 'Browser tools cannot be batched with other JSON-RPC messages.'));
@@ -45,8 +57,12 @@ async function handleClientLine(line) {
     const verdict = checkRequest(m, allowedTools);
     if (verdict.error) return toClient(rpcError(m.id, verdict.error));
     if (verdict.toolError) return toClient(rpcToolError(m.id, verdict.toolError));
-    const result = await callBrowserTool(browserServiceUrl, m.params?.name, m.params?.arguments ?? {});
-    return toClient({ jsonrpc: '2.0', id: m.id ?? null, result });
+    usage.start(m);
+    try{
+      const result=await callBrowserTool(browserServiceUrl,m.params?.name,m.params?.arguments??{});
+      const response={jsonrpc:'2.0',id:m.id??null,result};
+      usage.observe(response);return toClient(response);
+    }catch(e){usage.observe({id:m.id,error:true});throw e;}
   }
   for (const m of messages) {
     const verdict = checkRequest(m, allowedTools);
@@ -57,6 +73,7 @@ async function handleClientLine(line) {
     if (m?.method === 'tools/call' && m.id !== undefined && wantsCompactResult(m.params)) compactIds.add(m.id);
     rememberCrawlRequest(m, crawlRequests);
   }
+  for(const m of messages)usage.start(m);
   child.stdin.write(line + '\n');
 }
 
@@ -75,7 +92,8 @@ readline.createInterface({ input: child.stdout }).on('line', line => {
   let msg;
   try { msg = JSON.parse(line); } catch { process.stdout.write(line + '\n'); return; }
   const out = [msg].flat().map(m => {
-    const rewritten = appendBrowserTools(rewriteResponse(m, ctx), allowedTools);
+    usage.observe(m);
+    const rewritten = appendUsageTool(appendBrowserTools(rewriteResponse(m, ctx), allowedTools),allowedTools);
     if (m?.id !== undefined && (m.result !== undefined || m.error !== undefined)) compactIds.delete(m.id);
     return rewritten;
   });

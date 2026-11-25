@@ -7,6 +7,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { createToolUsageStore, createUsageTracker, appendUsageTool, isUsageCall, usageResult } from './tool-usage.mjs';
 import {
   parseAllowedTools,
   checkRequest,
@@ -27,6 +28,12 @@ const UPSTREAM_HOST = process.env.UPSTREAM_HOST ?? 'mcp',
   RATE_PER_MIN = Number(process.env.RATE_PER_MIN ?? 120),
   MAX_BODY = 256 * 1024;
 const ALLOWED_TOOLS = parseAllowedTools(process.env.ALLOWED_TOOLS);
+const usageStore=createToolUsageStore({
+  root:process.env.FIRECRAWL_TOOL_USAGE_DIR||'/var/lib/firecrawl-tool-usage',
+  enabled:process.env.FIRECRAWL_MCP_TOOL_USAGE!=='off'&&!process.env.NODE_TEST_CONTEXT,
+});
+for(const name of ALLOWED_TOOLS)usageStore.register(name);
+process.once('exit',()=>usageStore.flush());
 const BROWSER_SERVICE_URL = process.env.BROWSER_SERVICE_URL ?? 'http://browser-session-service:3010';
 const ACCESS_TEAM_DOMAIN = process.env.ACCESS_TEAM_DOMAIN ?? '',
   ACCESS_AUD = process.env.ACCESS_AUD ?? '',
@@ -118,7 +125,10 @@ function sendJson(res, obj) {
   res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
   res.end(JSON.stringify(obj));
 }
-const rewriteGatewayResponse = (msg, ctx) => appendCamofoxTool(appendBrowserTools(rewriteResponse(msg, ctx), ALLOWED_TOOLS), ALLOWED_TOOLS);
+const rewriteGatewayResponse = (msg, ctx) => {
+  ctx.usage?.observe(msg);
+  return appendUsageTool(appendCamofoxTool(appendBrowserTools(rewriteResponse(msg, ctx), ALLOWED_TOOLS), ALLOWED_TOOLS),ALLOWED_TOOLS);
+};
 const rewriteJsonText = (text, ctx) => {
   try {
     const parsed = JSON.parse(text);
@@ -160,6 +170,7 @@ function forward(req, res, body, ctx) {
         return;
       }
       const responseHeaders = { ...upRes.headers };
+      if((upRes.statusCode??502)>=400)ctx.usage?.finish(upRes.statusCode===429?'RATE_LIMIT':'HTTP_ERROR');
       delete responseHeaders['content-length'];
       if ((upRes.headers['content-type'] ?? '').includes('text/event-stream')) {
         res.writeHead(upRes.statusCode ?? 502, responseHeaders);
@@ -171,13 +182,17 @@ function forward(req, res, body, ctx) {
           pending = lines.pop();
           if (lines.length) res.write(lines.map(l => rewriteSseLine(l, ctx)).join('\n') + '\n');
         });
-        upRes.on('end', () => res.end(pending ? rewriteSseLine(pending, ctx) : undefined));
+        upRes.on('end', () => {
+          const tail=pending?rewriteSseLine(pending,ctx):undefined;
+          ctx.usage?.finish();res.end(tail);
+        });
         return;
       }
       const chunks = [];
       upRes.on('data', c => chunks.push(c));
       upRes.on('end', () => {
         const out = Buffer.from(rewriteJsonText(Buffer.concat(chunks).toString('utf8'), ctx));
+        ctx.usage?.finish();
         delete responseHeaders['transfer-encoding'];
         responseHeaders['content-length'] = String(out.length);
         res.writeHead(upRes.statusCode ?? 502, responseHeaders);
@@ -186,12 +201,13 @@ function forward(req, res, body, ctx) {
     },
   );
   up.on('error', () => {
+    ctx?.usage?.finish('UPSTREAM_ERROR');
     console.warn('upstream error');
     if (!res.headersSent) send(res, 502, 'upstream unavailable');
     else res.destroy();
   });
   res.on('close', () => {
-    if (!res.writableFinished) up.destroy();
+    if (!res.writableFinished){ctx?.usage?.finish('ABORTED');up.destroy();}
   });
   up.end(body);
 }
@@ -228,6 +244,14 @@ http
       } catch {
         return send(res, 400, 'invalid json');
       }
+      const usageCalls=msgs.filter(isUsageCall);
+      if(usageCalls.length){
+        const m=usageCalls[0];
+        if(msgs.length!==1||!ALLOWED_TOOLS.has('tool_usage'))
+          return sendJson(res,rpcErrorMsg(m.id,'Tool usage requires one allowed tool call.'));
+        return sendJson(res,usageResult(m,usageStore,'public_gateway'));
+      }
+      const usage=createUsageTracker(usageStore,ALLOWED_TOOLS);
       const browserCalls = msgs.filter(m => m?.method === 'tools/call' && (isBrowserTool(m.params?.name) || isCamofoxTool(m.params?.name)));
       if (browserCalls.length) {
         if (msgs.length !== 1)
@@ -241,10 +265,15 @@ http
         if (verdict.toolError) return sendJson(res, rpcToolError(m.id, verdict.toolError));
         const urlCheck = isCamofoxTool(m.params?.name) ? await urlSafetyReason(m.params) : null;
         if (urlCheck) return sendJson(res, rpcToolError(m.id, urlCheck));
-        const result = isCamofoxTool(m.params?.name)
-          ? await callCamofoxTool(m.params?.arguments ?? {})
-          : await callBrowserTool(BROWSER_SERVICE_URL, m.params?.name, m.params?.arguments ?? {});
-        return sendJson(res, { jsonrpc: '2.0', id: m.id ?? null, result });
+        usage.start(m);
+        try{
+          const result = isCamofoxTool(m.params?.name)
+            ? await callCamofoxTool(m.params?.arguments ?? {})
+            : await callBrowserTool(BROWSER_SERVICE_URL, m.params?.name, m.params?.arguments ?? {});
+          const response={jsonrpc:'2.0',id:m.id??null,result};
+          usage.observe(response);
+          return sendJson(res,response);
+        }finally{usage.finish('UPSTREAM_ERROR');}
       }
       let needsRewrite = false;
       const compactIds = new Set(),
@@ -262,7 +291,8 @@ http
         }
         if (rememberCrawlRequest(m, crawlRequests)) needsRewrite = true;
       }
-      forward(req, res, body, needsRewrite ? { allowedTools: ALLOWED_TOOLS, compactIds, crawlRequests } : null);
+      for(const m of msgs)usage.start(m);
+      forward(req, res, body, needsRewrite ? { allowedTools: ALLOWED_TOOLS, compactIds, crawlRequests, usage } : null);
     });
   })
   .listen(PORT, '0.0.0.0', () => console.log(`gateway listening on ${PORT}; Cloudflare Access required`));
