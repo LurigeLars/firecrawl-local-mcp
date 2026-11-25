@@ -18,19 +18,33 @@ assert.ok(['fixture','--candidate','--candidate-live'].includes(mode));
 const candidateMode=mode!=='fixture';
 const candidateToken='synthetic-ci-token-not-a-real-secret-0123456789';
 const fixtureToken='fc-synthetic-ci-not-a-real-key';
-// In candidate modes the relay only observes the locked client's real HTTP
-// contract. Forward the exact JSON body and auth to the fixed loopback Rust
-// listener, never a caller-supplied host; no redirect or fabricated response.
+// The relay is an isolated test observer, not a general reverse proxy.
+// Select only literal POST endpoints and the single status URL registered by
+// the candidate's successful create response. The incoming URL is never
+// used to construct an upstream request (including its path).
+let candidatePollPath=null;
+let candidatePollUrl=null;
 async function relay(req,res,u,raw,record){
-  const post=req.method==='POST'&&['/v2/scrape','/v2/map','/v2/crawl'].includes(u.pathname)&&!u.search;
-  const status=req.method==='GET'&&/^\/v2\/crawl\/[0-9a-f-]{36}$/.test(u.pathname)&&!u.search;
-  if(!(post||status)||req.headers.authorization!=='Bearer '+candidateToken){
+  if(u.origin!=='http://127.0.0.1'||u.search||u.hash||
+      req.headers.authorization!=='Bearer '+candidateToken){
     res.writeHead(400).end();return;
   }
-  const upstream=await fetch('http://127.0.0.1:3002'+u.pathname,{
-    method:req.method,...(post?{body:raw}:{}),headers:{authorization:req.headers.authorization,
-      'content-type':'application/json'},redirect:'manual',
-    signal:AbortSignal.timeout(35000)
+  let target;
+  const post=req.method==='POST';
+  if(post){
+    switch(u.pathname){
+      case '/v2/scrape':target='http://127.0.0.1:3002/v2/scrape';break;
+      case '/v2/map':target='http://127.0.0.1:3002/v2/map';break;
+      case '/v2/crawl':target='http://127.0.0.1:3002/v2/crawl';break;
+    }
+  }else if(req.method==='GET'&&candidatePollUrl!==null&&u.pathname===candidatePollPath){
+    target=candidatePollUrl;
+  }
+  if(!target){res.writeHead(400).end();return;}
+  const upstream=await fetch(target,{
+    method:post?'POST':'GET',...(post?{body:raw}:{}),
+    headers:{authorization:'Bearer '+candidateToken,'content-type':'application/json'},
+    redirect:'manual',signal:AbortSignal.timeout(35000)
   });
   const chunks=[];let size=0;
   for await(const part of upstream.body){
@@ -41,6 +55,13 @@ async function relay(req,res,u,raw,record){
   const body=Buffer.concat(chunks);
   record.status=upstream.status;
   record.response=JSON.parse(body.toString('utf8'));
+  if(post&&target==='http://127.0.0.1:3002/v2/crawl'&&upstream.status===200){
+    const job=record.response?.id;
+    assert.ok(typeof job==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(job),
+      'candidate returned invalid job ID');
+    candidatePollPath='/v2/crawl/'+job;
+    candidatePollUrl='http://127.0.0.1:3002/v2/crawl/'+job;
+  }
   res.writeHead(upstream.status,{'content-type':'application/json'});
   res.end(body);
 }
