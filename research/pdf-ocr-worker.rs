@@ -1,5 +1,8 @@
 //! Offline PDF OCR worker. No listener, URL, caller-controlled executable,
 //! filesystem path or provider. Run in a disposable network-none sandbox.
+#[path="../pdf-result.rs"]
+mod contract;
+use contract::{office_magic,MAX_OFFICE_MARKDOWN};
 use serde_json::{json, Value};
 use std::{io::{self, Read}, process::Stdio, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command};
@@ -107,17 +110,60 @@ async fn extract(pdf: &[u8], single_block: bool) -> Result<Value, &'static str> 
     Ok(result)
 }
 
+// Use the pinned upstream Office parser only inside the same isolated
+// worker container. Bound ZIP claims and actual decompression before parsing;
+// the container memory/CPU/PID/deadline limits remain the real sandbox.
+fn extract_office(input:&[u8])->Result<Value,&'static str>{
+    if input.len()>MAX_PDF||!office_magic(input){return Err("invalid office input");}
+    if input.starts_with(b"PK\x03\x04"){
+        let mut archive=zip::ZipArchive::new(std::io::Cursor::new(input)).map_err(|_|"invalid document archive")?;
+        if archive.len()>2048{return Err("document archive entry cap");}
+        let mut remaining=128*1024*1024u64;
+        let mut names=std::collections::HashSet::new();
+        let mut buffer=[0u8;8192];
+        for i in 0..archive.len(){
+            let mut entry=archive.by_index(i).map_err(|_|"invalid document archive entry")?;
+            let name=entry.name().map_err(|_|"invalid document archive name")?.into_owned();
+            if entry.enclosed_name().is_none()||!names.insert(name){
+                return Err("invalid or duplicate document archive path");
+            }
+            if entry.size()>remaining||entry.size()>32*1024*1024{
+                return Err("document archive expansion cap");
+            }
+            let mut actual=0u64;
+            loop{
+                let n=entry.read(&mut buffer).map_err(|_|"document archive read failed")?;
+                if n==0{break;}
+                if n as u64>remaining{return Err("document archive expansion cap");}
+                remaining-=n as u64;
+                actual+=n as u64;
+                if actual>32*1024*1024{return Err("document archive part cap");}
+            }
+            if actual!=entry.size(){return Err("document archive size mismatch");}
+        }
+    }
+    let markdown=firecrawl_local::document::convert_document_bytes_to_markdown(input,None)
+        .map_err(|_|"office parser failed")?;
+    if markdown.trim().is_empty()||markdown.len()>MAX_OFFICE_MARKDOWN{return Err("empty or oversized office document");}
+    let value=json!({"markdown":markdown,"parser":"upstream-anydoc","source_verified":false});
+    if serde_json::to_vec(&value).map_err(|_|"office reply encoding")?.len()>MAX_OUTPUT{return Err("office reply exceeds bound");}
+    Ok(value)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), &'static str> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    let office=args.as_slice()==["--office"];
     let single_block = match args.as_slice() {
         [] => false,
         [arg] if arg == "--single-block-fixture" => true,
+        [arg] if arg == "--office" => false,
         _ => return Err("unsupported OCR argument"),
     };
     let mut input=Vec::new();
     io::stdin().take((MAX_PDF+1) as u64).read_to_end(&mut input).map_err(|_|"PDF input failed")?;
-    println!("{}", extract(&input,single_block).await?);
+    if office{println!("{}",extract_office(&input)?);}
+    else{println!("{}", extract(&input,single_block).await?);}
     Ok(())
 }
 

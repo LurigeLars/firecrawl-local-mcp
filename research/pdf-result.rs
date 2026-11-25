@@ -2,6 +2,24 @@
 use serde_json::Value;
 pub(crate) const MAX_PDF:usize=32*1024*1024;
 pub(crate) const MAX_REPLY:usize=2*1024*1024;
+pub(crate) const MAX_OFFICE_MARKDOWN:usize=512*1024;
+
+pub(crate) fn office_magic(bytes:&[u8])->bool{
+    bytes.starts_with(b"PK\x03\x04")||
+        bytes.starts_with(&[0xD0,0xCF,0x11,0xE0,0xA1,0xB1,0x1A,0xE1])||
+        bytes.starts_with(b"{\\rtf")
+}
+
+pub(crate) fn parse_office_reply(bytes:&[u8])->Result<Value,&'static str>{
+    if bytes.len()>MAX_REPLY+1{return Err("office reply exceeds bound");}
+    let v:Value=serde_json::from_slice(bytes).map_err(|_|"invalid office reply")?;
+    if v.as_object().is_none_or(|o|o.len()!=3)||v["source_verified"]!=false||
+        v["parser"]!="upstream-anydoc"||
+        v["markdown"].as_str().is_none_or(|s|s.trim().is_empty()||s.len()>MAX_OFFICE_MARKDOWN){
+        return Err("invalid office receipt");
+    }
+    Ok(v)
+}
 
 pub(crate) fn parse_reply(bytes:&[u8])->Result<Value,&'static str>{
     if bytes.len()>MAX_REPLY+1{return Err("OCR reply exceeds bound");}
