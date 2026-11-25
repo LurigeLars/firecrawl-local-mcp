@@ -123,7 +123,8 @@ fn extract_office(input:&[u8])->Result<Value,&'static str>{
         let mut buffer=[0u8;8192];
         for i in 0..archive.len(){
             let mut entry=archive.by_index(i).map_err(|_|"invalid document archive entry")?;
-            if entry.enclosed_name().is_none()||!names.insert(entry.name().to_owned()){
+            let name=entry.name().map_err(|_|"invalid document archive name")?.into_owned();
+            if entry.enclosed_name().is_none()||!names.insert(name){
                 return Err("invalid or duplicate document archive path");
             }
             if entry.size()>remaining||entry.size()>32*1024*1024{
