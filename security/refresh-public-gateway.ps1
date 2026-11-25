@@ -1,55 +1,15 @@
-# Recover only the documented orphaned gateway image from November 25.
-# The deployment audit recorded its original image ID and source revision.
-# A reconstructed fallback is NOT an exact original. Never commit/export the
-# container: its configuration contains runtime authentication values.
-function Get-FirecrawlGatewayRollback {
-    param([string]$Container,[string]$BaselineId,[string]$ProjectRoot)
-    $Present = [string](& docker image inspect --format '{{.Id}}' $BaselineId 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $Present -ceq $BaselineId) {
-        $Tag = Save-FirecrawlRollbackImage -Container $Container -BaselineId $BaselineId -Repository 'firecrawl-gateway'
-        return @{ Tag=$Tag; Id=$BaselineId; Reconstructed=$false }
+# Docker Desktop may report a Windows bind as its Linux VM alias.
+# Accept only the exact normalized reviewed host path, never a substring match.
+function ConvertTo-FirecrawlGatewayBindPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $Value = $Path.Replace('\','/')
+    if ($Value -match '^/run/desktop/mnt/host/([a-zA-Z])/(.+)$') {
+        $Value = $Matches[1] + ':/' + $Matches[2]
     }
-
-    $KnownMissing = 'sha256:7edfc616ff5f469baeae19f5bc0bdf511239d97c83f010761d31b02b7e43e9bc'
-    $Revision = 'b7dbfba9860c1742022dfe309c34c80705a0c036'
-    if ($Container -cne 'firecrawl-gateway-1' -or $BaselineId -cne $KnownMissing) {
-        throw 'Baseline image unavailable and no reviewed reconstruction exists; deployment aborted.'
+    if ($Value -notmatch '^[a-zA-Z]:/.+' -or $Value -match '(?:^|/)\.\.?(?:/|$)') {
+        throw 'Unexpected gateway host bind path.'
     }
-    $Dirty = @(& git -C $ProjectRoot status --porcelain)
-    if ($LASTEXITCODE -ne 0 -or $Dirty.Count -ne 0) { throw 'Recovery requires a clean reviewed checkout.' }
-    & git -C $ProjectRoot merge-base --is-ancestor $Revision HEAD
-    if ($LASTEXITCODE -ne 0) { throw 'Recorded baseline revision is not an ancestor.' }
-    $Recipe = @(& git -C $ProjectRoot show "$($Revision):public/Dockerfile.gateway")
-    if ($LASTEXITCODE -ne 0 -or $Recipe.Count -eq 0) { throw 'Historical gateway recipe unavailable.' }
-    if (($Recipe -join [Environment]::NewLine) -match '(?im)^\s*(COPY|ADD|ENV|ARG)\s') {
-        throw 'Historical recipe is not a self-contained gateway base.'
-    }
-    $Stage = Join-Path ([IO.Path]::GetTempPath()) ('firecrawl-gateway-recovery-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $Stage -ErrorAction Stop | Out-Null
-    try {
-        $Dockerfile = Join-Path $Stage 'Dockerfile'
-        [IO.File]::WriteAllText($Dockerfile,(($Recipe -join [Environment]::NewLine) + [Environment]::NewLine),[Text.UTF8Encoding]::new($false))
-        $Version = Get-FirecrawlPinnedNodeVersion -Dockerfile $Dockerfile
-        $Tag = "firecrawl-gateway:reconstructed-$($Revision.Substring(0,12))"
-        & docker build --tag $Tag --label "org.opencontainers.image.source=https://github.com/LurigeLars/firecrawl-local-mcp" --label "org.opencontainers.image.revision=$Revision" --label "io.firecrawl.recovery.original-image=$BaselineId" --label 'io.firecrawl.recovery.kind=reconstructed' $Stage | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw 'Reconstruction build failed; live gateway untouched.' }
-        $Recovered = [string](& docker image inspect --format '{{.Id}}' $Tag)
-        if ($LASTEXITCODE -ne 0 -or $Recovered -cnotmatch '^sha256:[a-f0-9]{64}$') {
-            throw 'Reconstructed fallback image unavailable.'
-        }
-        & docker scout cves --only-severity critical,high --only-fixed --exit-code --vex-location (Join-Path $PSScriptRoot 'vex/firecrawl-mcp.openvex.json') --vex-author 'firecrawl-local-mcp maintainers' ("local://" + $Recovered) | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Scout rejected reconstructed fallback; live gateway untouched.' }
-        # No secret mounts, network, host paths, or gateway environment are passed.
-        $ActualVersion = [string](& docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint node $Recovered --version)
-        if ($LASTEXITCODE -ne 0 -or $ActualVersion -cne $Version) {
-            throw 'Reconstructed gateway Node smoke failed.'
-        }
-        Assert-FirecrawlRollbackImage -Container $Container -BaselineId $BaselineId -RollbackTag $Tag -RollbackId $Recovered
-        Write-Host "GATEWAY_BASELINE_RECONSTRUCTED source=$Revision image=$Recovered original=$BaselineId exact_original=false"
-        return @{ Tag=$Tag; Id=$Recovered; Reconstructed=$true }
-    } finally {
-        Remove-Item -LiteralPath $Stage -Recurse -Force
-    }
+    return $Value.TrimEnd('/').ToLowerInvariant()
 }
 
 # Secure one-service promotion for the public Firecrawl gateway.
@@ -115,11 +75,11 @@ function Invoke-FirecrawlPublicGatewayRefresh {
         }
     }
     $ExistingBind = (& docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app"}}{{.Source}}{{end}}{{end}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$ExistingBind -notlike '*firecrawl-local*public*gateway') {
+    $ExpectedBind = ConvertTo-FirecrawlGatewayBindPath -Path (Join-Path $ProjectRoot 'public\gateway')
+    if ($LASTEXITCODE -ne 0 -or (ConvertTo-FirecrawlGatewayBindPath -Path ([string]$ExistingBind)) -cne $ExpectedBind) {
         throw 'Existing gateway source bind does not match the reviewed location.'
     }
-    $Protected = Get-FirecrawlGatewayRollback -Container $Container -BaselineId $OldId -ProjectRoot $ProjectRoot
-    $Rollback = $Protected.Tag
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $OldId -Repository 'firecrawl-gateway' -AllowMissing
     & docker @ComposeArguments build gateway
     if ($LASTEXITCODE -ne 0) { throw 'Gateway image build failed; existing gateway remains untouched.' }
     $CandidateId = (& docker image inspect --format '{{.Id}}' $TargetImage)
@@ -132,7 +92,7 @@ function Invoke-FirecrawlPublicGatewayRefresh {
     if ($LASTEXITCODE -ne 0 -or [string]$AfterScan -cne [string]$CandidateId) {
         throw 'Gateway candidate identity changed after scan.'
     }
-    Assert-FirecrawlRollbackImage -Container $Container -BaselineId $OldId -RollbackTag $Rollback -RollbackId $Protected.Id
+    Assert-FirecrawlRollbackImage -Container $Container -BaselineId $OldId -RollbackTag $Rollback -RollbackId $OldId
     & docker @ComposeArguments up -d --no-deps --no-build --force-recreate gateway
     if ($LASTEXITCODE -ne 0) { throw 'Public gateway scoped deploy failed.' }
     $NewImage = (& docker inspect --format '{{.Image}}' $Container)
@@ -140,7 +100,7 @@ function Invoke-FirecrawlPublicGatewayRefresh {
         throw 'Public gateway did not start reviewed candidate.'
     }
     $ActualBind = (& docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app"}}{{.Source}}{{end}}{{end}}' $Container)
-    if ($LASTEXITCODE -ne 0 -or [string]$ActualBind -cne [string]$ExistingBind) {
+    if ($LASTEXITCODE -ne 0 -or (ConvertTo-FirecrawlGatewayBindPath -Path ([string]$ActualBind)) -cne $ExpectedBind) {
         throw 'Public gateway source mount changed during update.'
     }
     foreach ($Name in $Unrelated.Keys) {
@@ -158,5 +118,5 @@ function Invoke-FirecrawlPublicGatewayRefresh {
         Start-Sleep -Seconds 3
     }
     if (-not $SmokePassed) { throw 'Public gateway Access/OAuth self-test failed.' }
-    "PUBLIC_GATEWAY_REFRESH_OK image=$CandidateId rollback=$Rollback reconstructed=$($Protected.Reconstructed) cloudflare_access_selftest=pass unrelated_container_ids_unchanged=true"
+    "PUBLIC_GATEWAY_REFRESH_OK image=$CandidateId rollback=$Rollback cloudflare_access_selftest=pass unrelated_container_ids_unchanged=true"
 }

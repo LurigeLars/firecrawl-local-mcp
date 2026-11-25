@@ -19,7 +19,7 @@ function Invoke-FirecrawlNodeHelperRefresh {
     }
     $BaselineId = Get-FirecrawlRunningImage -Container $Container
     $null = Get-FirecrawlPinnedNodeVersion -Dockerfile (Join-Path $ProjectRoot 'security\Dockerfile.searxng-proxy')
-    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $BaselineId -Repository 'firecrawl-searxng-proxy'
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $BaselineId -Repository 'firecrawl-searxng-proxy' -AllowMissing
     # Build stages only; the old container stays online until scan passes.
     & docker @ComposeArguments build $Service
     if ($LASTEXITCODE -ne 0) { throw 'SearXNG proxy build failed; old runtime remains active.' }

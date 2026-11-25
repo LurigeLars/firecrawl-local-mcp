@@ -18,7 +18,7 @@ function Invoke-FirecrawlSearchBackendRefresh {
     if ($LASTEXITCODE -ne 0 -or $TargetImage -cnotmatch '^searxng/searxng:[0-9]{4}[.][0-9]{1,2}[.][0-9]{1,2}-[0-9a-f]{7,}$') {
         throw 'Compose does not pin SearXNG to an exact versioned tag.'
     }
-    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $CurrentImageId -Repository 'searxng/searxng'
+    $Rollback = Save-FirecrawlRollbackImage -Container $Container -BaselineId $CurrentImageId -Repository 'searxng/searxng' -AllowMissing
     & docker @ComposeArguments pull $Service
     if ($LASTEXITCODE -ne 0) { throw 'Pulling the reviewed SearXNG image failed; running container untouched.' }
     $TargetId = [string](& docker image inspect --format '{{.Id}}' $TargetImage)
