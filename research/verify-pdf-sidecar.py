@@ -1,4 +1,4 @@
-"""Live PDF dispatch: fixed public W3C test document and real isolated worker.
+"""Live PDF dispatch: pinned public synthetic test document and real isolated worker.
 
 No user input or secrets. External source availability is reported separately
 from the synthetic/offline correctness gate.
@@ -10,7 +10,7 @@ import urllib.request
 
 CANDIDATE = "http://127.0.0.1:3002"
 WORKER = "http://pdf-ocr:3000"
-URL = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
+URL = "https://raw.githubusercontent.com/LurigeLars/firecrawl-local-mcp/b5a1bddc489c1d39fc2e45ef19ea77f7040c449b/research/fixtures/pdf-transport-native.pdf"
 TOKEN = "synthetic-ci-token-not-a-real-secret-0123456789"
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -72,12 +72,14 @@ assert receipt["unresolved_pages"] == 0
 assert len(receipt["pages"]) == 1
 page = receipt["pages"][0]
 assert page["page"] == 1 and page["source"] in ("native", "ocr")
-assert "dummy pdf file" in " ".join(page["text"].split()).lower()
-assert "dummy pdf file" in " ".join(doc["markdown"].split()).lower()
+for marker in ("Firecrawl synthetic PDF transport fixture", "Stock 421.5 million barrels",
+               "Weekly change -1.2 million barrels", "September 8, 2026"):
+    assert marker.lower() in " ".join(page["text"].split()).lower()
+    assert marker.lower() in " ".join(doc["markdown"].split()).lower()
 if page["source"] == "ocr":
     assert page["warning"] and isinstance(page["native_text"], str)
 print("LIVE_PDF_SIDECAR_PASS", json.dumps({
-    "source": "W3C dummy PDF", "pages": 1, "page_source": page["source"],
+    "source": "pinned synthetic PDF", "markers": 4, "pages": 1, "page_source": page["source"],
     "ocr_attempted": receipt["ocr_attempted"], "source_verified": False,
     "elapsed_ms": round((time.monotonic() - started) * 1000),
 }))
