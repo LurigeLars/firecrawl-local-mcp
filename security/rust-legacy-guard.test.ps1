@@ -86,3 +86,23 @@ try {
     Expect-ModeRefusal recover
     'RUST_SHARED_MAINTENANCE_MODE_FIXTURE_PASS'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+
+# Real filesystem lock in a synthetic temporary directory, no user state.
+$definition=$ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Enter-FirecrawlActionLock'},$true)
+. ([scriptblock]::Create($definition.Extent.Text))
+$root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+$held=$null;$again=$null
+try {
+    $held=Enter-FirecrawlActionLock $root
+    try {
+        $again=Enter-FirecrawlActionLock $root
+        throw 'Concurrent mutation allowed.'
+    } catch { if ($_.Exception.Message -notlike '*holds the launcher lock*') { throw } }
+    $held.Dispose();$held=$null
+    $again=Enter-FirecrawlActionLock $root
+    'FIRECRAWL_ACTION_SERIALIZATION_PASS'
+} finally {
+    if ($null -ne $held) { $held.Dispose() }
+    if ($null -ne $again) { $again.Dispose() }
+    Remove-Item -LiteralPath $root -Recurse -Force
+}

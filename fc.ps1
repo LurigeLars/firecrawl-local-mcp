@@ -16,6 +16,21 @@ $env:SOURCE_REVISION = if (-not (git -C $root status --porcelain 2>$null)) { git
 . (Join-Path $root "security\refresh-node-runtime.ps1")
 . (Join-Path $root "security\refresh-public-gateway.ps1")
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
+
+# Serialize reviewed launcher mutations with promotion/rollback, including
+# host maintenance runner calls. The file is never deleted; its exclusive
+# handle is released on exit (including exceptions/process termination).
+function Enter-FirecrawlActionLock([string]$StateRoot) {
+    $null=New-Item -ItemType Directory -Force -Path $StateRoot -ErrorAction Stop
+    try {
+        return [IO.File]::Open((Join-Path $StateRoot 'launcher-action.lck'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    } catch { throw 'Another reviewed Firecrawl action holds the launcher lock; retry after it exits.' }
+}
+$ActionLock=$null
+if ($Action -notin @('status','logs','url')) {
+    $ActionLock=Enter-FirecrawlActionLock (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+}
+try {
 $GeminiDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\gemini_api_key.dpapi"
 $PostgresDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\postgres_password.dpapi"
 $SearxngDpapiPath = Join-Path $env:LOCALAPPDATA "FirecrawlLocal\secrets\searxng_secret.dpapi"
@@ -1102,4 +1117,8 @@ finally {
     )) {
         Restore-OptionalEnvironmentVariable -Name ([string]$item.Name) -WasSet ([bool]$item.WasSet) -Value $item.Value
     }
+}
+
+} finally {
+    if ($null -ne $ActionLock) { $ActionLock.Dispose() }
 }
