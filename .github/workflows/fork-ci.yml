@@ -250,6 +250,9 @@ jobs:
         run: |
           ./security/rabbitmq-compose-guard.test.ps1
           ./security/rust-legacy-guard.test.ps1
+      - name: Verify Rust local client DPAPI boundary with synthetic credentials
+        shell: pwsh
+        run: ./security/rust-client.test.ps1
       - name: Verify scoped staged build, CVE and rollback gates without Docker
         shell: pwsh
         run: ./security/staged-mcp-image.test.ps1
