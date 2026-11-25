@@ -2,7 +2,7 @@
 //! all PDF parsing/rendering stays in the opt-in isolated OCR service.
 #[path="pdf-result.rs"]
 mod contract;
-use contract::{MAX_PDF,MAX_REPLY,parse_reply};
+use contract::{MAX_PDF,MAX_REPLY,parse_reply,parse_office_reply,office_magic};
 use super::{CandidateState,decode,refusal,bounded,render};
 use crate::fetch::{FetchOptions,FetchResult,FetchError,Fetcher};
 use axum::{body::Bytes,extract::State,http::{HeaderMap,StatusCode},response::{IntoResponse,Response},Json};
@@ -12,6 +12,27 @@ use std::time::Duration;
 
 const ENDPOINT:&str="http://pdf-ocr:3000/extract";
 const MAX_REDIRECTS:usize=3;
+const OFFICE_ENDPOINT:&str="http://pdf-ocr:3000/extract-office";
+#[derive(Clone,Copy,PartialEq,Eq,Debug)]
+pub(super) enum Kind{Pdf,Office}
+
+pub(super) fn office_url(url:&url::Url)->bool{
+    let extension=url.path().rsplit('/').next().and_then(|p|p.rsplit_once('.')).map(|(_,e)|e.to_ascii_lowercase());
+    extension.as_deref().is_some_and(|e|matches!(e,"docx"|"doc"|"xlsx"|"xls"|"pptx"|"ppt"|"odt"|"ods"|"odp"|"rtf"|"epub"))
+}
+
+fn media_kind(res:&FetchResult)->Option<Kind>{
+    let mime=res.mime();
+    if matches!(mime.as_deref(),Some("application/pdf"|"application/octet-stream"))&&res.body.starts_with(b"%PDF-"){
+        return Some(Kind::Pdf);
+    }
+    if office_magic(&res.body)&&matches!(crate::documents::sniff(&res.body,mime.as_deref(),&res.final_url),
+        Some(crate::documents::DocKind::Office(_)))&&
+        mime.as_deref().is_some_and(|m|m!="text/html"&&m!="application/pdf"){
+        return Some(Kind::Office);
+    }
+    None
+}
 
 // Only public HTTPS, ordinary query parameters and the default TLS port.
 // Fragments are client-side page selectors, not transmitted to the server.
@@ -22,7 +43,12 @@ pub(super) fn target(raw:&str)->Result<url::Url,StatusCode>{
     Ok(target)
 }
 
+#[cfg(test)]
 fn next_target(current:&url::Url,res:&FetchResult)->Result<Option<url::Url>,StatusCode>{
+    next_target_for(current,res,Some(Kind::Pdf))
+}
+
+fn next_target_for(current:&url::Url,res:&FetchResult,expected:Option<Kind>)->Result<Option<url::Url>,StatusCode>{
     if res.final_url!=*current{return Err(StatusCode::BAD_GATEWAY);}
     if matches!(res.status,301|302|303|307|308){
         let location=res.headers.get("location").and_then(|v|v.to_str().ok()).ok_or(StatusCode::BAD_GATEWAY)?;
@@ -37,14 +63,12 @@ fn next_target(current:&url::Url,res:&FetchResult)->Result<Option<url::Url>,Stat
             429=>StatusCode::TOO_MANY_REQUESTS,_=>StatusCode::BAD_GATEWAY
         });
     }
-    if !matches!(res.mime().as_deref(),Some("application/pdf"|"application/octet-stream"))||
-        !res.body.starts_with(b"%PDF-"){
-        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    }
+    let kind=media_kind(res).ok_or(StatusCode::UNSUPPORTED_MEDIA_TYPE)?;
+    if expected.is_some_and(|e|e!=kind){return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);}
     Ok(None)
 }
 
-async fn download(fetcher:&Fetcher,initial:&url::Url,budget:Duration)->Result<(url::Url,Bytes),StatusCode>{
+async fn download(fetcher:&Fetcher,initial:&url::Url,budget:Duration,expected:Option<Kind>)->Result<(url::Url,Bytes,Kind),StatusCode>{
     let mut current=target(initial.as_str())?;
     let mut seen=std::collections::HashSet::new();
     tokio::time::timeout(budget.min(Duration::from_secs(25)),async{
@@ -59,10 +83,13 @@ async fn download(fetcher:&Fetcher,initial:&url::Url,budget:Duration)->Result<(u
                 FetchError::Timeout=>StatusCode::GATEWAY_TIMEOUT,
                 _=>StatusCode::BAD_GATEWAY
             })?;
-            match next_target(&current,&res)?{
+            match next_target_for(&current,&res,expected)?{
                 Some(next) if hop<MAX_REDIRECTS=>current=next,
                 Some(_)=>return Err(StatusCode::BAD_GATEWAY),
-                None=>return Ok((current,res.body)),
+                None=>{
+                    let kind=media_kind(&res).ok_or(StatusCode::UNSUPPORTED_MEDIA_TYPE)?;
+                    return Ok((current,res.body,kind));
+                },
             }
         }
         Err(StatusCode::BAD_GATEWAY)
@@ -102,11 +129,57 @@ pub(super) async fn document(state:&CandidateState,target:&url::Url,budget:Durat
     ->Result<(url::Url,Value),(StatusCode,&'static str)>{
     if !state.pdf_enabled{return Err((StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED"));}
     let deadline=tokio::time::Instant::now()+budget;
-    let (landed,bytes)=download(&state.crawler.fetcher,target,budget).await.map_err(|s|(s,"PDF_DOWNLOAD_FAILED"))?;
+    let (landed,bytes,_)=download(&state.crawler.fetcher,target,budget,Some(Kind::Pdf)).await.map_err(|s|(s,"PDF_DOWNLOAD_FAILED"))?;
     let receipt=tokio::time::timeout_at(deadline,ocr_at(ENDPOINT,bytes)).await
         .map_err(|_|(StatusCode::GATEWAY_TIMEOUT,"PDF_WORKER_TIMEOUT"))?
         .map_err(|s|(s,"PDF_WORKER_FAILED"))?;
     Ok((landed,receipt))
+}
+
+async fn office_at(endpoint:&str,bytes:Bytes,budget:Duration)->Result<Value,StatusCode>{
+    if bytes.len()>MAX_PDF||!office_magic(&bytes){return Err(StatusCode::BAD_REQUEST);}
+    let client=reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        .timeout(budget).build().map_err(|_|StatusCode::BAD_GATEWAY)?;
+    let mut res=client.post(endpoint).header("content-type","application/octet-stream").body(bytes)
+        .send().await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+    if res.status()!=StatusCode::OK{return Err(match res.status(){
+        StatusCode::TOO_MANY_REQUESTS=>StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::UNPROCESSABLE_ENTITY=>StatusCode::UNPROCESSABLE_ENTITY,
+        _=>StatusCode::BAD_GATEWAY
+    });}
+    let mut body=Vec::new();
+    while let Some(chunk)=res.chunk().await.map_err(|_|StatusCode::BAD_GATEWAY)?{
+        if chunk.len()>MAX_REPLY+1-body.len(){return Err(StatusCode::PAYLOAD_TOO_LARGE);}
+        body.extend_from_slice(&chunk);
+    }
+    parse_office_reply(&body).map_err(|_|StatusCode::BAD_GATEWAY)
+}
+
+pub(super) async fn isolated_document(state:&CandidateState,target:&url::Url,budget:Duration,expected:Option<Kind>)
+    ->Result<Value,(StatusCode,&'static str)>{
+    if !state.pdf_enabled{return Err((StatusCode::SERVICE_UNAVAILABLE,"DOCUMENT_WORKER_DISABLED"));}
+    let deadline=tokio::time::Instant::now()+budget;
+    let (landed,bytes,kind)=download(&state.crawler.fetcher,target,budget,expected).await
+        .map_err(|s|(s,"DOCUMENT_DOWNLOAD_FAILED"))?;
+    let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero(){return Err((StatusCode::GATEWAY_TIMEOUT,"DOCUMENT_DEADLINE"));}
+    match kind{
+        Kind::Pdf=>{
+            let receipt=tokio::time::timeout_at(deadline,ocr_at(ENDPOINT,bytes)).await
+                .map_err(|_|(StatusCode::GATEWAY_TIMEOUT,"PDF_WORKER_TIMEOUT"))?
+                .map_err(|s|(s,"PDF_WORKER_FAILED"))?;
+            v2_document(target,&landed,receipt).map_err(|s|(s,"PDF_INCOMPLETE"))
+        },
+        Kind::Office=>{
+            let receipt=tokio::time::timeout_at(deadline,office_at(OFFICE_ENDPOINT,bytes,remaining)).await
+                .map_err(|_|(StatusCode::GATEWAY_TIMEOUT,"OFFICE_WORKER_TIMEOUT"))?
+                .map_err(|s|(s,"OFFICE_WORKER_FAILED"))?;
+            let markdown=receipt["markdown"].as_str().ok_or((StatusCode::BAD_GATEWAY,"OFFICE_WORKER_FAILED"))?;
+            Ok(json!({"markdown":markdown,"metadata":{"url":landed.as_str(),"sourceURL":target.as_str(),"statusCode":200},
+                "source":"local","researchSourceVerified":false,"warning":"Office document parsed locally; layout, formulas and completeness are not independently verified.",
+                "researchDocument":{"parser":"upstream-anydoc","source_verified":false}}))
+        }
+    }
 }
 
 pub(super) fn v2_document(target:&url::Url,landed:&url::Url,receipt:Value)->Result<Value,StatusCode>{
@@ -192,6 +265,18 @@ mod tests{
         }
         assert_eq!(next_target(&url,&response(200,&url,"text/html",b"%PDF-fixture",None)).unwrap_err(),StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(next_target(&url,&response(403,&url,"text/html",b"blocked",None)).unwrap_err(),StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn office_media_magic_and_extensionless_detection(){
+        let url=target("https://example.org/download?id=42").unwrap();
+        let office=response(200,&url,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",b"PK\x03\x04fixture",None);
+        assert_eq!(media_kind(&office),Some(Kind::Office));
+        assert!(next_target_for(&url,&office,Some(Kind::Office)).is_ok());
+        assert!(next_target_for(&url,&office,Some(Kind::Pdf)).is_err());
+        assert_eq!(media_kind(&response(200,&url,"text/html",b"PK\x03\x04fixture",None)),None);
+        assert_eq!(media_kind(&response(200,&url,"application/zip",b"PK\x03\x04fixture",None)),None);
+        assert_eq!(media_kind(&response(200,&url,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",b"not zip",None)),None);
     }
 
     #[tokio::test]
