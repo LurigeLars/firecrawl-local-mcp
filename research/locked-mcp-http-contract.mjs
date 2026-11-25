@@ -214,6 +214,12 @@ try{
     const offset=traffic.length;
     const reply=await rpc('tools/call',{name,arguments:args});
     const captured=traffic.slice(offset);
+    if(args.includeTags){
+      const request=captured.find(x=>x.method===method&&x.path===path)?.body;
+      assert.equal(request?.url,args.url);
+      assert.deepEqual(request?.includeTags,args.includeTags);
+      assert.deepEqual(request?.excludeTags,args.excludeTags);
+    }
     console.log(JSON.stringify({tool:name,required:definition.inputSchema?.required??[],
       transport:captured,toolError:reply.result?.isError===true||!!reply.error}));
     outcomes.push({name,ok:!reply.error&&!!reply.result&&!reply.result.isError&&
