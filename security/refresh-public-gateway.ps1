@@ -49,7 +49,7 @@ function Invoke-FirecrawlPublicGatewayRefresh {
             $After = @(([string]$Property.Value).Split(','))
             if ('tool_usage' -cnotin $Before -and
                 $After.Count -eq ($Before.Count + 1) -and
-                ($After | Where-Object { $_ -ceq 'tool_usage' }).Count -eq 1 -and
+                @($After | Where-Object { $_ -ceq 'tool_usage' }).Count -eq 1 -and
                 ((@($After | Where-Object { $_ -cne 'tool_usage' }) -join ',') -ceq ($Before -join ','))) {
                 continue
             }
