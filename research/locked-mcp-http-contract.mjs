@@ -224,6 +224,7 @@ try{
     ['firecrawl_scrape',{url:fixtureUrl,formats:['html','links'],waitFor:100},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:'https://example.org/test.pdf',formats:['markdown'],parsers:['pdf']},'POST','/v2/scrape'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2},'POST','/v2/search'],
+    ['firecrawl_search',{query:'synthetic fixture',limit:2,scrapeOptions:{formats:['markdown'],includeTags:['article']}},'POST','/v2/search'],
     ['firecrawl_map',{url:fixtureUrl,limit:2},'POST','/v2/map'],
     ['firecrawl_crawl',{url:fixtureUrl,limit:2,maxConcurrency:1,scrapeOptions:{formats:['markdown']}},'POST','/v2/crawl'],
     ['firecrawl_check_crawl_status',{id},'GET','/v2/crawl/'+id],
@@ -235,6 +236,11 @@ try{
     const offset=traffic.length;
     const reply=await rpc('tools/call',{name,arguments:args});
     const captured=traffic.slice(offset);
+    if(name==='firecrawl_search'&&args.scrapeOptions){
+      const request=captured.find(x=>x.method===method&&x.path===path)?.body;
+      assert.deepEqual(request?.scrapeOptions?.formats,args.scrapeOptions.formats);
+      assert.deepEqual(request?.scrapeOptions?.includeTags,args.scrapeOptions.includeTags);
+    }
     if(args.includeTags){
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;
       assert.equal(request?.url,args.url);

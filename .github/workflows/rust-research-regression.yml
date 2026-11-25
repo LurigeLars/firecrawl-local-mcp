@@ -55,6 +55,38 @@ jobs:
             --entrypoint /usr/local/bin/pdf-ocr-service firecrawl-rust-ocr-ci:review)
           trap 'docker rm -f "$cid" >/dev/null' EXIT
           timeout 100s docker exec "$cid" python3 -B /research/verify-ocr-service.py
+      - name: Live PDF through isolated OCR sidecar (separate evidence)
+        id: live_pdf
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          net="fc-pdf-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          worker=""
+          candidate=""
+          cleanup() {
+            if [ -n "$candidate" ]; then docker rm -f "$candidate" >/dev/null || true; fi
+            if [ -n "$worker" ]; then docker rm -f "$worker" >/dev/null || true; fi
+            docker network rm "$net" >/dev/null || true
+          }
+          docker network create --internal "$net" >/dev/null
+          trap cleanup EXIT
+          worker=$(docker run -d --pull=never --network "$net" --network-alias pdf-ocr --read-only --init=false \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777 \
+            --entrypoint /usr/local/bin/pdf-ocr-service firecrawl-rust-ocr-ci:review)
+          candidate=$(docker create --pull=never --network "$net" --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --mount type=bind,source="$PWD/research/verify-pdf-sidecar.py",target=/tmp/verify-pdf-sidecar.py,readonly \
+            --entrypoint sh firecrawl-rust-ocr-ci:review -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_PDF_ENABLED=1; exec /usr/local/bin/candidate-main')
+          docker network connect bridge "$candidate"
+          docker start "$candidate" >/dev/null
+          test "$(docker network inspect --format '{{.Internal}}' "$net")" = true
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$worker")" = 1
+          test "$(docker inspect --format '{{len .Mounts}}' "$worker")" = 0
+          timeout 135s docker exec "$candidate" python3 -B /tmp/verify-pdf-sidecar.py
       - name: Smoke actual isolated candidate server process
         run: |
           timeout 75s docker run --rm --pull=never --network none --read-only \
@@ -132,6 +164,7 @@ jobs:
             echo 'Live public-source sample outcome = ${{ steps.live_sample.outcome }} (not offline acceptance)'
             echo 'Live durable jobs outcome = ${{ steps.live_jobs.outcome }} (not offline acceptance)'
             echo 'Live locked MCP outcome = ${{ steps.live_mcp.outcome }} (not offline acceptance)'
+            echo 'Live isolated PDF sidecar outcome = ${{ steps.live_pdf.outcome }} (not offline acceptance)'
           } >> "$GITHUB_STEP_SUMMARY"
 
   durable-job-store:
