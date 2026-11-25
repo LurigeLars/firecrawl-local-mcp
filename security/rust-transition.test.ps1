@@ -73,8 +73,18 @@ function Get-RustStoppedQueueCount {
     if ($script:failInspection) { throw 'Synthetic unavailable count.' }
     return $script:jobs
 }
-function Import-ServiceRuntimeSecrets { $script:events.Add('restore-runtime') }
+function Import-PostgresRuntimeSecret([string[]]$Services) {
+    foreach ($service in $Services) { $script:events.Add("restore-pg:$service") }
+}
+function Import-SearchRuntimeSecret { $script:events.Add('restore-search') }
 function Test-PostgresRuntimePassword { $script:events.Add('pg-auth');return $true }
+$script:rabbitAttempts=0
+function Test-LegacyRabbitListener {
+    $script:events.Add('rabbit-ready')
+    $script:rabbitAttempts++
+    return ($script:rabbitAttempts -gt 1)
+}
+function Start-Sleep([int]$Seconds) { $script:events.Add("wait:$Seconds") }
 function Wait-LegacyTransitionHealth { $script:events.Add('legacy-health') }
 function Invoke-TransitionMcpProbe([string]$ProjectRoot,[string]$Backend,[string]$Mode) {
     if ($Backend -cne 'legacy') { throw 'Unexpected backend.' }
@@ -119,7 +129,7 @@ try {
     $script:jobs=0;$script:failInspection=$false
     $receipt=Restore-LegacyTransition -LegacyCompose @('compose','-p','firecrawl') -ProjectRoot 'synthetic' -Journal $journal
     if ($receipt -cne 'RUST_ROLLBACK_LEGACY_VERIFIED' -or (Test-Path -LiteralPath (Get-TransitionPath 'rust-transition.lock'))) { throw 'Successful rollback receipt failed.' }
-    $expected='stop:gateway,stop:mcp,stop:api,rust-queue-count,stop:pdf-ocr,original:redis,original:rabbitmq,original:nuq-postgres,tag:firecrawl-api:latest,tag:firecrawl-mcp:latest,legacy-recreate:api,restore-runtime,pg-auth,legacy-health,legacy-recreate:mcp,legacy-mcp,original:gateway'
+    $expected='stop:gateway,stop:mcp,stop:api,rust-queue-count,stop:pdf-ocr,original:redis,original:rabbitmq,original:nuq-postgres,restore-pg:nuq-postgres,pg-auth,rabbit-ready,wait:2,pg-auth,rabbit-ready,tag:firecrawl-api:latest,tag:firecrawl-mcp:latest,legacy-recreate:api,restore-pg:api,restore-search,legacy-health,legacy-recreate:mcp,legacy-mcp,original:gateway'
     if (($script:events -join ',') -cne $expected) { throw 'Rollback orchestration changed.' }
     'RUST_ROLLBACK_ORCHESTRATION_FIXTURE_PASS'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

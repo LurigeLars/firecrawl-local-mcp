@@ -101,7 +101,25 @@ function Get-RustStoppedQueueCount {
     # Only the stopped production Rust database, no network and no payload.
     # The pinned Node image is already used by rust-init. Read-only SQLite
     # connection and volume; do not acquire the normal worker's write lock.
-    $code = "const {DatabaseSync}=require('node:sqlite'),fs=require('node:fs'); if(!fs.existsSync('/state/jobs.sqlite')){if(fs.existsSync('/state/jobs.sqlite-wal')||fs.existsSync('/state/jobs.sqlite-shm'))process.exit(1); console.log('MISSING');process.exit(0);} const db=new DatabaseSync('/state/jobs.sqlite',{readOnly:true}); const n=db.prepare(""SELECT count(*) AS n FROM jobs WHERE status='scraping'"").get().n; if(!Number.isSafeInteger(n)||n<0)process.exit(1); console.log(n); db.close();"
+    $code = @'
+const { DatabaseSync } = require('node:sqlite');
+const fs = require('node:fs');
+const path = '/state/jobs.sqlite';
+const hasWalState = fs.existsSync(path + '-wal') || fs.existsSync(path + '-shm');
+if (!fs.existsSync(path)) {
+    if (hasWalState) process.exit(1);
+    console.log('MISSING');
+    process.exit(0);
+}
+// A cleanly stopped WAL database has no companion files. SQLite otherwise
+// needs a writable directory to create a shared-memory file even for reads.
+const source = hasWalState ? path : 'file:/state/jobs.sqlite?mode=ro&immutable=1';
+const db = new DatabaseSync(source, { readOnly: true });
+const { n } = db.prepare("SELECT count(*) AS n FROM jobs WHERE status='scraping'").get();
+db.close();
+if (!Number.isSafeInteger(n) || n < 0) process.exit(1);
+console.log(n);
+'@
     $count = Invoke-McpDocker -Arguments @('run','--rm','--pull','never','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--user','65532:65532','--mount','type=volume,source=firecrawl_rust-jobs,target=/state,readonly','node:26.13.1-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5','node','--no-warnings','-e',$code) -TimeoutSeconds 30
     if ($count -ceq 'MISSING' -and (Get-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Raw).Trim() -ceq 'rust-pending-v1') { return [int64]0 }
     if ($count -cnotmatch '^[0-9]{1,18}$') { throw 'Invalid Rust queue count.' }
@@ -113,10 +131,17 @@ function Invoke-TransitionMcpProbe([string]$ProjectRoot,[string]$Backend,[string
     $params = @('exec','-i','firecrawl-mcp-1','node','--input-type=module','-',$Backend)
     if ($Mode) { $params += $Mode }
     $lines = @($source | & docker @params 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw 'Transition MCP probe failed.' }
-    try { $receipt = ($lines -join [Environment]::NewLine) | ConvertFrom-Json }
+    $exitCode = $LASTEXITCODE
+    try { $receipt = ($lines -join [Environment]::NewLine) | ConvertFrom-Json -AsHashtable }
     catch { throw 'Invalid transition MCP receipt.' }
-    if ($receipt.verdict -cne 'PASS' -or $receipt.backend -cne $Backend) { throw 'Transition MCP acceptance failed.' }
+    if ($receipt -isnot [System.Collections.IDictionary]) { throw 'Invalid transition MCP receipt.' }
+    if ($exitCode -eq 0 -and $receipt['verdict'] -ceq 'PASS' -and $receipt['backend'] -ceq $Backend) { return }
+    $reason = $receipt['reason']
+    if ($Mode -ceq '--search' -and $receipt['backend'] -ceq $Backend -and
+        $reason -cin @('no_hits','invalid_hits','transport_or_envelope')) {
+        Write-Host "RUST_MCP_SEARCH_UNVERIFIED reason=$reason"
+    }
+    throw 'Transition MCP acceptance failed.'
 }
 
 function Wait-LegacyTransitionHealth {
@@ -128,6 +153,11 @@ function Wait-LegacyTransitionHealth {
         Start-Sleep -Seconds 2
     }
     throw 'Legacy API did not recover.'
+}
+
+function Test-LegacyRabbitListener {
+    & docker exec firecrawl-rabbitmq-1 rabbitmq-diagnostics -q -t 4 check_port_connectivity 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Restore-LegacyTransition([string[]]$LegacyCompose,[string]$ProjectRoot,$Journal) {
@@ -165,6 +195,14 @@ function Restore-LegacyTransition([string[]]$LegacyCompose,[string]$ProjectRoot,
     foreach ($service in @('redis','rabbitmq','nuq-postgres')) {
         Start-OriginalTransitionService -Service $service -Id $legacy[$service].id -Image $legacy[$service].image
     }
+    # A Legacy API restart clears its tmpfs password. Wait for its
+    # dependencies before starting the API and injecting that password.
+    Import-PostgresRuntimeSecret -Services @('nuq-postgres')
+    for ($i=0;$i -lt 30;$i++) {
+        if ((Test-PostgresRuntimePassword) -and (Test-LegacyRabbitListener)) { break }
+        Start-Sleep -Seconds 2
+    }
+    if ($i -eq 30) { throw 'Legacy PostgreSQL or RabbitMQ did not become ready.' }
     foreach ($service in @('api','mcp')) {
         $tag="firecrawl-$($service):rust-transition-backup"
         if ((Get-TransitionImageId $tag) -cne $legacy[$service].image) { throw 'Preserved rollback image differs.' }
@@ -177,13 +215,8 @@ function Restore-LegacyTransition([string[]]$LegacyCompose,[string]$ProjectRoot,
     } else {
         $null=Invoke-McpDocker -Arguments ($LegacyCompose + @('up','-d','--no-deps','--no-build','--pull','never','--force-recreate','api')) -TimeoutSeconds 180
     }
-    # Caller uses the original fc.ps1 Compose arguments and DPAPI functions.
-    Import-ServiceRuntimeSecrets
-    for ($i=0;$i -lt 30;$i++) {
-        if (Test-PostgresRuntimePassword) { break }
-        Start-Sleep -Seconds 2
-    }
-    if ($i -eq 30) { throw 'Legacy PostgreSQL runtime authentication failed.' }
+    Import-PostgresRuntimeSecret -Services @('api')
+    Import-SearchRuntimeSecret
     Wait-LegacyTransitionHealth
     $null=Invoke-McpDocker -Arguments ($LegacyCompose + @('up','-d','--no-deps','--no-build','--pull','never','--force-recreate','mcp')) -TimeoutSeconds 180
     foreach ($service in @('api','mcp')) {
@@ -247,6 +280,7 @@ function Invoke-RustPromotion {
     $stream=[IO.File]::Open($journalPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
     try { $stream.Write($bytes,0,$bytes.Length);$stream.Flush($true) } finally { $stream.Dispose() }
     Write-TransitionMarker -Value 'rust-pending-v1' -New
+    $promotionStage='drain-legacy'
     try {
         Stop-TransitionService gateway
         Stop-TransitionService mcp
@@ -255,6 +289,7 @@ function Invoke-RustPromotion {
         $queue=Get-LegacyQueueReceipt
         if (@($queue.Values | Where-Object {$_ -ne 0}).Count) { throw 'Legacy jobs remain after ingress stopped.' }
         foreach ($service in @('rabbitmq','nuq-postgres','redis')) { Stop-TransitionService $service }
+        $promotionStage='start-rust'
         $null=Invoke-McpDocker -Arguments ($rustCompose+@('up','-d','--no-deps','--no-build','--pull','never','rust-init')) -TimeoutSeconds 120
         $exit=Invoke-McpDocker -Arguments @('wait','firecrawl-rust-init-1') -TimeoutSeconds 60
         if ($exit -cne '0') { throw 'Rust credential/job initialization failed.' }
@@ -265,6 +300,7 @@ function Invoke-RustPromotion {
         }
         # Token is captured by the dedicated local DPAPI script, never
         # passed as an argument, written to stdout or copied into the repo.
+        $promotionStage='local-client'
         & (Join-Path $ProjectRoot 'local-mcp/rust-client.ps1') -Mode Import | Out-Null
         $authReady=$false
         for ($i=0;$i -lt 15;$i++) {
@@ -280,21 +316,26 @@ function Invoke-RustPromotion {
         if (-not $authReady) { throw 'Rust loopback authentication check failed.' }
         & node (Join-Path $ProjectRoot 'local-mcp/verify-rust-client.mjs')
         if ($LASTEXITCODE -ne 0) { throw 'Actual local Rust client test failed.' }
+        $promotionStage='start-mcp'
         Set-TransitionTag -Id $candidate.mcp -Tag 'firecrawl-mcp:latest'
         $null=Invoke-McpDocker -Arguments ($rustCompose+@('up','-d','--no-deps','--no-build','--pull','never','--force-recreate','mcp')) -TimeoutSeconds 180
         $state=Get-TransitionService mcp
         if ($null -eq $state -or -not $state.running -or $state.image -cne $candidate.mcp) { throw 'Rust MCP image differs.' }
+        $promotionStage='mcp-search'
         Invoke-TransitionMcpProbe -ProjectRoot $ProjectRoot -Backend candidate -Mode '--search'
+        $promotionStage='configured-model'
         $modelSource=Get-Content -LiteralPath (Join-Path $ProjectRoot 'research/verify-live-model.mjs') -Raw
         $modelResult=@($modelSource | & docker exec -i firecrawl-mcp-1 node --input-type=module - 2>$null)
         if ($LASTEXITCODE -ne 0 -or ($modelResult -join '') -cnotmatch '^RUST_LIVE_MODEL_PASS provider=(gemini|ollama)$') { throw 'Configured model route not verified.' }
         $modelResult
+        $promotionStage='open-gateway'
         Write-TransitionMarker -Value 'rust-active-v1'
         Start-OriginalTransitionService -Service gateway -Id $legacy.gateway.id -Image $legacy.gateway.image
         'RUST_PROMOTION_LOCAL_VERIFIED'
     } catch {
         # All failures before gateway reopening use the same reviewed rollback.
         # Do not include native errors/response bodies in the returned receipt.
+        Write-Host "RUST_PROMOTION_FAILED stage=$promotionStage"
         try { Restore-LegacyTransition -LegacyCompose $LegacyCompose -ProjectRoot $ProjectRoot -Journal $j }
         catch { throw 'Rust promotion and automatic rollback failed; marker retained. Inspect local services before further changes.' }
         throw 'Rust promotion failed; verified Legacy restored.'

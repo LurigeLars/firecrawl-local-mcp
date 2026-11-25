@@ -462,10 +462,10 @@ function Import-SearchRuntimeSecret {
     if ($LASTEXITCODE -ne 0) { throw 'SearXNG runtime secret verification failed.' }
 }
 
-function Import-ServiceRuntimeSecrets {
+function Import-PostgresRuntimeSecret([string[]]$Services) {
     $postgres = Get-DpapiSecretValue -Path $PostgresDpapiPath -Label "PostgreSQL"
     try {
-        foreach ($service in @("api", "nuq-postgres")) {
+        foreach ($service in $Services) {
             $serviceId = (& docker @compose ps -q $service).Trim()
             if (-not $serviceId) { throw "$service is not running; cannot restore PostgreSQL runtime secret." }
             $secretArgs = $compose + @(
@@ -478,10 +478,14 @@ function Import-ServiceRuntimeSecrets {
         }
     }
     finally { $postgres = $null }
-    foreach ($service in @("api", "nuq-postgres")) {
+    foreach ($service in $Services) {
         & docker @compose exec -T $service sh -c 'test -s /run/firecrawl-secrets/postgres_password'
         if ($LASTEXITCODE -ne 0) { throw "PostgreSQL runtime secret verification failed for $service." }
     }
+}
+
+function Import-ServiceRuntimeSecrets {
+    Import-PostgresRuntimeSecret -Services @("api", "nuq-postgres")
     Import-SearchRuntimeSecret
 }
 
