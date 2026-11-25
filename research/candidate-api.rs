@@ -679,14 +679,16 @@ async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:
             // One bounded, fixed public fallback already used by legacy.
             // No fallback on proxy transport/security errors or provider blocks.
             let remaining=deadline.saturating_duration_since(tokio::time::Instant::now()).min(Duration::from_secs(10));
+            value["research"]["fallback_status"]=json!(if remaining.is_zero(){"deadline_exhausted"}else{"unsupported_locale"});
             if let Some(url)=search::fallback_url(&req).filter(|_|!remaining.is_zero()){
-                value["research"]["fallback_status"]=json!("unavailable");
+                value["research"]["fallback_status"]=json!("transport_unverified");
                 let fetch_options=crate::fetch::FetchOptions{
                     timeout:Some(remaining),..Default::default()
                 };
                 let fetch=state.crawler.fetcher.fetch_once_limited(&url,&fetch_options,512*1024);
                 match tokio::time::timeout(remaining,fetch).await{
                     Ok(Ok(res)) if res.status==200&&res.final_url==url&&res.mime().as_deref()==Some("text/html")=>{
+                        value["research"]["fallback_http_status"]=json!(200);
                         let html=res.text();
                         let work=tokio::task::spawn_blocking(move||{
                             let status=search::apply_fallback(&mut value,&req,&html);
@@ -696,8 +698,23 @@ async fn search_route(State(state):State<CandidateState>,headers:HeaderMap,body:
                         // Keep the admission slot until bounded parsing completes.
                         value=work.await.map_err(|_|StatusCode::BAD_GATEWAY)?;
                     },
-                    Ok(Ok(res)) if matches!(res.status,401|403|429|503)=>value["research"]["fallback_status"]=json!("provider_unavailable"),
-                    _=>{}
+                    Ok(Ok(res))=>{
+                        // Only bounded enum/status evidence. Never log URLs,
+                        // redirect locations, response bodies or error strings.
+                        value["research"]["fallback_http_status"]=json!(res.status);
+                        let reason=match res.status{
+                            202|401|403|429|503=>"provider_unavailable",
+                            301|302|303|307|308=>"redirect_refused",
+                            200 if res.final_url!=url=>"unexpected_destination",
+                            200=>"unexpected_content_type",
+                            _=>"unexpected_http_status"
+                        };
+                        value["research"]["fallback_status"]=json!(reason);
+                    },
+                    Ok(Err(crate::fetch::FetchError::Blocked(_)))=>value["research"]["fallback_status"]=json!("destination_denied"),
+                    Ok(Err(crate::fetch::FetchError::TooLarge))=>value["research"]["fallback_status"]=json!("response_too_large"),
+                    Ok(Err(crate::fetch::FetchError::Timeout))|Err(_)=>value["research"]["fallback_status"]=json!("timeout"),
+                    Ok(Err(_))=>value["research"]["fallback_status"]=json!("transport_failed"),
                 }
             }
         }
