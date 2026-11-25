@@ -40,6 +40,23 @@ const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_S ?? 60) * 1000;
 const GEMINI_PAUSE_MS = Number(process.env.GEMINI_PAUSE_S ?? 60) * 1000;
 let geminiPausedUntil = 0;
 
+// Fixed-cardinality usage events in existing Docker logs. No request data,
+// model names, URLs, tokens, IDs or provider error messages. Each attempt
+// gets at most one terminal event; interrupted processes may lack one.
+const GENERATION_PATHS = new Set(['/v1/responses', '/v1/chat/completions', '/v1/completions', '/api/chat', '/api/generate']);
+export function beginUsage(provider, fallback = false) {
+  if (!['gemini', 'ollama'].includes(provider) || typeof fallback !== 'boolean') throw new Error('Invalid usage category');
+  const log = outcome => console.log(`llm_usage ${JSON.stringify({ provider, outcome, fallback })}`);
+  log('attempt');
+  let finished = false;
+  return outcome => {
+    if (finished) return;
+    if (!['completed', 'incomplete', 'failed', 'rate_limited', 'http_ok', 'http_error', 'transport_error', 'aborted'].includes(outcome)) throw new Error('Invalid usage outcome');
+    finished = true;
+    log(outcome);
+  };
+}
+
 // Collects references to every string in message/input content (not schemas or options).
 function textSlots(body) {
   const slots = [];
@@ -168,8 +185,7 @@ async function askGemini(chat, apiKey) {
 }
 
 // Returns a Responses JSON body from Gemini, or null to use the local model.
-async function tryGemini(path, raw, strict = false) {
-  const geminiApiKey = readGeminiApiKey();
+export async function tryGemini(path, raw, strict = false, usage = {}, geminiApiKey = readGeminiApiKey()) {
   if (!geminiApiKey || path !== '/v1/responses' || Date.now() < geminiPausedUntil) return null;
   let request, chat;
   try { request = JSON.parse(raw.toString('utf8')); chat = responsesToChat(request); } catch { return null; }
@@ -177,11 +193,16 @@ async function tryGemini(path, raw, strict = false) {
   if (strict && !fitsContext(chat, GEMINI_MAX_CHARS)) return null;
   if (!strict) trim(chat, GEMINI_MAX_CHARS);
   const started = Date.now();
+  const finish = beginUsage('gemini');
   try {
     const answer = await askGemini(chat, geminiApiKey);
+    const result = chatToResponses(answer, request);
+    finish(result.status);
     console.log(`${new Date().toISOString()} gemini ok in ${Date.now() - started} ms`);
-    return chatToResponses(answer, request);
+    return result;
   } catch (err) {
+    finish(err.status === 429 ? 'rate_limited' : 'failed');
+    usage.geminiFailed = true;
     if (err.status === 429) geminiPausedUntil = Date.now() + GEMINI_PAUSE_MS;
     console.warn(`${new Date().toISOString()} gemini failed, using local model`);
     return null;
@@ -196,7 +217,7 @@ function rejectStrict(res,status,code) {
   res.end(JSON.stringify({error:code}));
 }
 
-function forwardLocal(req, res, body, strict = false, parsed = null) {
+export function forwardLocal(req, res, body, strict = false, parsed = null, usage = {}) {
   const ct = req.headers['content-type'] ?? '';
   if (strict && !fitsContext(parsed,MAX_CHARS)) return rejectStrict(res,422,'STRICT_CONTEXT_LIMIT');
   if (!strict && req.method === 'POST' && ct.includes('application/json') && body.length > MAX_CHARS) {
@@ -213,20 +234,26 @@ function forwardLocal(req, res, body, strict = false, parsed = null) {
   delete headers[CONTRACT_HEADER];
   delete headers['x-firecrawl-input-trimmed'];
   delete headers['x-firecrawl-model-provider'];
+  const generation = req.method === 'POST' && GENERATION_PATHS.has(new URL(req.url, 'http://x').pathname);
+  const finish = generation ? beginUsage('ollama', usage.geminiFailed === true) : () => {};
   const up = http.request(
     { hostname: UPSTREAM.hostname, port: UPSTREAM.port, method: req.method, path: req.url, headers },
     upRes => {
       const responseHeaders={...upRes.headers};
       for (const key of Object.keys(strictHeaders('ollama'))) delete responseHeaders[key];
       if (strict) Object.assign(responseHeaders,strictHeaders('ollama'));
+      upRes.once('end', () => finish(upRes.statusCode >= 200 && upRes.statusCode < 300 ? 'http_ok' : 'http_error'));
+      upRes.once('aborted', () => finish('aborted'));
+      upRes.once('error', () => { finish('transport_error'); res.destroy(); });
       res.writeHead(upRes.statusCode ?? 502,responseHeaders);upRes.pipe(res);
     },
   );
   up.on('error', err => {
+    finish('transport_error');
     console.warn('upstream error');
     if (!res.headersSent) { res.writeHead(502); res.end('ollama unavailable'); } else res.destroy();
   });
-  res.on('close', () => { if (!res.writableFinished) up.destroy(); });
+  res.on('close', () => { if (!res.writableFinished) { finish('aborted'); up.destroy(); } });
   up.end(body);
 }
 
@@ -257,8 +284,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         try {parsed=JSON.parse(body.toString('utf8'));} catch {return rejectStrict(res,400,'INVALID_STRICT_JSON');}
         if (!validStrictRequest(parsed)) return rejectStrict(res,400,'INVALID_STRICT_REQUEST');
       }
-      const answer = req.method === 'POST' ? await tryGemini(new URL(req.url, 'http://x').pathname, body,strict) : null;
-      if (!answer) return forwardLocal(req, res, body,strict,parsed);
+      const usage = {};
+      const answer = req.method === 'POST' ? await tryGemini(new URL(req.url, 'http://x').pathname, body,strict,usage) : null;
+      if (!answer) return forwardLocal(req, res, body,strict,parsed,usage);
       const out = JSON.stringify(answer);
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(out),
         ...(strict?strictHeaders('gemini'):{}) });

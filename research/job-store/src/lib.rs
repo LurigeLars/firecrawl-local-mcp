@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::{fs::{File,OpenOptions}, path::Path, time::{Duration,SystemTime,UNIX_EPOCH}};
 
 const MAX_JOBS: i64 = 16;
+pub const MAX_WORKERS: i64 = 3;
 const MAX_ITEMS: usize = 100;
 const MAX_DOC: usize = 64 * 1024;
 const MAX_PAGE: usize = 128 * 1024;
@@ -24,7 +25,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone)]
 pub struct Claim { job: String, item: String, generation: i64, crawl: Option<CrawlClaim> }
 #[derive(Debug, Clone)]
-pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32, pub include_sitemap: bool, pub page_limit: u32, pub policy_json: String }
+pub struct CrawlClaim { pub seed: String, pub depth: u32, pub max_depth: u32, pub include_sitemap: bool, pub page_limit: u32, pub policy_json: String, pub max_concurrency:u32 }
 impl Claim {
     pub fn item(&self) -> &str { &self.item }
     pub fn job(&self)->&str { &self.job }
@@ -57,7 +58,7 @@ impl Store {
         db.busy_timeout(Duration::from_secs(2))?;
         let version:i64=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         let tables:i64=db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0))?;
-        if !matches!(version,1|2|3|4) && !(version==0 && tables==0) {
+        if !matches!(version,1|2|3|4|5) && !(version==0 && tables==0) {
             return Err(Error::Invalid("unsupported store schema"));
         }
         db.execute_batch("
@@ -84,7 +85,8 @@ impl Store {
                 seed TEXT NOT NULL, page_limit INTEGER NOT NULL CHECK(page_limit BETWEEN 1 AND 100),
                 max_depth INTEGER NOT NULL CHECK(max_depth BETWEEN 0 AND 10),
                 include_sitemap INTEGER NOT NULL DEFAULT 0 CHECK(include_sitemap IN (0,1)),
-                policy_json TEXT NOT NULL DEFAULT '{}'
+                policy_json TEXT NOT NULL DEFAULT '{}',
+                max_concurrency INTEGER NOT NULL DEFAULT 1 CHECK(max_concurrency BETWEEN 1 AND 4)
             );")?;
         if version==1 {
             db.execute_batch("ALTER TABLE items ADD COLUMN depth INTEGER NOT NULL DEFAULT 0 CHECK(depth BETWEEN 0 AND 10);")?;
@@ -95,7 +97,10 @@ impl Store {
         if matches!(version,2|3) {
             db.execute_batch("ALTER TABLE crawl_jobs ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}';")?;
         }
-        db.execute_batch("PRAGMA user_version=4; COMMIT;")?;
+        if matches!(version,2|3|4){
+            db.execute_batch("ALTER TABLE crawl_jobs ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 1 CHECK(max_concurrency BETWEEN 1 AND 4);")?;
+        }
+        db.execute_batch("PRAGMA user_version=5; COMMIT;")?;
         let journal:String=db.query_row("PRAGMA journal_mode",[],|r|r.get(0))?;
         if !journal.eq_ignore_ascii_case("wal") {return Err(Error::Invalid("WAL unavailable"));}
         let mut store=Self {db,_owner:owner};
@@ -118,15 +123,20 @@ impl Store {
 
     pub fn create_crawl_configured(&mut self,id:&str,seed:&str,limit:usize,max_depth:u32,
         include_sitemap:bool,policy:&Value)->Result<()> {
-        if !(1..=MAX_ITEMS).contains(&limit) || max_depth>10 {
+        self.create_crawl_parallel(id,seed,limit,max_depth,include_sitemap,policy,1)
+    }
+
+    pub fn create_crawl_parallel(&mut self,id:&str,seed:&str,limit:usize,max_depth:u32,
+        include_sitemap:bool,policy:&Value,max_concurrency:u32)->Result<()> {
+        if !(1..=MAX_ITEMS).contains(&limit) || max_depth>10 || !(1..=4).contains(&max_concurrency) {
             return Err(Error::Invalid("invalid crawl limits"));
         }
         let raw=serde_json::to_string(policy)?;
         if !policy.is_object()||raw.len()>8192{return Err(Error::Invalid("invalid crawl policy"));}
-        self.create_job(id,&[seed.to_owned()],Some((seed,limit,max_depth,include_sitemap,&raw)))
+        self.create_job(id,&[seed.to_owned()],Some((seed,limit,max_depth,include_sitemap,&raw,max_concurrency)))
     }
 
-    fn create_job(&mut self,id:&str,keys:&[String],crawl:Option<(&str,usize,u32,bool,&str)>)->Result<()> {
+    fn create_job(&mut self,id:&str,keys:&[String],crawl:Option<(&str,usize,u32,bool,&str,u32)>)->Result<()> {
         if id.is_empty() || id.len() > 128 || keys.is_empty() || keys.len() > MAX_ITEMS ||
             keys.iter().any(|k| k.is_empty() || k.len() > 8192) {
             return Err(Error::Invalid("invalid batch"));
@@ -137,9 +147,9 @@ impl Store {
         let count: i64 = tx.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))?;
         if count >= MAX_JOBS { return Err(Error::Invalid("job store full")); }
         tx.execute("INSERT INTO jobs(id,status,created_at) VALUES(?1,'scraping',?2)",params![id,now])?;
-        if let Some((seed,limit,max_depth,include_sitemap,policy))=crawl {
-            tx.execute("INSERT INTO crawl_jobs(job,seed,page_limit,max_depth,include_sitemap,policy_json) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![id,seed,limit as i64,max_depth,include_sitemap,policy])?;
+        if let Some((seed,limit,max_depth,include_sitemap,policy,max_concurrency))=crawl {
+            tx.execute("INSERT INTO crawl_jobs(job,seed,page_limit,max_depth,include_sitemap,policy_json,max_concurrency) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![id,seed,limit as i64,max_depth,include_sitemap,policy,max_concurrency])?;
         }
         for (i, key) in keys.iter().enumerate() {
             tx.execute("INSERT INTO items(job,key,ordinal,state) VALUES(?1,?2,?3,'queued')",
@@ -149,12 +159,18 @@ impl Store {
         Ok(())
     }
 
-    /// The single scheduler can find queued work after process restart without
-    /// remembering any job IDs in memory. Admission is oldest-job first.
+    // Choose an eligible job, then reserve a distinct item transactionally.
+    // The one process owns this connection behind a mutex. The claim query
+    // independently rechecks the job cap and breadth-first barrier.
     pub fn claim_next(&mut self)->Result<Option<Claim>> {
         let id:Option<String>=self.db.query_row("SELECT jobs.id FROM jobs JOIN items ON items.job=jobs.id
-            WHERE jobs.status='scraping' AND items.state='queued' ORDER BY jobs.created_at,jobs.id,items.ordinal LIMIT 1",
-            [],|r|r.get(0)).optional()?;
+            LEFT JOIN crawl_jobs c ON c.job=jobs.id
+            WHERE jobs.status='scraping' AND items.state='queued'
+            AND (SELECT COUNT(*) FROM items r WHERE r.job=jobs.id AND r.state='running')<MIN(COALESCE(c.max_concurrency,?1),?1)
+            AND (c.job IS NULL OR NOT EXISTS(SELECT 1 FROM items p WHERE p.job=jobs.id
+                AND p.state IN ('queued','running') AND p.depth<items.depth))
+            ORDER BY jobs.created_at,jobs.id,items.depth,items.ordinal LIMIT 1",
+            [MAX_WORKERS],|r|r.get(0)).optional()?;
         match id {Some(id)=>self.claim(&id),None=>Ok(None)}
     }
 
@@ -162,11 +178,16 @@ impl Store {
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let next: Option<(String,i64,u32)> = tx.query_row(
             "SELECT items.key,generation,depth FROM items JOIN jobs ON jobs.id=items.job
+             LEFT JOIN crawl_jobs c ON c.job=jobs.id
              WHERE items.job=?1 AND jobs.status='scraping' AND items.state='queued'
-             ORDER BY ordinal LIMIT 1", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+             AND (SELECT COUNT(*) FROM items r WHERE r.job=jobs.id AND r.state='running')<MIN(COALESCE(c.max_concurrency,?2),?2)
+             AND (c.job IS NULL OR NOT EXISTS(SELECT 1 FROM items p WHERE p.job=jobs.id
+                AND p.state IN ('queued','running') AND p.depth<items.depth))
+             ORDER BY depth,ordinal LIMIT 1", params![id,MAX_WORKERS], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let Some((item, old,depth)) = next else { return Ok(None); };
-        let crawl=tx.query_row("SELECT seed,max_depth,include_sitemap,page_limit,policy_json FROM crawl_jobs WHERE job=?1",[id],
-            |r|Ok(CrawlClaim{seed:r.get(0)?,depth,max_depth:r.get(1)?,include_sitemap:r.get(2)?,page_limit:r.get(3)?,policy_json:r.get(4)?})).optional()?;
+        let crawl=tx.query_row("SELECT seed,max_depth,include_sitemap,page_limit,policy_json,max_concurrency FROM crawl_jobs WHERE job=?1",[id],
+            |r|Ok(CrawlClaim{seed:r.get(0)?,depth,max_depth:r.get(1)?,include_sitemap:r.get(2)?,page_limit:r.get(3)?,
+                policy_json:r.get(4)?,max_concurrency:r.get(5)?})).optional()?;
         let generation = old.checked_add(1).ok_or(Error::Invalid("claim generation exhausted"))?;
         tx.execute("UPDATE items SET state='running',generation=?3 WHERE job=?1 AND key=?2",
             params![id,item,generation])?;
@@ -283,9 +304,9 @@ impl Store {
         }
         self.purge_expired()?;
         let tx=self.db.transaction()?;
-        let (status,created,finished,include_sitemap):(String,i64,Option<i64>,bool)=tx.query_row(
-            "SELECT jobs.status,created_at,finished_at,include_sitemap FROM jobs JOIN crawl_jobs ON crawl_jobs.job=jobs.id WHERE jobs.id=?1",
-            [id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(Error::Invalid("job not found"))?;
+        let (status,created,finished,include_sitemap,max_concurrency):(String,i64,Option<i64>,bool,i64)=tx.query_row(
+            "SELECT jobs.status,created_at,finished_at,include_sitemap,max_concurrency FROM jobs JOIN crawl_jobs ON crawl_jobs.job=jobs.id WHERE jobs.id=?1",
+            [id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Error::Invalid("job not found"))?;
         let (total,succeeded,failed,cancelled,attempts):(i64,i64,i64,i64,i64)=tx.query_row(
             "SELECT COUNT(*),SUM(state='done'),SUM(state='failed'),SUM(state='cancelled'),COALESCE(SUM(generation),0)
              FROM items WHERE job=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
@@ -316,6 +337,8 @@ impl Store {
             "data":docs,"next_skip":next,"created_at":created,"finished_at":finished,
             "expires_at":expiry,"research":{"discovered":total,"failed":failed,"cancelled":cancelled,
             "page_attempts":attempts,"sitemap_mode":if include_sitemap{"include"}else{"skip"},
+                "requested_max_concurrency":max_concurrency,"worker_concurrency_cap":max_concurrency.min(MAX_WORKERS),
+                "same_domain_network_concurrency":1,
                 "site_coverage_verified":false,"cache_used":false}});
         tx.commit()?;
         Ok(value)
@@ -534,7 +557,7 @@ mod tests {
         let mut db=Store::open(&tmp.db()).unwrap();
         db.create_crawl("legacy","old",2,1).unwrap();
         // Simulate exact previous schema, without changing existing jobs.
-        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN policy_json; ALTER TABLE crawl_jobs DROP COLUMN include_sitemap; PRAGMA user_version=2;").unwrap();
+        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN max_concurrency; ALTER TABLE crawl_jobs DROP COLUMN policy_json; ALTER TABLE crawl_jobs DROP COLUMN include_sitemap; PRAGMA user_version=2;").unwrap();
         drop(db);
         let mut db=Store::open(&tmp.db()).unwrap();
         let old=db.claim("legacy").unwrap().unwrap();
@@ -568,7 +591,7 @@ mod tests {
         let tmp=Temp::new();
         let mut db=Store::open(&tmp.db()).unwrap();
         db.create_crawl_with_sitemap("old","seed",2,1,true).unwrap();
-        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN policy_json; PRAGMA user_version=3;").unwrap();
+        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN max_concurrency; ALTER TABLE crawl_jobs DROP COLUMN policy_json; PRAGMA user_version=3;").unwrap();
         drop(db);
         let mut db=Store::open(&tmp.db()).unwrap();
         let old=db.claim("old").unwrap().unwrap();
@@ -586,6 +609,46 @@ mod tests {
         let next=db.claim("new").unwrap().unwrap();
         assert_eq!(next.item(),"next");
         assert_eq!(serde_json::from_str::<Value>(&next.crawl().unwrap().policy_json).unwrap(),policy);
+    }
+
+    #[test]
+    fn crawl_parallel_caps_depth_barrier_and_v4_migration(){
+        let tmp=Temp::new();
+        let mut db=Store::open(&tmp.db()).unwrap();
+        db.create_crawl("legacy","seed",2,1).unwrap();
+        db.db.execute_batch("ALTER TABLE crawl_jobs DROP COLUMN max_concurrency; PRAGMA user_version=4;").unwrap();
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let legacy=db.claim("legacy").unwrap().unwrap();
+        assert_eq!(legacy.crawl().unwrap().max_concurrency,1);
+        db.settle(&legacy,true,&json!({})).unwrap();
+        assert!(db.create_crawl_parallel("bad","seed",10,3,false,&json!({}),5).is_err());
+        db.create_crawl_parallel("parallel","seed",10,3,false,&json!({}),2).unwrap();
+        let seed=db.claim("parallel").unwrap().unwrap();
+        db.settle_discovered(&seed,true,&json!({}),&["a".into(),"b".into(),"c".into()]).unwrap();
+        let a=db.claim("parallel").unwrap().unwrap();
+        let b=db.claim("parallel").unwrap().unwrap();
+        assert_eq!(a.crawl().unwrap().max_concurrency,2);
+        assert!(db.claim("parallel").unwrap().is_none());
+        db.create_crawl("other","seed",1,0).unwrap();
+        assert_eq!(db.claim_next().unwrap().unwrap().job(),"other");
+        db.settle_discovered(&b,true,&json!({}),&["deep".into()]).unwrap();
+        let c=db.claim("parallel").unwrap().unwrap();
+        assert_eq!(c.item(),"c");
+        db.settle(&c,true,&json!({})).unwrap();
+        // Deep work must not overtake the still-running shallower page.
+        assert!(db.claim("parallel").unwrap().is_none());
+        drop(db);
+        let mut db=Store::open(&tmp.db()).unwrap();
+        let recovered=db.claim("parallel").unwrap().unwrap();
+        assert_eq!(recovered.item(),"a");
+        assert_eq!(recovered.crawl().unwrap().max_concurrency,2);
+        assert!(db.settle(&a,true,&json!({})).is_err());
+        db.settle(&recovered,true,&json!({})).unwrap();
+        assert_eq!(db.claim("parallel").unwrap().unwrap().item(),"deep");
+        let status=db.crawl_status_v2("parallel",0,10).unwrap();
+        assert_eq!(status["research"]["requested_max_concurrency"],2);
+        assert_eq!(status["research"]["worker_concurrency_cap"],2);
     }
 
     #[test]
