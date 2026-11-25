@@ -2,7 +2,8 @@
 //! cross-origin crawl requests or redirect following.
 use super::{static_target,render,map};
 use crate::{crawl::{CrawlOptions,Scope,ROBOTS_AGENT},fetch::{Fetcher,FetchOptions},
-    guard::NetworkPolicy,scrape::{process_html,Format,ScrapeOptions},cloud};
+    guard::NetworkPolicy,scrape::{process_html,check_html_only,Format,ScrapeOptions},
+    browser::{needs_browser,looks_like_nav_only_shell},cloud};
 use axum::http::StatusCode;
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
@@ -26,13 +27,28 @@ pub(super) struct Policy{
     pub(super) crawl_entire_domain:bool,
     pub(super) delay_ms:u32,
     pub(super) only_main_content:bool,
+    pub(super) formats:Vec<String>,
+    pub(super) include_tags:Vec<String>,
+    pub(super) exclude_tags:Vec<String>,
 }
 impl Default for Policy{
-    fn default()->Self{Self{include_paths:vec![],exclude_paths:vec![],crawl_entire_domain:false,delay_ms:0,only_main_content:true}}
+    fn default()->Self{Self{include_paths:vec![],exclude_paths:vec![],crawl_entire_domain:false,delay_ms:0,
+        only_main_content:true,formats:super::default_formats(),include_tags:vec![],exclude_tags:vec![]}}
 }
 impl Policy{
+    fn formats(&self)->Result<Vec<Format>,StatusCode>{
+        if self.formats.is_empty()||self.formats.len()>4||
+            self.formats.iter().collect::<HashSet<_>>().len()!=self.formats.len(){
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        self.formats.iter().map(|f|match f.as_str(){
+            "markdown"=>Ok(Format::Markdown),"html"=>Ok(Format::Html),
+            "rawHtml"=>Ok(Format::RawHtml),"links"=>Ok(Format::Links),_=>Err(StatusCode::BAD_REQUEST)
+        }).collect()
+    }
     pub(super) fn scope(&self,seed:&Url)->Result<Scope,StatusCode>{
-        if self.delay_ms>10000 || self.include_paths.len()+self.exclude_paths.len()>16 ||
+        if self.formats().is_err()||!render::valid_tag_filters(&self.include_tags,&self.exclude_tags)||
+            self.delay_ms>10000 || self.include_paths.len()+self.exclude_paths.len()>16 ||
             self.include_paths.iter().chain(&self.exclude_paths).any(|p|p.is_empty()||p.len()>256||p.chars().any(char::is_control)){
             return Err(StatusCode::BAD_REQUEST);
         }
@@ -95,9 +111,9 @@ impl Crawler{
     pub(super) async fn robots(&self,target:&Url)->Result<(u16,bytes::Bytes),StatusCode>{
         render::check_dns(target).await.map_err(|_|StatusCode::FORBIDDEN)?;
         let url=target.join("/robots.txt").map_err(|_|StatusCode::BAD_REQUEST)?;
-        let res=self.fetcher.fetch_once(&url,&FetchOptions{
+        let res=self.fetcher.fetch_once_limited(&url,&FetchOptions{
             timeout:Some(Duration::from_secs(8)),..Default::default()
-        }).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
+        },ROBOTS_LIMIT).await.map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;
         if res.status==200 && (res.mime().as_deref()!=Some("text/plain") ||
             res.body.len()>ROBOTS_LIMIT || std::str::from_utf8(&res.body).is_err()){
             return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -115,7 +131,7 @@ impl Crawler{
         // includePaths selects only its descendants. All discoveries are filtered.
         if seed.origin()!=target.origin() || (target!=seed&&!scope.allows(&target)){return Err(StatusCode::FORBIDDEN);}
         let _serial=self.serial.lock().await;
-        let (mut doc,links)=self.read_links_with_options(&target,Duration::from_secs(50),policy.delay(),policy.only_main_content).await?;
+        let (mut doc,links)=self.read_links_with_options(&target,Duration::from_secs(50),&policy).await?;
         let mut frontier=candidates(&seed,&scope,&links);
         if include_sitemap{
             if max_depth==0||page_limit<=1{
@@ -136,12 +152,15 @@ impl Crawler{
     /// Caller holds the shared crawl/map serial lock. The target must already
     /// be validated as a public HTTPS seed or in-scope crawl URL.
     pub(super) async fn read_links(&self,target:&Url,budget:Duration)->Result<(Value,Vec<Value>),StatusCode>{
-        self.read_links_with_options(target,budget,Duration::ZERO,true).await
+        self.read_links_with_options(target,budget,&Policy::default()).await
     }
 
-    async fn read_links_with_options(&self,target:&Url,budget:Duration,minimum_delay:Duration,
-        only_main_content:bool)->Result<(Value,Vec<Value>),StatusCode>{
+    async fn read_links_with_options(&self,target:&Url,budget:Duration,policy:&Policy)->Result<(Value,Vec<Value>),StatusCode>{
         let target=target.clone();
+        let minimum_delay=policy.delay();
+        let formats=policy.formats()?;
+        let opts=ScrapeOptions{only_main_content:policy.only_main_content,include_tags:policy.include_tags.clone(),
+            exclude_tags:policy.exclude_tags.clone(),..Default::default()};
         // Fresh robots check on every claimed page. Fail closed if unavailable.
         // No retries/redirects in either request. Connection-time DNS guard
         // remains in the same upstream Fetcher.
@@ -151,16 +170,16 @@ impl Crawler{
             let delay=robots_delay.max(minimum_delay);
             tokio::time::sleep(delay).await;
             if !allowed{return Err(StatusCode::FORBIDDEN);}
-            let page=self.fetcher.fetch_once(&target,&FetchOptions{
+            let page=self.fetcher.fetch_once_limited(&target,&FetchOptions{
                 timeout:Some(Duration::from_secs(15)),..Default::default()
-            }).await;
+            },HTML_LIMIT).await;
             // The one crawl worker spaces the next robots/page request too.
             tokio::time::sleep(delay).await;
             let page=page.map_err(|_|StatusCode::BAD_GATEWAY)?;
-            if page.status!=200 || page.final_url!=target || page.body.len()>HTML_LIMIT ||
-                page.mime().as_deref()!=Some("text/html"){
+            if page.status!=200 || page.final_url!=target || page.body.len()>HTML_LIMIT{
                 return Err(StatusCode::BAD_GATEWAY);
             }
+            check_html_only(&page).map_err(|_|StatusCode::UNSUPPORTED_MEDIA_TYPE)?;
             Ok::<_,StatusCode>(page.text())
         }).await.map_err(|_|StatusCode::GATEWAY_TIMEOUT)??;
 
@@ -168,22 +187,39 @@ impl Crawler{
         // slot until the blocking parser finishes; don't abandon a running
         // parse on async timeout. Overall process memory/wall limits remain
         // required for untrusted document conversion.
-        tokio::task::spawn_blocking(move||{
-            let (mut data,mut metadata,markdown)=process_html(fetched,&target,&ScrapeOptions{only_main_content,..Default::default()},
-                &[Format::Markdown,Format::Links]).map_err(|_|StatusCode::BAD_GATEWAY)?;
-            if markdown.trim().is_empty() || cloud::looks_like_bot_check(&markdown){
-                return Err(StatusCode::BAD_GATEWAY);
-            }
-            let links=data.remove("links").and_then(|v|v.as_array().cloned()).unwrap_or_default();
-            metadata.insert("url".into(),json!(target.as_str()));
-            metadata.insert("statusCode".into(),json!(200));
-            metadata.insert("contentType".into(),json!("text/html"));
-            data.insert("metadata".into(),Value::Object(metadata));
-            data.insert("source".into(),json!("local"));
-            data.insert("researchSourceVerified".into(),json!(false));
-            Ok((Value::Object(data),links))
-        }).await.map_err(|_|StatusCode::BAD_GATEWAY)?
+        tokio::task::spawn_blocking(move||convert_page(fetched,&target,&opts,formats))
+            .await.map_err(|_|StatusCode::BAD_GATEWAY)?
     }
+}
+
+// Retain link discovery independently of requested document formats. Return
+// only requested fields. Raw HTML is moved out of the parser, not cloned.
+fn convert_page(raw:String,target:&Url,opts:&ScrapeOptions,requested:Vec<Format>)
+    ->Result<(Value,Vec<Value>),StatusCode>{
+    let mut internal=requested.clone();
+    for f in [Format::RawHtml,Format::Links]{
+        if !internal.contains(&f){internal.push(f);}
+    }
+    let (mut data,mut metadata,markdown)=process_html(raw,target,opts,&internal).map_err(|_|StatusCode::BAD_GATEWAY)?;
+    if markdown.trim().is_empty()||cloud::looks_like_bot_check(&markdown){
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    let raw=data.get("rawHtml").and_then(Value::as_str).ok_or(StatusCode::BAD_GATEWAY)?;
+    // Crawls cannot safely retry in a browser until robots and redirect scope
+    // are enforced on that path as well. Report incomplete shells as failures.
+    if needs_browser(raw,&markdown)||looks_like_nav_only_shell(raw,&markdown){
+        return Err(StatusCode::PRECONDITION_REQUIRED);
+    }
+    let links=data.get("links").and_then(Value::as_array).cloned().unwrap_or_default();
+    if !requested.contains(&Format::RawHtml){data.remove("rawHtml");}
+    if !requested.contains(&Format::Links){data.remove("links");}
+    metadata.insert("url".into(),json!(target.as_str()));
+    metadata.insert("statusCode".into(),json!(200));
+    metadata.insert("contentType".into(),json!("text/html"));
+    data.insert("metadata".into(),Value::Object(metadata));
+    data.insert("source".into(),json!("local"));
+    data.insert("researchSourceVerified".into(),json!(false));
+    Ok((Value::Object(data),links))
 }
 
 #[cfg(test)]
@@ -208,7 +244,7 @@ mod tests{
     fn path_filters_are_bounded_and_never_expand_origin(){
         let seed=seed("https://example.com/docs/").unwrap();
         let policy=Policy{include_paths:vec!["^/reports/".into()],exclude_paths:vec!["/private".into()],
-            crawl_entire_domain:true,delay_ms:1250,only_main_content:false};
+            crawl_entire_domain:true,delay_ms:1250,only_main_content:false,..Default::default()};
         let scope=policy.scope(&seed).unwrap();
         let links=json!(["https://example.com/reports/a","https://example.com/reports/private",
             "https://example.com/docs/b","https://other.org/reports/a","https://example.com/reports/a?q=1"]);
@@ -217,6 +253,25 @@ mod tests{
         for bad in [Policy{include_paths:vec!["[".into()],..Default::default()},
             Policy{exclude_paths:vec!["x".repeat(257)],..Default::default()},
             Policy{delay_ms:10001,..Default::default()}]{assert!(bad.scope(&seed).is_err());}
+    }
+
+    #[test]
+    fn crawl_conversion_preserves_requested_formats_and_independent_discovery(){
+        let target=Url::parse("https://example.org/docs/").unwrap();
+        let raw="<html><body><article><p>Stock 421.5</p><p class=\"ads\">Ad</p><a href=\"/docs/a\">next</a></article></body></html>";
+        let opts=ScrapeOptions{include_tags:vec!["article".into()],exclude_tags:vec![".ads".into()],..Default::default()};
+        let (doc,links)=convert_page(raw.into(),&target,&opts,vec![Format::Html]).unwrap();
+        assert!(doc["html"].as_str().unwrap().contains("Stock 421.5"));
+        assert!(!doc["html"].as_str().unwrap().contains("class=\"ads\""));
+        for key in ["markdown","links","rawHtml"]{assert!(doc.get(key).is_none());}
+        assert_eq!(links,vec![json!("https://example.org/docs/a")]);
+        let (doc,_)=convert_page(raw.into(),&target,&opts,vec![Format::Markdown,Format::RawHtml,Format::Links]).unwrap();
+        assert!(doc["markdown"].as_str().unwrap().contains("421.5"));
+        assert_eq!(doc["rawHtml"],raw);
+        assert_eq!(doc["links"][0],"https://example.org/docs/a");
+        let shell="<html><body><div id=\"root\">Loading...</div><script src=\"app.js\"></script></body></html>";
+        assert_eq!(convert_page(shell.into(),&target,&ScrapeOptions::default(),vec![Format::Markdown]).unwrap_err(),
+            StatusCode::PRECONDITION_REQUIRED);
     }
 
     #[test]

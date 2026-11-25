@@ -22,7 +22,7 @@ diff --git a/apps/local/src/scrape.rs b/apps/local/src/scrape.rs
  
 +// Reject document MIME and magic before any native document parser or HTML
 +// meta-refresh processing. This function does not parse the input document.
-+fn check_html_only(fetched: &crate::fetch::FetchResult) -> Result<(), ScrapeError> {
++pub(crate) fn check_html_only(fetched: &crate::fetch::FetchResult) -> Result<(), ScrapeError> {
 +  let mime = fetched.mime();
 +  if mime.as_deref() != Some("text/html") ||
 +      crate::documents::sniff(&fetched.body, mime.as_deref(), &fetched.final_url).is_some() {
