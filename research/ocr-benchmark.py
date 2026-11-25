@@ -20,7 +20,7 @@ def run(args, timeout=15):
     r=subprocess.run(args,check=True,capture_output=True,timeout=timeout,env=env)
     return r.stdout.decode('utf-8','replace'), round((time.perf_counter()-start)*1000)
 
-def fixture(path):
+def fixture(path, include_blank=False):
     c=canvas.Canvas(str(path),pagesize=(612,792))
     c.setFont('Helvetica',14); c.drawString(36,740,'Native text control: report date 2026-09-08'); c.showPage()
     for degraded in (False,True):
@@ -36,6 +36,10 @@ def fixture(path):
             im=im.resize((765,990),Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(.7))
             buf=io.BytesIO();im.save(buf,format='JPEG',quality=35);buf.seek(0);im=Image.open(buf)
         c.drawImage(ImageReader(im),0,0,width=612,height=792);c.showPage()
+    if include_blank:
+        blank = Image.new("L", (612, 792), 255)
+        c.drawImage(ImageReader(blank), 0, 0, width=612, height=792)
+        c.showPage()
     c.save()
 
 if __name__ == "__main__":
