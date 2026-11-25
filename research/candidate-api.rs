@@ -99,6 +99,17 @@ const CACHE_MAX_BYTES:usize=8*1024*1024;
 const CACHE_MAX_ENTRY:usize=256*1024;
 const CACHE_MAX_ENTRIES:usize=64;
 
+// Stop encoding at the entry cap instead of allocating a full oversized
+// result first. The cache must not add a second unbounded copy of raw HTML.
+struct CacheBuffer{bytes:Vec<u8>,limit:usize}
+impl std::io::Write for CacheBuffer{
+    fn write(&mut self,part:&[u8])->std::io::Result<usize>{
+        if part.len()>self.limit-self.bytes.len(){return Err(std::io::Error::other("cache entry exceeds bound"));}
+        self.bytes.extend_from_slice(part);
+        Ok(part.len())
+    }
+    fn flush(&mut self)->std::io::Result<()>{Ok(())}
+}
 struct CacheEntry{key:String,created:Instant,encoded:Vec<u8>}
 #[derive(Default)]
 struct HtmlCache{entries:VecDeque<CacheEntry>,bytes:usize}
@@ -123,8 +134,10 @@ impl HtmlCache{
     }
 
     fn put(&mut self,key:String,doc:&Value,now:Instant)->bool{
-        let Ok(encoded)=serde_json::to_vec(doc)else{return false;};
-        if !doc.is_object()||encoded.len()+key.len()>CACHE_MAX_ENTRY{return false;}
+        if !doc.is_object()||key.len()>=CACHE_MAX_ENTRY{return false;}
+        let mut buffer=CacheBuffer{bytes:Vec::new(),limit:CACHE_MAX_ENTRY-key.len()};
+        if serde_json::to_writer(&mut buffer,doc).is_err(){return false;}
+        let encoded=buffer.bytes;
         self.purge(now);
         if let Some(index)=self.entries.iter().position(|e|e.key==key){
             let old=self.entries.remove(index).unwrap();
