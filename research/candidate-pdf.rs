@@ -188,7 +188,7 @@ pub(super) async fn isolated_document(state:&CandidateState,target:&url::Url,bud
         },
         Kind::Office=>{
             let receipt=tokio::time::timeout_at(deadline,office_at(OFFICE_ENDPOINT,bytes,remaining)).await
-                .map_err(|_|(StatusCode::GATEWAY_TIMEOUT,"OFFICE_WORKER_TIMEOUT"))?
+                .map_err(|_|refusal(StatusCode::GATEWAY_TIMEOUT,"OFFICE_WORKER_TIMEOUT"))?
                 .map_err(|s|refusal(s,"OFFICE_WORKER_FAILED"))?;
             let markdown=receipt["markdown"].as_str().ok_or_else(||refusal(StatusCode::BAD_GATEWAY,"OFFICE_WORKER_FAILED"))?;
             Ok(json!({"markdown":markdown,"metadata":{"url":landed.as_str(),"sourceURL":target.as_str(),"statusCode":200,"proxyUsed":"basic"},
