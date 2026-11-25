@@ -247,7 +247,9 @@ jobs:
         run: ./security/env-restoration.test.ps1
       - name: Verify whole-stack Compose protects RabbitMQ image identity
         shell: pwsh
-        run: ./security/rabbitmq-compose-guard.test.ps1
+        run: |
+          ./security/rabbitmq-compose-guard.test.ps1
+          ./security/rust-legacy-guard.test.ps1
       - name: Verify scoped staged build, CVE and rollback gates without Docker
         shell: pwsh
         run: ./security/staged-mcp-image.test.ps1

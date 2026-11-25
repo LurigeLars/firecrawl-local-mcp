@@ -39,6 +39,32 @@ $compose += @(
     '--env-file', "$root\.env"
 )
 
+# Until a reviewed mode-aware launcher exists, legacy actions must not
+# recreate or remove a Rust production service, including when it is stopped.
+# A future transition procedure must acquire this persistent marker BEFORE
+# removing the old API, and retain it until explicit rollback is verified.
+function Assert-LegacyEngineAction {
+    param([string]$ActionName, [string]$StateRoot)
+    if ($ActionName -in @('status','logs','url')) { return }
+    $marker = Join-Path $StateRoot 'rust-transition.lock'
+    if (Test-Path -LiteralPath $marker -ErrorAction Stop) {
+        throw 'Rust transition guard active; legacy launcher action refused.'
+    }
+    $api = 'firecrawl-api-1'
+    $found = @(& docker container ls --all --filter "name=^/$api$" --format '{{.Names}}')
+    if ($LASTEXITCODE -ne 0 -or $found.Count -gt 1 -or ($found.Count -eq 1 -and $found[0] -cne $api)) {
+        throw 'Cannot verify production API identity; legacy launcher action refused.'
+    }
+    if ($found.Count -eq 0) { return }
+    $shape = @(& docker inspect --format '{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{range .Mounts}}{{if eq .Destination "/var/lib/research"}}rust-jobs{{end}}{{end}}' $api)
+    if ($LASTEXITCODE -ne 0 -or $shape.Count -ne 1 -or
+        $shape[0] -cnotin @('firecrawl-api|firecrawl|api|','firecrawl-api:latest|firecrawl|api|')) {
+        throw 'Production API is not the reviewed legacy service; legacy launcher action refused.'
+    }
+}
+
+Assert-LegacyEngineAction -ActionName $Action -StateRoot (Join-Path $env:LOCALAPPDATA 'FirecrawlLocal')
+
 function Assert-UpstreamFirecrawlPin([switch]$AllowHeadMismatch) {
     $pinPath = Join-Path $root "upstream\firecrawl.json"
     $checkout = Join-Path $root "firecrawl"
