@@ -11,7 +11,7 @@ export function parseAllowedTools(value) {
   return new Set((value ?? DEFAULT_ALLOWED_TOOLS).split(',').map(s => s.trim()).filter(Boolean));
 }
 
-// Server instructions shown to the model; read on each initialize so edits apply without a restart.
+// Server instructions shown to the model; read on each discovery or initialize so edits apply without a restart.
 export function loadInstructions() {
   try { return fs.readFileSync(new URL('./instructions.md', import.meta.url), 'utf8').trim() || null; } catch { return null; }
 }
@@ -377,7 +377,7 @@ export function rewriteResponse(msg, { allowedTools, compactIds, crawlRequests }
     .filter(t => allowedTools.has(t.name))
     .map(constrainToolSchema)
     .map(compactToolDefinition);
-  if (msg.result?.serverInfo) {
+  if (msg.result?.serverInfo || Array.isArray(msg.result?.supportedVersions)) {
     const instructions = loadInstructions();
     if (instructions) msg.result.instructions = instructions;
   }
