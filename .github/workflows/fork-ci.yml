@@ -253,6 +253,9 @@ jobs:
       - name: Verify Rust local client DPAPI boundary with synthetic credentials
         shell: pwsh
         run: ./security/rust-client.test.ps1
+      - name: Verify read-only Rust transition queue receipt
+        shell: pwsh
+        run: ./security/rust-transition-preflight.test.ps1
       - name: Verify scoped staged build, CVE and rollback gates without Docker
         shell: pwsh
         run: ./security/staged-mcp-image.test.ps1
