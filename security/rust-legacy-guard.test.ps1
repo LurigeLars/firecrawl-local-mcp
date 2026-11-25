@@ -74,7 +74,7 @@ try {
     if (Get-RustMaintenanceMode -ActionName up -StateRoot $root) { throw 'Pending mode permitted.' }
     Set-Content -LiteralPath $marker -Value 'rust-active-v1'
     $script:shape='firecrawl-rust-api:local|firecrawl|api|true|firecrawl_rust-jobs:true'
-    foreach ($action in @('refresh-searxng','refresh-gateway','refresh-llm-proxy','refresh-search-proxy','refresh-playwright-router','recover','import-gemini','redeploy-mcp','rust-deploy-document','status')) {
+    foreach ($action in @('refresh-searxng','refresh-gateway','refresh-llm-proxy','refresh-search-proxy','refresh-playwright-router','recover','import-gemini','redeploy-mcp','rust-deploy-document','rust-deploy-api','status')) {
         if (-not (Get-RustMaintenanceMode -ActionName $action -StateRoot $root)) { throw 'Expected shared sidecar action refused.' }
     }
     if (-not (Get-RustMaintenanceMode -ActionName maintain-stateless -ServiceName mcp -StateRoot $root)) { throw 'Expected MCP action refused.' }

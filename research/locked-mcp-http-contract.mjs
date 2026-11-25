@@ -8,6 +8,7 @@ import readline from 'node:readline';
 import { readFileSync } from 'node:fs';
 
 const fixtureUrl='https://example.org/docs/';
+const unreadPdf='https://example.org/unread.pdf#page=12-17';
 const id='c7c0b460-fcc0-4abe-97ae-95d14dcda840';
 const doc={markdown:'Synthetic source fixture 42',metadata:{
   title:'Fixture',url:fixtureUrl,sourceURL:fixtureUrl,statusCode:200,contentType:'text/html'
@@ -86,6 +87,11 @@ const server=http.createServer(async(req,res)=>{
     const origin='http://127.0.0.1:'+server.address().port;
     let data;
     if(req.method==='POST'&&u.pathname==='/v2/scrape'){
+      if(body.url===unreadPdf){
+        res.writeHead(422,{'content-type':'application/json'});
+        res.end(JSON.stringify({success:false,code:'PDF_INCOMPLETE',error:'PDF pages 16, 17 could not be read.'}));
+        return;
+      }
       const names=(body?.formats??[]).map(x=>typeof x==='string'?x:x?.type);
       data={success:true,data:{...doc,
         ...(names.includes('summary')?{summary:'Synthetic summary'}:{}),
@@ -240,7 +246,7 @@ try{
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'What is the value?'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['query'],queryOptions:{prompt:'Quote the value',mode:'directQuote'}},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:fixtureUrl,formats:['html','links'],waitFor:100},'POST','/v2/scrape'],
-    ['firecrawl_scrape',{url:'https://example.org/test.pdf',formats:['markdown'],parsers:['pdf']},'POST','/v2/scrape'],
+    ['firecrawl_scrape',{url:'https://example.org/test.pdf#page=12-15',formats:['markdown'],parsers:['pdf']},'POST','/v2/scrape'],
     ['firecrawl_scrape',{url:'https://example.org/test.pdf',formats:['markdown'],parsers:['pdf'],pdfOptions:{maxPages:1}},'POST','/v2/scrape'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2},'POST','/v2/search'],
     ['firecrawl_search',{query:'synthetic fixture',limit:2,scrapeOptions:{formats:['markdown'],includeTags:['article']}},'POST','/v2/search'],
@@ -271,6 +277,9 @@ try{
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;
       assert.deepEqual(request?.parsers,[{type:'pdf',maxPages:1}]);
     }
+    if(args.url?.includes('#page=')){
+      assert.equal(captured.find(x=>x.method===method&&x.path===path)?.body?.url,args.url);
+    }
     if(args.jsonOptions){
       const request=captured.find(x=>x.method===method&&x.path===path)?.body;
       assert.deepEqual(request?.formats,[{type:'json',prompt:args.jsonOptions.prompt,schema:args.jsonOptions.schema}]);
@@ -288,6 +297,10 @@ try{
   }
   console.log(JSON.stringify({locked_mcp:pkg.version,outcomes}));
   assert.ok(outcomes.every(x=>x.ok),'locked client transport differs from expected API fixture');
+  const unread=await rpc('tools/call',{name:'firecrawl_scrape',arguments:{
+    url:unreadPdf,formats:['markdown'],parsers:['pdf']
+  }});
+  assert.match(JSON.stringify(unread.result??unread.error),/PDF pages 16, 17 could not be read/);
   }
 }finally{
   lines.close();child.stdin.end();child.kill();

@@ -353,24 +353,26 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
         }).await;
         return match result{
             Ok(Ok(data))=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
-            Ok(Err((status,code)))=>refusal(status,code),
+            Ok(Err(response))=>response,
             Err(_)=>refusal(StatusCode::BAD_GATEWAY,"DOCUMENT_TASK_FAILED")
         };
     }
     if is_pdf{
         if let Err(status)=pdf::target(target.as_str()){return refusal(status,"UNSUPPORTED_PDF_URL");}
         if !state.pdf_enabled{return refusal(StatusCode::SERVICE_UNAVAILABLE,"PDF_WORKER_DISABLED");}
+        let max_pages=pdf_page_limit(&req).flatten();
+        let range=match pdf::requested_range(&target,max_pages){Ok(r)=>r,Err(response)=>return response};
         let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
         let budget=Duration::from_millis(req.timeout.unwrap_or(110000));
-        let max_pages=pdf_page_limit(&req).flatten();
         let result=tokio::spawn(async move{
             let _slot=slot;
-            let (landed,receipt)=pdf::document(&state,&target,budget,max_pages).await?;
-            pdf::v2_document(&target,&landed,receipt).map_err(|s|(s,"PDF_INCOMPLETE"))
+            let (landed,receipt)=pdf::document(&state,&target,budget,max_pages,range).await
+                .map_err(|(status,code)|refusal(status,code))?;
+            pdf::v2_document(&target,&landed,receipt,range)
         }).await;
         return match result{
             Ok(Ok(data))=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
-            Ok(Err((status,code)))=>refusal(status,code),
+            Ok(Err(response))=>response,
             Err(_)=>refusal(StatusCode::BAD_GATEWAY,"PDF_TASK_FAILED")
         };
     }
@@ -421,7 +423,7 @@ async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body
             if remaining.is_zero(){return refusal(StatusCode::GATEWAY_TIMEOUT,"DOCUMENT_DEADLINE");}
             match pdf::isolated_document(&state,&original,remaining,None).await{
                 Ok(data)=>bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}})),
-                Err((status,code))=>refusal(status,code)
+                Err(response)=>response
             }
         },
         Ok(mut data)=>{

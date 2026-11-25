@@ -4,7 +4,7 @@
 mod contract;
 #[path="../pdf-ocr-layout.rs"]
 mod layout;
-use contract::{office_magic,MAX_OFFICE_MARKDOWN,MAX_PAGES};
+use contract::{office_magic,PageRange,MAX_OFFICE_MARKDOWN,MAX_PAGES};
 use serde_json::{json, Value};
 use std::{io::{self, Read}, process::Stdio, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command};
@@ -110,7 +110,7 @@ fn page_value(page: usize, native: &str, ocr: Option<Result<String, &'static str
     }
 }
 
-async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>) -> Result<Value, &'static str> {
+async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>, range:Option<PageRange>) -> Result<Value, &'static str> {
     if pdf.len() > MAX_PDF || !pdf.starts_with(b"%PDF-") {return Err("invalid PDF or input exceeds bound");}
     let parsed = pdf_inspector::extract_pages_markdown_mem(pdf, None)
         .map_err(|_| "PDF parsing failed")?;
@@ -120,7 +120,9 @@ async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>) -> Res
     // The pinned native parser performs document-wide analysis. Keep its
     // existing hard page cap, then apply the requested output/OCR bound.
     let total_pages=parsed.pages.len();
-    let selected=max_pages.unwrap_or(total_pages).min(total_pages);
+    let (start,end)=if let Some(range)=range{
+        (range.start-1,range.end.min(total_pages))
+    }else{(0,max_pages.unwrap_or(total_pages).min(total_pages))};
     let mut classified = Vec::new();
     let mut output = Vec::new();
     let mut attempted = 0;
@@ -128,7 +130,7 @@ async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>) -> Res
     // Bound the entire OCR stage, not just each renderer/recognizer call.
     // Classification itself is bounded by the external sandbox wall clock.
     let end = tokio::time::Instant::now() + Duration::from_secs(45);
-    for (i, p) in parsed.pages.iter().take(selected).enumerate() {
+    for (i, p) in parsed.pages.iter().take(end).enumerate().skip(start) {
         if p.page as usize != i || p.markdown.len() > MAX_TEXT {return Err("invalid page order or page text too large");}
         let native = p.markdown.as_str();
         let result = if !p.needs_ocr {None}
@@ -152,10 +154,11 @@ async fn extract(pdf: &[u8], single_block: bool, max_pages:Option<usize>) -> Res
         output.push(page_value(i+1,native,result));
     }
     let unresolved = output.iter().filter(|p|p["source"]=="unresolved").count();
-    let result = json!({"pages":output,"pages_needing_ocr":classified,
+    let mut result = json!({"pages":output,"pages_needing_ocr":classified,
         "ocr_attempted":attempted - blank,"unresolved_pages":unresolved,
         "total_pages":total_pages,"requested_max_pages":max_pages,
         "source_verified":false,"layout":if single_block {"single_block"} else {"auto"}});
+    if let Some(range)=range{result["requested_page_range"]=json!(range);}
     if serde_json::to_vec(&result).map_err(|_|"PDF result encoding failed")?.len()>MAX_OUTPUT {
         return Err("PDF output exceeds bound");
     }
@@ -206,18 +209,19 @@ fn extract_office(input:&[u8])->Result<Value,&'static str>{
 async fn main() -> Result<(), &'static str> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let office=args.as_slice()==["--office"];
-    let (single_block,max_pages) = match args.as_slice() {
-        [] => (false,None),
-        [arg] if arg == "--single-block-fixture" => (true,None),
-        [arg] if arg == "--office" => (false,None),
+    let (single_block,max_pages,range) = match args.as_slice() {
+        [] => (false,None,None),
+        [arg] if arg == "--single-block-fixture" => (true,None,None),
+        [arg] if arg == "--office" => (false,None,None),
         [flag,value] if flag=="--max-pages"=>(false,Some(value.parse::<usize>().ok()
-            .filter(|n|(1..=MAX_PAGES).contains(n)).ok_or("invalid PDF page bound")?)),
+            .filter(|n|(1..=MAX_PAGES).contains(n)).ok_or("invalid PDF page bound")?),None),
+        [flag,value] if flag=="--page-range"=>(false,None,Some(PageRange::parse(value).ok_or("invalid PDF page range")?)),
         _ => return Err("unsupported OCR argument"),
     };
     let mut input=Vec::new();
     io::stdin().take((MAX_PDF+1) as u64).read_to_end(&mut input).map_err(|_|"PDF input failed")?;
     if office{println!("{}",extract_office(&input)?);}
-    else{println!("{}", extract(&input,single_block,max_pages).await?);}
+    else{println!("{}", extract(&input,single_block,max_pages,range).await?);}
     Ok(())
 }
 

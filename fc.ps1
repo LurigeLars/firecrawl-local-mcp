@@ -1,6 +1,6 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'migrate-nuq-postgres', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini', 'rust-promote', 'rust-rollback', 'rust-deploy-document')][string]$Action = 'status', [string]$Service = '', [string]$AcceptedRevision = '', [string]$ApiDigest = '', [string]$DocumentDigest = '', [string]$McpDigest = '')
+param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'migrate-nuq-postgres', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini', 'rust-promote', 'rust-rollback', 'rust-deploy-document', 'rust-deploy-api')][string]$Action = 'status', [string]$Service = '', [string]$AcceptedRevision = '', [string]$ApiDigest = '', [string]$DocumentDigest = '', [string]$McpDigest = '')
 
 $root = $PSScriptRoot
 # Stamped into image labels (compose x-image-revision) so Docker-MCP's audit can spot stale images.
@@ -93,7 +93,7 @@ function Get-RustMaintenanceMode {
     }
     $allowed = @('status','logs','url','recover','import-gemini','refresh-searxng','refresh-search-proxy',
         'refresh-gateway','refresh-playwright-router','refresh-llm-proxy','build-mcp','redeploy-mcp',
-        'stage-playwright','stage-browser','stage-proxy','deploy-playwright','deploy-browser','deploy-proxy','rust-deploy-document')
+        'stage-playwright','stage-browser','stage-proxy','deploy-playwright','deploy-browser','deploy-proxy','rust-deploy-document','rust-deploy-api')
     if ($ActionName -in $allowed) { return $true }
     if ($ActionName -eq 'maintain-stateless' -and $ServiceName -cin @('mcp','playwright-service','browser-session-service','playwright-public-proxy-service')) { return $true }
     throw 'Action is not reviewed for active Rust; maintenance refused.'
@@ -648,7 +648,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres", "rust-deploy-document")
+$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres", "rust-deploy-document", "rust-deploy-api")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -737,7 +737,13 @@ switch ($Action) {
         if (-not $RustMode) { throw 'Active Rust is required to update the PDF service.' }
         Assert-UpstreamFirecrawlPin
         . (Join-Path $root 'research\rust-transition.ps1')
-        Invoke-RustDocumentUpdate -ComposeArguments $compose -ProjectRoot $root -Revision $AcceptedRevision -Digest $DocumentDigest
+        Invoke-RustRuntimeUpdate -ComposeArguments $compose -ProjectRoot $root -Service pdf-ocr -Revision $AcceptedRevision -Digest $DocumentDigest
+    }
+    'rust-deploy-api' {
+        if (-not $RustMode) { throw 'Active Rust is required to update the Rust API.' }
+        Assert-UpstreamFirecrawlPin
+        . (Join-Path $root 'research\rust-transition.ps1')
+        Invoke-RustRuntimeUpdate -ComposeArguments $compose -ProjectRoot $root -Service api -Revision $AcceptedRevision -Digest $ApiDigest
     }
     'refresh-playwright-router' {
         Assert-UpstreamFirecrawlPin

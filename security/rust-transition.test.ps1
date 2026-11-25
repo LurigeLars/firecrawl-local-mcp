@@ -25,7 +25,7 @@ $promotion=$source.Substring($source.IndexOf('function Invoke-RustPromotion'))
 $stop=$promotion.IndexOf('Stop-TransitionService api')
 $drain=$promotion.IndexOf('$queue=Get-LegacyQueueReceipt',$stop)
 $start=$promotion.IndexOf("'pdf-ocr','api'",$drain)
-$client=$promotion.IndexOf('verify-rust-client.mjs',$start)
+$client=$promotion.IndexOf('Assert-RustLocalClient',$start)
 $model=$promotion.IndexOf('verify-live-model.mjs',$client)
 $reopen=$promotion.IndexOf('Start-OriginalTransitionService -Service gateway',$model)
 if ($stop -lt 0 -or $drain -le $stop -or $start -le $drain -or $client -le $start -or $model -le $client -or $reopen -le $model) { throw 'Unsafe promotion ordering.' }
@@ -136,6 +136,7 @@ try {
     & {
         $baseImage=$candidate['pdf-ocr']
         $newImage='sha256:'+('7'*64)
+        $repository='firecrawl-rust-document'
         $script:states['pdf-ocr']=@{id=('c'*64);image=$baseImage;running=$true}
         $script:tags['firecrawl-rust-document:local']=$baseImage
         Set-Content -LiteralPath (Get-TransitionPath 'rust-transition.lock') -Value 'rust-active-v1'
@@ -145,7 +146,7 @@ try {
             if ($ProjectRoot -cne 'synthetic' -or $Revision -cne $journal.revision) { throw 'Incorrect release source.' }
         }
         function Get-AcceptedCandidateImage([string]$Image,[string]$Digest) {
-            if ($Image -cne 'firecrawl-rust-document:staged' -or $Digest -cne $newImage) { throw 'Wrong accepted image.' }
+            if ($Image -cne "${repository}:staged" -or $Digest -cne $newImage) { throw 'Wrong accepted image.' }
             return $newImage
         }
         function Invoke-McpDocker {
@@ -159,15 +160,16 @@ try {
                 default { throw 'Unreviewed PDF operation.' }
             }
         }
-        function Restart-RustDocumentService {
-            param($ComposeArguments,[string]$Image)
+        function Restart-RustRuntimeService {
+            param($ComposeArguments,$ProjectRoot,$Service,$Repository,[string]$Image)
             $script:events.Add("restart:$Image")
+            if ($Service -cnotin @('api','pdf-ocr')) { throw 'Wrong update service.' }
             if ($failHealth -and $Image -ceq $newImage) { throw 'Synthetic health failure.' }
         }
         $script:events.Clear()
         $failHealth=$true
         try {
-            Invoke-RustDocumentUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Revision $journal.revision -Digest $newImage
+            Invoke-RustRuntimeUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Service pdf-ocr -Revision $journal.revision -Digest $newImage
             throw 'Unhealthy OCR update accepted.'
         } catch { if ($_.Exception.Message -cne 'PDF update failed; original PDF service verified.') { throw } }
         if ((Get-RustRollbackJournal).candidate['pdf-ocr'] -cne $baseImage -or
@@ -176,11 +178,35 @@ try {
         }
         $script:events.Clear()
         $failHealth=$false
-        $receipt=Invoke-RustDocumentUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Revision $journal.revision -Digest $newImage
+        $receipt=Invoke-RustRuntimeUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Service pdf-ocr -Revision $journal.revision -Digest $newImage
         if ($receipt -cne 'RUST_PDF_ONLY_UPDATE_VERIFIED' -or (Get-RustRollbackJournal).candidate['pdf-ocr'] -cne $newImage -or
             ($script:events -join ',') -cne "compose,network,scout,top,tag:firecrawl-rust-document:staged-rollback,restart:$newImage") {
             throw 'PDF update verification or journal commit failed.'
         }
         'RUST_DOCUMENT_UPDATE_FIXTURE_PASS'
+
+        $script:events.Clear()
+        $repository='firecrawl-rust-api'
+        $newImage='sha256:'+('8'*64)
+        $baseImage=$candidate.api
+        $script:states.api=@{id=('a'*64);image=$baseImage;running=$true}
+        $script:tags['firecrawl-rust-api:local']=$baseImage
+        $script:jobs=1
+        try {
+            Invoke-RustRuntimeUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Service api -Revision $journal.revision -Digest $newImage
+            throw 'API updated with active jobs.'
+        } catch { if ($_.Exception.Message -cne 'Rust durable jobs were not verified idle; the original API was resumed.') { throw } }
+        if (-not $script:states.api.running -or (Get-RustRollbackJournal).candidate.api -cne $baseImage -or
+            ($script:events -join ',') -cne 'compose,scout,tag:firecrawl-rust-api:staged-rollback,stop:api,rust-queue-count,original:api') {
+            throw 'API update did not preserve active jobs.'
+        }
+        $script:events.Clear()
+        $script:jobs=0
+        $receipt=Invoke-RustRuntimeUpdate -ComposeArguments @('compose') -ProjectRoot synthetic -Service api -Revision $journal.revision -Digest $newImage
+        if ($receipt -cne 'RUST_API_ONLY_UPDATE_VERIFIED' -or (Get-RustRollbackJournal).candidate.api -cne $newImage -or
+            ($script:events -join ',') -cne "compose,scout,tag:firecrawl-rust-api:staged-rollback,stop:api,rust-queue-count,restart:$newImage") {
+            throw 'API update verification or journal commit failed.'
+        }
+        'RUST_API_UPDATE_FIXTURE_PASS'
     }
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

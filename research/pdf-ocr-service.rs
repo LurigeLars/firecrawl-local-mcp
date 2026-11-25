@@ -3,7 +3,7 @@
 //! No URL fetches, file paths, shell, arbitrary arguments or provider access.
 #[path="../pdf-result.rs"]
 mod contract;
-use contract::{MAX_PDF,MAX_REPLY,MAX_PAGES,parse_reply,parse_office_reply,office_magic};
+use contract::{MAX_PDF,MAX_REPLY,MAX_PAGES,PageRange,parse_reply,parse_office_reply,office_magic};
 use axum::{Router,body::to_bytes,extract::{Request,State},http::StatusCode,
     response::{IntoResponse,Response},routing::{get,post},Json};
 use serde_json::{json,Value};
@@ -25,10 +25,11 @@ fn fail_stop()->!{
 #[derive(Clone,Copy)]
 enum Kind{Pdf,Office}
 
-async fn worker(pdf:&[u8],kind:Kind,max_pages:Option<usize>)->Result<Value,StatusCode>{
+async fn worker(pdf:&[u8],kind:Kind,max_pages:Option<usize>,range:Option<PageRange>)->Result<Value,StatusCode>{
     let mut command=Command::new("/usr/local/bin/pdf-ocr-worker");
     if matches!(kind,Kind::Office){command.arg("--office");}
     if let Some(n)=max_pages{command.arg("--max-pages").arg(n.to_string());}
+    if let Some(r)=range{command.arg("--page-range").arg(format!("{}-{}",r.start,r.end));}
     let mut child=command.env_clear().env("PATH","/usr/bin:/bin").env("HOME","/tmp")
         .env("LC_ALL","C").env("OMP_THREAD_LIMIT","1")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
@@ -88,6 +89,15 @@ async fn extract(slots:Arc<Semaphore>,req:Request,kind:Kind)->Response{
         },
         Some(_)=>return failure(StatusCode::BAD_REQUEST,"INVALID_PDF_PAGE_BOUND")
     };
+    let range=match req.headers().get("x-firecrawl-page-range"){
+        None=>None,
+        Some(value) if matches!(kind,Kind::Pdf)&&max_pages.is_none()&&req.headers().get_all("x-firecrawl-page-range").iter().count()==1=>{
+            match value.to_str().ok().and_then(PageRange::parse){
+                Some(r)=>Some(r),None=>return failure(StatusCode::BAD_REQUEST,"INVALID_PDF_PAGE_RANGE")
+            }
+        },
+        Some(_)=>return failure(StatusCode::BAD_REQUEST,"INVALID_PDF_PAGE_RANGE")
+    };
     let Ok(permit)=slots.try_acquire_owned()else{
         return failure(StatusCode::TOO_MANY_REQUESTS,"OCR_BUSY");
     };
@@ -100,7 +110,7 @@ async fn extract(slots:Arc<Semaphore>,req:Request,kind:Kind)->Response{
     // The bounded task owns the permit even if the HTTP caller disconnects.
     let result=tokio::spawn(async move{
         let _permit=permit;
-        worker(&pdf,kind,max_pages).await
+        worker(&pdf,kind,max_pages,range).await
     }).await;
     match result{
         Ok(Ok(value))=>Json(value).into_response(),
