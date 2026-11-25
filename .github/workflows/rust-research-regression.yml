@@ -141,7 +141,7 @@ jobs:
             --entrypoint sh firecrawl-rust-ocr-ci:review -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_JOB_DB_FILE=/tmp/jobs.sqlite CANDIDATE_NETWORK_MODE=internal-api; exec /usr/local/bin/candidate-main')
           docker network connect bridge "$cid"
           docker start "$cid" >/dev/null
-          timeout 15s docker exec "$cid" python3 -B -c 'import time,urllib.request; r=urllib.request.Request("http://127.0.0.1:3002/health",headers={"Authorization":"Bearer synthetic-ci-token-not-a-real-secret-0123456789"}); exec("for i in range(50):\\n try:\\n  assert urllib.request.urlopen(r,timeout=1).status==200; break\\n except OSError: time.sleep(.1)\\nelse: raise RuntimeError(\\"candidate not ready\\")")'
+          timeout 15s docker exec "$cid" python3 -B -c 'import time,urllib.request; r=urllib.request.Request("http://127.0.0.1:3002/health",headers={"Authorization":"Bearer synthetic-ci-token-not-a-real-secret-0123456789"}); exec("for i in range(50):\n try:\n  assert urllib.request.urlopen(r,timeout=1).status==200; break\n except OSError: time.sleep(.1)\nelse: raise RuntimeError(\"candidate not ready\")")'
           timeout 210s docker run --rm --pull=never --network "$net" --read-only \
             --cap-drop ALL --security-opt no-new-privileges \
             --memory 512m --memory-swap 512m --pids-limit 64 --cpus 2 \
