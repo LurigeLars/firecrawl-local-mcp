@@ -118,8 +118,16 @@ fn value_matches(schema:&Value,value:&Value)->bool{
     let Some(kinds)=types(schema)else{return false;};
     if !kinds.iter().any(|t|kind_matches(t,value)){return false;}
     if let Some(enums)=schema.get("enum").and_then(Value::as_array){
-        if !enums.iter().any(|v|v==value||
-            (v.is_number()&&value.is_number()&&v.as_f64()==value.as_f64())){return false;}
+        // Exact JSON equality is preferred. Only permit integer/float
+        // equivalence within the IEEE-754 safe-integer interval; never
+        // collapse two different large integers through an f64 conversion.
+        if !enums.iter().any(|v|v==value||{
+            let safe=9_007_199_254_740_991.0;
+            match (v.as_f64(),value.as_f64()){
+                (Some(a),Some(b))=>a.abs()<=safe&&b.abs()<=safe&&a==b,
+                _=>false
+            }
+        }){return false;}
     }
     if let Some(obj)=value.as_object(){
         let Some(props)=schema.get("properties").and_then(Value::as_object)else{return false;};

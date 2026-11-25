@@ -793,7 +793,7 @@ mod tests {
         for input in [
             json!({"query":"test","limit":6,"scrapeOptions":{}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"url":"https://example.org/"}}),
-            json!({"query":"test","limit":1,"scrapeOptions":{"formats":["summary"]}}),
+            json!({"query":"test","limit":1,"scrapeOptions":{"formats":["summary","markdown"]}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"maxAge":1}}),
             json!({"query":"test","limit":1,"scrapeOptions":{"waitFor":1}}),
             json!({"query":"test","limit":1,"scrapeOptions":null})
