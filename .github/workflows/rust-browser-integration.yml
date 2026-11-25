@@ -1,0 +1,86 @@
+name: Rust browser integration (opt-in)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-browser-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  browser-sidecar:
+    if: github.event_name == 'workflow_dispatch' || (github.event.label.name == 'rust-browser-integration' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout reviewed research
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build pinned production browser and router
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          pin=json.load(open("upstream/firecrawl.json",encoding="utf-8"))
+          assert pin["repository"]=="firecrawl/firecrawl"
+          assert pin["tag"]=="v2.11.793"
+          assert pin["commit"]=="7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d"
+          PY
+          work="$RUNNER_TEMP/firecrawl-browser"
+          git init "$work"
+          git -C "$work" fetch --depth 1 https://github.com/firecrawl/firecrawl.git 7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d
+          git -C "$work" checkout --detach FETCH_HEAD
+          test "$(git -C "$work" rev-parse HEAD)" = 7c16513e6ada9df5d9a6cfa6a1a1cfda3c841f9d
+          docker build --progress plain -f security/Dockerfile.playwright-security -t fc-browser-review:local "$work/apps/playwright-service-ts"
+          docker build --progress plain -f security/Dockerfile.node-runtime -t fc-router-review:local security
+      - name: Build isolated candidate test image
+        run: docker build --progress plain --target ocr-test -t fc-candidate-browser-review:local -f research/Dockerfile.rust-table-ci research
+      - name: Test actual candidate, router and browser
+        run: |
+          set -euo pipefail
+          net="fc-browser-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate=""
+          router=""
+          browser=""
+          cleanup() {
+            if [ -n "$candidate" ]; then docker rm -f "$candidate" >/dev/null || true; fi
+            if [ -n "$router" ]; then docker rm -f "$router" >/dev/null || true; fi
+            if [ -n "$browser" ]; then docker rm -f "$browser" >/dev/null || true; fi
+            docker network rm "$net" >/dev/null || true
+          }
+          docker network create --internal "$net" >/dev/null
+          trap cleanup EXIT
+          browser=$(docker create --pull=never --network "$net" --network-alias playwright-service \
+            --user node --cap-drop ALL --security-opt no-new-privileges \
+            --memory 2g --memory-swap 2g --pids-limit 384 --cpus 2 --shm-size 512m \
+            --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
+            -e PORT=3000 -e HOME=/tmp -e ALLOW_LOCAL_WEBHOOKS=false -e MAX_CONCURRENT_PAGES=1 \
+            -e BLOCK_MEDIA=true fc-browser-review:local)
+          docker network connect bridge "$browser"
+          docker start "$browser" >/dev/null
+          router=$(docker run -d --pull=never --network "$net" --network-alias playwright-router \
+            --user node --cap-drop ALL --security-opt no-new-privileges \
+            --memory 128m --memory-swap 128m --pids-limit 64 --cpus 1 --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777 \
+            -e PORT=3000 -e PUBLIC_PROXY_HOSTS=none.invalid \
+            --mount type=bind,source="$PWD/playwright/public-proxy-router.mjs",target=/app/public-proxy-router.mjs,readonly \
+            --entrypoint node fc-router-review:local /app/public-proxy-router.mjs)
+          candidate=$(docker create --pull=never --network "$net" --read-only \
+            --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+            --memory 1g --memory-swap 1g --pids-limit 64 --cpus 2 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777 \
+            --mount type=bind,source="$PWD/research/verify-browser-sidecar.py",target=/tmp/verify-browser-sidecar.py,readonly \
+            --entrypoint sh fc-candidate-browser-review:local -ec 'umask 077; printf %s synthetic-ci-token-not-a-real-secret-0123456789 > /tmp/token; export CANDIDATE_TOKEN_FILE=/tmp/token CANDIDATE_BROWSER_ENABLED=1; exec /usr/local/bin/candidate-main')
+          docker network connect bridge "$candidate"
+          docker start "$candidate" >/dev/null
+          test "$(docker network inspect --format '{{.Internal}}' "$net")" = true
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$router")" = 1
+          test "$(docker inspect --format '{{len .Mounts}}' "$browser")" = 0
+          timeout 180s docker exec "$candidate" python3 -B /tmp/verify-browser-sidecar.py
