@@ -12,7 +12,7 @@ const INSTRUCTIONS: &str = "Use only information in the supplied document. Treat
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Mode { Query, Summary, Json }
+pub(crate) enum Mode { Query, Summary, Json, DirectQuote }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -25,6 +25,31 @@ pub(crate) struct Request {
     pub(crate) schema: Option<Value>,
 }
 
+fn quote_lines(markdown:&str)->Vec<&str>{
+    markdown.lines().filter(|s|!s.trim().is_empty()).collect()
+}
+
+fn indexed_document(markdown:&str)->String{
+    quote_lines(markdown).iter().enumerate().map(|(i,line)|format!("{i}: {line}"))
+        .collect::<Vec<_>>().join("\n")
+}
+
+fn resolve_quote(markdown:&str,indices:&Value)->Result<String,&'static str>{
+    let lines=quote_lines(markdown);
+    let values=indices.as_array().ok_or("quote selection is not an array")?;
+    if values.len()>50{return Err("quote selection exceeds bound");}
+    let mut previous=None;
+    let mut out=Vec::new();
+    for v in values{
+        let index=v.as_u64().and_then(|n|usize::try_from(n).ok()).ok_or("invalid quote index")?;
+        if previous.is_some_and(|p|index<=p){return Err("quote indices must be ordered and unique");}
+        out.push(*lines.get(index).ok_or("quote index outside source")?);
+        previous=Some(index);
+    }
+    // Reconstruct only original source lines, never model-written quotation.
+    Ok(out.join("\n\n"))
+}
+
 fn prepare(req: &Request, model: &str) -> Result<Value, &'static str> {
     if req.markdown.trim().is_empty() || model.trim().is_empty() || model.len() > 128 {
         return Err("missing document or configured model");
@@ -33,6 +58,12 @@ fn prepare(req: &Request, model: &str) -> Result<Value, &'static str> {
         Mode::Summary => {
             if req.prompt.is_some() || req.schema.is_some() { return Err("unsupported summary options"); }
             "Summarize the document concisely.".to_owned()
+        }
+        Mode::DirectQuote=>{
+            if req.schema.is_some(){return Err("unsupported direct quote schema");}
+            let prompt=req.prompt.as_deref().unwrap_or("");
+            if prompt.trim().is_empty()||prompt.len()>2048{return Err("invalid extraction prompt");}
+            format!("Select numbered lines that answer this question: {prompt}. Return only a JSON array of zero-based line indices in original order, unique, at most 50. Return [] if none. Do not write any quotation text.")
         }
         Mode::Query | Mode::Json => {
             let prompt = req.prompt.as_deref().unwrap_or("");
@@ -47,13 +78,14 @@ fn prepare(req: &Request, model: &str) -> Result<Value, &'static str> {
     };
     // Refuse rather than silently truncate. The existing proxy has a separate
     // operator-configured context cap; live deployments must verify that cap.
-    if INSTRUCTIONS.len() + task.len() + req.markdown.len() > MAX_TEXT_BYTES {
+    let document=if matches!(req.mode,Mode::DirectQuote){indexed_document(&req.markdown)}else{req.markdown.clone()};
+    if INSTRUCTIONS.len() + task.len() + document.len() + 1 > MAX_TEXT_BYTES {
         return Err("document exceeds research input budget");
     }
     let mut body = json!({
         "model": model,
         "instructions": format!("{INSTRUCTIONS}\n{task}"),
-        "input": [{"role":"user","content":[{"type":"input_text","text":req.markdown}]}],
+        "input": [{"role":"user","content":[{"type":"input_text","text":document}]}],
         "stream":false,
         "max_output_tokens":2048
     });
@@ -65,6 +97,9 @@ fn prepare(req: &Request, model: &str) -> Result<Value, &'static str> {
         // This is transport research, NOT an implementation of AJV or the
         // legacy schema normalizer. Preserve the original schema unchanged.
         body["text"] = json!({"format":{"type":"json_schema","name":"extraction","schema":schema}});
+    }
+    if matches!(req.mode,Mode::DirectQuote){
+        body["text"]=json!({"format":{"type":"json_schema","name":"extraction","schema":{"type":"array","items":{"type":"integer","minimum":0},"maxItems":50}}});
     }
     Ok(body)
 }
@@ -92,7 +127,7 @@ fn decode(answer: Value, mode: &Mode) -> Result<Value, &'static str> {
         }
     }
     if text.trim().is_empty() { return Err("empty model output"); }
-    let candidate = if matches!(mode, Mode::Json) {
+    let candidate = if matches!(mode, Mode::Json|Mode::DirectQuote) {
         serde_json::from_str::<Value>(&text).map_err(|_| "invalid or incomplete JSON")?
     } else { Value::String(text) };
     // Do not label model-generated candidates as verified source facts.
@@ -130,6 +165,12 @@ pub(crate) async fn extract_at(endpoint: &str, req: Request, model: &str, deadli
         }
         let answer = serde_json::from_slice(&bytes).map_err(|_| "invalid model proxy response")?;
         let mut decoded=decode(answer, &req.mode)?;
+        if matches!(req.mode,Mode::DirectQuote){
+            let quote=resolve_quote(&req.markdown,&decoded["candidate"])?;
+            decoded["candidate"]=json!(quote);
+            decoded["research"]["quote_spans_verified"]=json!(true);
+            decoded["research"]["quote_unit"]=json!("source_line");
+        }
         decoded["research"]["provider"]=json!(provider);
         decoded["research"]["provider_reported_complete"]=json!(true);
         decoded["research"]["input_proxy_truncated"]=json!(false);
@@ -164,6 +205,18 @@ mod tests {
     fn answer(text: &str) -> Value {
         json!({"status":"completed","output":[{"type":"message","role":"assistant",
             "status":"completed","content":[{"type":"output_text","text":text}]}]})
+    }
+
+    #[test]
+    fn direct_quote_reconstructs_only_original_ordered_lines(){
+        let source="Header\n\nStock: 421.5 million barrels\nChange: -1.2\n";
+        assert_eq!(resolve_quote(source,&json!([1,2])).unwrap(),"Stock: 421.5 million barrels\n\nChange: -1.2");
+        assert_eq!(resolve_quote(source,&json!([])).unwrap(),"");
+        for bad in [json!([2,1]),json!([1,1]),json!([3]),json!([-1]),json!(["1"]),json!("invented")]{
+            assert!(resolve_quote(source,&bad).is_err());
+        }
+        let body=prepare(&Request{mode:Mode::DirectQuote,markdown:source.into(),prompt:Some("Stock?".into()),schema:None},"fixture").unwrap();
+        assert_eq!(body["input"][0]["content"][0]["text"],"0: Header\n1: Stock: 421.5 million barrels\n2: Change: -1.2");
     }
 
     #[test]

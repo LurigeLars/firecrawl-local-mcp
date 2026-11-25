@@ -18,6 +18,7 @@ RUN test "$(grep -c '^fn process_html(' src/scrape.rs)" = 1 \
     && sed -i '/^\[dependencies\]$/a firecrawl-job-store-research = { path = "/tmp/job-store" }' Cargo.toml \
     && sed 's/use firecrawl_local::/use crate::/' /tmp/local-search-probe.rs > src/local-search-probe.rs \
     && sed 's/use firecrawl_local::/use crate::/' /tmp/local-render-probe.rs > src/local-render-probe.rs \
+    && cp /tmp/local-model-probe.rs src/local-model-probe.rs \
     && printf '\n#[path = "candidate-api.rs"]\nmod candidate_api;\npub use candidate_api::run_candidate;\n' >> src/serve.rs
 # Debug profile without debug symbols shares dependencies across tests and probe,
 # avoiding the release profile's expensive fat LTO for a correctness-only job.

@@ -23,6 +23,8 @@ mod crawl;
 mod pdf;
 #[path = "candidate-map.rs"]
 mod map;
+#[path = "local-model-probe.rs"]
+mod model;
 
 const MAX_OUTPUT: usize = 2 * 1024 * 1024;
 const SEARCH: &str = "http://searxng-proxy:8081/search";
@@ -37,29 +39,31 @@ struct CandidateState {
     batch: Option<batch::BatchState>,
     crawler: crawl::Crawler,
     pdf_enabled: bool,
+    model_name: Option<String>,
+    model_slot: Arc<Semaphore>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct StaticRequest {
     url: String,
-    #[serde(default="default_formats")]
-    formats: Vec<String>,
+    #[serde(default="default_static_formats")]
+    formats: Vec<Value>,
     #[serde(default="default_main")]
     only_main_content: bool,
     #[serde(default)]
     max_age: u64,
     #[serde(default)]
     store_in_cache: bool,
-    #[serde(default="default_timeout")]
-    timeout: u64,
+    #[serde(default)]
+    timeout: Option<u64>,
     #[serde(default)]
     origin: Option<String>,
 }
 
 fn default_formats()->Vec<String>{vec!["markdown".into()]}
 fn default_main()->bool{true}
-fn default_timeout()->u64{30000}
+fn default_static_formats()->Vec<Value>{vec![json!("markdown")]}
 
 fn refusal(status: StatusCode, code: &str) -> Response {
     error_response(status,code,"Request outside the supported research contract.")
@@ -80,12 +84,53 @@ fn bounded(value: Value) -> Response {
     }
 }
 
+fn valid_common(req:&StaticRequest)->bool{
+    req.max_age==0&&!req.store_in_cache&&
+        req.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))
+}
+
 fn valid_static(req:&StaticRequest) -> bool {
-    !req.formats.is_empty() && req.formats.len()<=4 &&
-        req.formats.iter().all(|s|matches!(s.as_str(),"markdown"|"html"|"rawHtml"|"links")) &&
-        req.formats.iter().collect::<std::collections::HashSet<_>>().len()==req.formats.len() &&
-        req.max_age==0 && !req.store_in_cache && (1..=45000).contains(&req.timeout) &&
-        req.origin.as_ref().is_none_or(|s| !s.is_empty() && s.len()<=256 && !s.chars().any(char::is_control))
+    valid_common(req)&&!req.formats.is_empty()&&req.formats.len()<=4&&
+        req.formats.iter().all(|s|matches!(s.as_str(),Some("markdown"|"html"|"rawHtml"|"links")))&&
+        req.formats.iter().filter_map(Value::as_str).collect::<std::collections::HashSet<_>>().len()==req.formats.len()&&
+        (1..=45000).contains(&req.timeout.unwrap_or(30000))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryFormat{
+    #[serde(rename="type")] kind:String,
+    prompt:String,
+    mode:String,
+}
+
+fn model_format(req:&StaticRequest)->Option<(model::Mode,Option<String>)>{
+    if !valid_common(req)||req.formats.len()!=1||!(1..=180000).contains(&req.timeout.unwrap_or(180000)){return None;}
+    let f=&req.formats[0];
+    if f=="summary"{return Some((model::Mode::Summary,None));}
+    let q:QueryFormat=serde_json::from_value(f.clone()).ok()?;
+    if q.kind!="query"||q.prompt.trim().is_empty()||q.prompt.len()>2048{return None;}
+    let mode=match q.mode.as_str(){"freeform"=>model::Mode::Query,"directQuote"=>model::Mode::DirectQuote,_=>return None};
+    Some((mode,Some(q.prompt)))
+}
+
+async fn add_model_result(data:&mut Value,mode:model::Mode,prompt:Option<String>,endpoint:&str,
+    model_name:&str,budget:Duration)->Result<(),StatusCode>{
+    let markdown=data["markdown"].as_str().ok_or(StatusCode::BAD_GATEWAY)?.to_owned();
+    let key=if matches!(mode,model::Mode::Summary){"summary"}else{"answer"};
+    let direct=matches!(mode,model::Mode::DirectQuote);
+    let result=model::extract_at(endpoint,model::Request{mode,markdown,prompt,schema:None},
+        model_name,budget).await.map_err(|_|StatusCode::BAD_GATEWAY)?;
+    let value=result["candidate"].as_str().ok_or(StatusCode::BAD_GATEWAY)?;
+    data[key]=json!(value);
+    data["researchModel"]=result["research"].clone();
+    data["warning"]=json!(if direct{
+        "Selected original Markdown lines; quotation text is source-matched, but relevance and page completeness are unverified."
+    }else{
+        "Model-generated extraction; source facts and completeness are not independently verified."
+    });
+    data.as_object_mut().ok_or(StatusCode::BAD_GATEWAY)?.remove("markdown");
+    Ok(())
 }
 
 fn static_target(raw:&str)->Result<url::Url,StatusCode>{
@@ -98,20 +143,35 @@ fn static_target(raw:&str)->Result<url::Url,StatusCode>{
 
 async fn static_scrape(State(state):State<CandidateState>,headers:HeaderMap,body:Bytes)->Response {
     let req:StaticRequest=match decode(&headers,&body) { Ok(v)=>v,Err(r)=>return r };
-    if !valid_static(&req) { return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS"); }
+    let model_req=model_format(&req);
+    if !valid_static(&req)&&model_req.is_none(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_OPTIONS");}
     let target=match static_target(&req.url) {
         Ok(u)=>u,Err(status)=>return refusal(status,"DESTINATION_DENIED")
     };
     let Ok(_slot)=state.slots.try_acquire() else {
         return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY");
     };
-    let mut formats:Vec<Value>=req.formats.iter().map(|s|json!(s)).collect();
+    if let Some((mode,prompt))=model_req{
+        let Some(name)=state.model_name.as_deref()else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"MODEL_DISABLED")};
+        let Ok(_model_slot)=state.model_slot.try_acquire()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"MODEL_BUSY")};
+        let deadline=tokio::time::Instant::now()+Duration::from_millis(req.timeout.unwrap_or(180000));
+        let mut data=match static_document_with_options(&state,target,ScrapeOptions{
+            timeout:Some(req.timeout.unwrap_or(180000).min(45000)),only_main_content:req.only_main_content,..Default::default()
+        }).await{Ok(data)=>data,Err(status)=>return refusal(status,"STATIC_SCRAPE_FAILED")};
+        let remaining=deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero(){return refusal(StatusCode::GATEWAY_TIMEOUT,"MODEL_DEADLINE");}
+        if let Err(status)=add_model_result(&mut data,mode,prompt,model::ENDPOINT,name,remaining).await{
+            return refusal(status,"MODEL_EXTRACTION_FAILED");
+        }
+        return bounded(json!({"success":true,"data":data,"research":{"cache_used":false,"cache_supported":false}}));
+    }
+    let mut formats=req.formats.clone();
     // Markdown is used internally for block/empty-content detection even if
     // the client requests only HTML or links. Do not return extra fields.
     let wants_markdown=req.formats.iter().any(|s|s=="markdown");
     if !wants_markdown{formats.push(json!("markdown"));}
     let opts=ScrapeOptions{formats,only_main_content:req.only_main_content,
-        timeout:Some(req.timeout),..Default::default()};
+        timeout:Some(req.timeout.unwrap_or(30000)),..Default::default()};
     match static_document_with_options(&state,target,opts).await {
         Ok(mut data)=>{
             if !wants_markdown{data.as_object_mut().unwrap().remove("markdown");}
@@ -173,10 +233,11 @@ async fn render_route(State(state):State<CandidateState>,headers:HeaderMap,body:
     }
 }
 
-fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>,pdf_enabled:bool)->Result<(Router,CandidateState),String> {
+fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Option<batch::BatchState>,pdf_enabled:bool,model_name:Option<String>)->Result<(Router,CandidateState),String> {
     if !(32..=256).contains(&token.len()) || token.chars().any(|c|c.is_control()||c.is_whitespace()) {
         return Err("invalid candidate token".into());
     }
+    if model_name.as_ref().is_some_and(|s|s.trim().is_empty()||s.len()>128||s.chars().any(char::is_control)){return Err("invalid operator model name".into());}
     let engine=Arc::new(Engine::new(EngineConfig{policy:NetworkPolicy::PublicOnly,
         user_agent:None,browser:BrowserMode::Never})?.require_html_only());
     // Even an accidental cloud invocation cannot contact a provider.
@@ -186,7 +247,7 @@ fn router(token:String, search_endpoint:String, render_endpoint:String,batch:Opt
         jobs:Mutex::new(HashMap::new())
     });
     let state=CandidateState{auth:auth.clone(),slots:Arc::new(Semaphore::new(4)),
-        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled};
+        search_endpoint,render_endpoint,batch,crawler:crawl::Crawler::new()?,pdf_enabled,model_name,model_slot:Arc::new(Semaphore::new(1))};
     let app=Router::new()
         .route("/health",get(|State(state):State<CandidateState>|async move{
             let job_store=match &state.batch{None=>"disabled",Some(b) if b.ready()=>"ready",Some(_)=>"degraded"};
@@ -215,7 +276,8 @@ pub async fn run_candidate()->Result<(),String> {
     let token=std::fs::read_to_string(path).map_err(|_|"candidate token file unavailable".to_string())?;
     let batch=std::env::var_os("CANDIDATE_JOB_DB_FILE").map(|path|batch::BatchState::open(std::path::Path::new(&path))).transpose()?;
     let pdf_enabled=std::env::var("CANDIDATE_PDF_ENABLED").as_deref()==Ok("1");
-    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch,pdf_enabled)?;
+    let model_name=std::env::var("CANDIDATE_MODEL_NAME").ok();
+    let (app,state)=router(token.trim().to_string(),SEARCH.into(),RENDER.into(),batch,pdf_enabled,model_name)?;
     let listener=tokio::net::TcpListener::bind("127.0.0.1:3002").await.map_err(|e|e.to_string())?;
     let worker=state.batch.is_some().then(||tokio::spawn(batch::supervise(state)));
     let result=axum::serve(listener,app).with_graceful_shutdown(super::shutdown_signal()).await.map_err(|e|e.to_string());
@@ -241,7 +303,7 @@ mod tests {
         })).unwrap();
         assert!(valid_static(&minimal));
         assert!(minimal.only_main_content);
-        assert_eq!(minimal.timeout,30000);
+        assert_eq!(minimal.timeout.unwrap_or(30000),30000);
         let full:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
             "formats":["html","rawHtml","links"],"onlyMainContent":false})).unwrap();
         assert!(valid_static(&full));
@@ -256,6 +318,28 @@ mod tests {
         }
         assert!(serde_json::from_value::<StaticRequest>(json!({"url":"https://example.org/",
             "headers":{"Cookie":"synthetic"}})).is_err());
+    }
+
+    #[tokio::test]
+    async fn captured_model_format_and_strict_quote_result(){
+        let req:StaticRequest=serde_json::from_value(json!({"url":"https://example.org/",
+            "formats":[{"type":"query","prompt":"Quote the value","mode":"directQuote"}],
+            "origin":"mcp-candidate-contract@3.40.0"})).unwrap();
+        let (mode,prompt)=model_format(&req).unwrap();
+        let (base,task)=spawn(Router::new().route("/v1/responses",post(|Json(body):Json<Value>|async move{
+            assert_eq!(body["input"][0]["content"][0]["text"],"0: Header\n1: Stock 421.5");
+            ([("x-firecrawl-model-contract","strict-v1"),("x-firecrawl-input-trimmed","false"),
+                ("x-firecrawl-model-provider","gemini")],
+                Json(json!({"status":"completed","output":[{"type":"message","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"[1]"}]}]})))
+        }))).await;
+        let mut data=json!({"markdown":"Header\nStock 421.5","metadata":{"url":"https://example.org/"}});
+        add_model_result(&mut data,mode,prompt,&format!("{base}/v1/responses"),"fixture",Duration::from_secs(3)).await.unwrap();
+        assert_eq!(data["answer"],"Stock 421.5");
+        assert_eq!(data["researchModel"]["quote_spans_verified"],true);
+        assert!(data.get("markdown").is_none());
+        assert!(data["warning"].is_string());
+        task.abort();
     }
 
     #[tokio::test]
@@ -288,7 +372,7 @@ mod tests {
                 Json(json!({"content":"<html><body><p>Stock 421.5</p></body></html>",
                     "pageStatusCode":200,"contentType":"text/html","url":body["url"]}))
             }))).await;
-        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape"),None,false).unwrap().0).await;
+        let (base,server)=spawn(router(TOKEN.into(),format!("{backend}/search"),format!("{backend}/scrape"),None,false,None).unwrap().0).await;
         let c=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
         assert_eq!(c.get(format!("{base}/health")).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
         assert_eq!(c.get(format!("{base}/health")).bearer_auth(TOKEN).header("Host","bad.example").send().await.unwrap().status(),StatusCode::FORBIDDEN);
@@ -304,6 +388,7 @@ mod tests {
             "url":"https://127.0.0.1/","formats":["markdown"],"origin":"mcp-candidate-contract@3.40.0"
         })).send().await.unwrap();
         assert_eq!(denied.status(),StatusCode::FORBIDDEN);
+        assert_eq!(c.post(format!("{base}/v2/scrape")).bearer_auth(TOKEN).json(&json!({"url":"https://example.org/","formats":[{"type":"query","prompt":"Value?","mode":"freeform"}]})).send().await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
         let result:Value=c.post(format!("{base}/research/render")).bearer_auth(TOKEN)
             .json(&json!({"url":search["data"]["web"][0]["url"],"onlyMainContent":false}))
             .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
