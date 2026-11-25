@@ -190,7 +190,7 @@ async fn discover(crawler:&crawl::Crawler,req:&MapRequest,seed:&Url,policy:Optio
             "site_coverage_verified":false}}))
 }
 
-/// Called only by the seed worker while holding the shared serial lock.
+/// Called only by the seed worker while holding the shared domain lock.
 /// A missing/failed sitemap is reported explicitly; a successful seed page
 /// still contributes its HTML links. Never expand scope or bypass robots.
 pub(super) async fn crawl_sitemap(crawler:&crawl::Crawler,seed:&Url,policy:&crawl::Policy)->(Vec<String>,Value){
@@ -219,7 +219,7 @@ pub(super) async fn route(State(state):State<CandidateState>,headers:HeaderMap,b
     if !req.valid(){return refusal(StatusCode::BAD_REQUEST,"UNSUPPORTED_MAP_OPTIONS");}
     let seed=match crawl::seed(&req.url){Ok(v)=>v,Err(s)=>return refusal(s,"DESTINATION_DENIED")};
     let Ok(slot)=state.slots.clone().try_acquire_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CANDIDATE_BUSY")};
-    let Ok(serial)=state.crawler.serial.clone().try_lock_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CRAWLER_BUSY")};
+    let Ok(serial)=state.crawler.domain_lock(&seed).try_lock_owned()else{return refusal(StatusCode::TOO_MANY_REQUESTS,"CRAWLER_BUSY")};
     // Retain both guards in the bounded task if the HTTP caller disconnects.
     let result=tokio::spawn(async move{
         let _slot=slot;

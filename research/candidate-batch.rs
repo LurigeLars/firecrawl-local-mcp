@@ -66,7 +66,7 @@ pub(super) async fn create(State(state):State<CandidateState>,headers:HeaderMap,
     let store_id=id.clone();
     match batch.call(move|store|store.create(&store_id,&urls)).await {
         Ok(())=>{
-            batch.notify.notify_one();
+            batch.notify.notify_waiters();
             (StatusCode::ACCEPTED,Json(json!({"success":true,"id":id,"url":format!("/research/batch/{id}")}))).into_response()
         }
         Err(e)=>store_refusal(e)
@@ -89,7 +89,7 @@ pub(super) async fn create_crawl(State(state):State<CandidateState>,headers:Head
     let store_id=id.clone();
     match batch.call(move|store|store.create_crawl(&store_id,&seed,req.limit,req.max_discovery_depth)).await {
         Ok(())=>{
-            batch.notify.notify_one();
+            batch.notify.notify_waiters();
             (StatusCode::ACCEPTED,Json(json!({"success":true,"id":id,"url":format!("/research/batch/{id}")}))).into_response()
         }
         Err(e)=>store_refusal(e)
@@ -97,7 +97,7 @@ pub(super) async fn create_crawl(State(state):State<CandidateState>,headers:Head
 }
 
 // Bounded v2-compatible subset. Default include uses the same guarded
-// sitemap discovery as map; one worker and same-origin scope remain explicit.
+// sitemap discovery as map; bounded workers and same-origin scope remain explicit.
 #[derive(Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct V2CrawlRequest{
@@ -128,7 +128,7 @@ fn default_sitemap()->String{"include".into()}
 
 impl V2CrawlRequest{
     fn valid(&self)->bool{
-        (1..=100).contains(&self.limit)&&self.max_concurrency==1&&self.max_discovery_depth<=10&&
+        (1..=100).contains(&self.limit)&&(1..=4).contains(&self.max_concurrency)&&self.max_discovery_depth<=10&&
         matches!(self.sitemap.as_str(),"include"|"skip")&&self.origin.as_ref().is_none_or(|s|!s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control))&&
         self.delay.is_none_or(|d|d.is_finite()&&(0.0..=10.0).contains(&d))&&
         self.scrape_options.as_ref().is_none_or(|s|s.max_age==0&&!s.store_in_cache)
@@ -159,14 +159,17 @@ pub(super) async fn create_v2_crawl(State(state):State<CandidateState>,headers:H
     let id=uuid::Uuid::new_v4().to_string();
     let store_id=id.clone();
     let include_sitemap=req.sitemap=="include";
-    match batch.call(move|store|store.create_crawl_configured(&store_id,&seed,req.limit,req.max_discovery_depth,include_sitemap,&policy)).await{
+    let max_concurrency=req.max_concurrency as u32;
+    match batch.call(move|store|store.create_crawl_parallel(&store_id,&seed,req.limit,req.max_discovery_depth,include_sitemap,&policy,max_concurrency)).await{
         Ok(())=>{
-            batch.notify.notify_one();
+            batch.notify.notify_waiters();
             // The candidate is loopback-only. Do not construct next URLs from
             // a caller-supplied Host or forwarded header.
             Json(json!({"success":true,"id":id,"url":format!("http://127.0.0.1:3002/v2/crawl/{id}"),
                 "warning":"Bounded local same-origin crawl; no cache; site coverage unverified. Sitemap scan is bounded and seed-dependent.",
-                "research":{"sitemap_mode":if include_sitemap{"include"}else{"skip"}}})).into_response()
+                "research":{"sitemap_mode":if include_sitemap{"include"}else{"skip"},
+                    "requested_max_concurrency":max_concurrency,"worker_concurrency_cap":max_concurrency.min(WORKERS as u32),
+                    "same_domain_network_concurrency":1}})).into_response()
         },
         Err(e)=>store_refusal(e)
     }
@@ -227,7 +230,12 @@ mod v2_tests{
         assert!(req.valid());assert_eq!(req.sitemap,"include");
         sitemap["sitemap"]=json!("only");
         assert!(!serde_json::from_value::<V2CrawlRequest>(sitemap).unwrap().valid());
-        let mut concurrency=base;concurrency["maxConcurrency"]=json!(2);
+        let mut concurrency=base;
+        for n in [2,3,4]{
+            concurrency["maxConcurrency"]=json!(n);
+            assert!(serde_json::from_value::<V2CrawlRequest>(concurrency.clone()).unwrap().valid());
+        }
+        concurrency["maxConcurrency"]=json!(5);
         assert!(!serde_json::from_value::<V2CrawlRequest>(concurrency).unwrap().valid());
     }
 
@@ -298,18 +306,26 @@ pub(super) async fn cancel(State(state):State<CandidateState>,Path(id):Path<Stri
     if uuid::Uuid::parse_str(&id).is_err(){return refusal(StatusCode::BAD_REQUEST,"INVALID_JOB_ID");}
     let Some(batch)=state.batch else{return refusal(StatusCode::SERVICE_UNAVAILABLE,"JOB_STORE_DISABLED")};
     match batch.call(move|store|store.cancel(&id)).await {
-        Ok(())=>Json(json!({"success":true,"status":"cancelled"})).into_response(),
+        Ok(())=>{batch.notify.notify_waiters();Json(json!({"success":true,"status":"cancelled"})).into_response()},
         Err(e)=>store_refusal(e)
     }
 }
 
+// Reserve at least one of the four candidate permits for foreground work.
+// This is an upper bound; per-domain pacing can reduce effective concurrency.
+const WORKERS:usize=3;
+
 async fn work(state:&CandidateState,batch:&BatchState)->Result<(),StoreError>{
     loop {
-        // One worker, sharing the same admission budget as synchronous calls.
+        // Register before checking SQLite so creation/settlement cannot lose
+        // a wakeup between an empty claim and the wait.
+        let notified=batch.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let slot=state.slots.acquire().await.map_err(|_|StoreError::Invalid("worker admission closed"))?;
         let Some(claim)=batch.call(|store|store.claim_next()).await? else {
             drop(slot);
-            batch.notify.notified().await;
+            notified.await;
             continue;
         };
         let result=if let Some(info)=claim.crawl(){
@@ -335,7 +351,7 @@ async fn work(state:&CandidateState,batch:&BatchState)->Result<(),StoreError>{
             }
         }).await;
         match result {
-            Ok(())|Err(StoreError::Invalid("terminal job"))=>{},
+            Ok(())|Err(StoreError::Invalid("terminal job"))=>{batch.notify.notify_waiters();},
             Err(e)=>return Err(e)
         }
     }
@@ -343,9 +359,16 @@ async fn work(state:&CandidateState,batch:&BatchState)->Result<(),StoreError>{
 
 pub(super) async fn supervise(state:CandidateState){
     if let Some(batch)=state.batch.clone(){
-        if work(&state,&batch).await.is_err(){
-            batch.ready.store(false,Ordering::Release);
-            eprintln!("research batch worker stopped; restart required");
+        let mut workers=tokio::task::JoinSet::new();
+        for _ in 0..WORKERS{
+            let state=state.clone();let batch=batch.clone();
+            workers.spawn(async move{work(&state,&batch).await});
         }
+        // No worker should exit under ordinary operation. Abort the group
+        // and expose degraded health; restart recovery fences old claims.
+        let _=workers.join_next().await;
+        batch.ready.store(false,Ordering::Release);
+        workers.shutdown().await;
+        eprintln!("research batch worker group stopped; restart required");
     }
 }
