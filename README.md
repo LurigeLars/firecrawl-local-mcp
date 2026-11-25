@@ -397,6 +397,8 @@ On `.\fc.ps1 up`, the host decrypts the DPAPI blob in memory and streams the key
 
 When the runtime secret is present, `llm-proxy` sends `/v1/responses` calls (query, json and summary all use them) to Gemini's OpenAI-compatible endpoint (`GEMINI_MODEL`, default `gemini-3.5-flash-lite`), with up to 60k characters of page text. Any Gemini failure (rate limit, quota, rejected schema, timeout) falls back to the local model; after a 429 Gemini is skipped for 60 s. Page text and prompts then go to Google. Setting Gemini through Firecrawl's own `GOOGLE_GENERATIVE_AI_API_KEY` does not work here because its query path uses a different provider/model flow. `docker logs firecrawl-llm-proxy-1` shows `gemini ok` or `gemini failed, using local model` without logging the API key.
 
+For usage accounting, the same Docker logs contain fixed-schema `llm_usage` JSON events: `provider`, `outcome`, `fallback`. Count `attempt` per provider; terminal outcomes distinguish completed/incomplete/failed Gemini responses, rate limits, and Ollama HTTP completion/errors/abort. A completed Ollama HTTP response does not certify the generated content. `fallback: true` means an attempted Gemini call failed before the Ollama generation attempt; direct local calls and skipped Gemini calls are not marked fallback. No prompts, URLs, model-supplied identifiers, response text, credentials or token counts are recorded in these usage events. Historical coverage is limited to retained Docker logs; a process interruption may leave attempts without terminal events. No new persistent store or exposed endpoint.
+
 Benchmark: `llm/run-benchmark.ps1` (switches `MODEL_NAME`, scores 4 pages against ground truth, restores the setting).
 
 ## Plugin (skills) for Claude Code, Codex and ChatGPT
