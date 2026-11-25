@@ -140,13 +140,15 @@ async fn render_checked_at(endpoint:&str,req:Request,budget:Duration,mut formats
     metadata.insert("sourceURL".into(),json!(target.as_str()));
     metadata.insert("statusCode".into(),json!(status));
     metadata.insert("contentType".into(),json!("text/html"));
+    // Legacy engine class, not a claim of direct routing. Keep actual route separately.
+    metadata.insert("proxyUsed".into(),json!("basic"));
     data.insert("metadata".into(),Value::Object(metadata));
     data.insert("source".into(),json!("local"));
     data.insert("researchSourceVerified".into(),json!(false));
-    Ok(json!({"data": data, "research": {
-        "landed_url": url, "target_status": status,
-        "router_path": route, "source_verified":false
-    }}))
+    let receipt=json!({"landed_url":url,"target_status":status,
+        "router_path":route,"source_verified":false,"automatic":automatic});
+    data.insert("researchBrowser".into(),receipt.clone());
+    Ok(json!({"data":data,"research":receipt}))
 }
 
 #[tokio::main]

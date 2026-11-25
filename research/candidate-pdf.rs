@@ -179,7 +179,7 @@ pub(super) async fn isolated_document(state:&CandidateState,target:&url::Url,bud
                 .map_err(|_|(StatusCode::GATEWAY_TIMEOUT,"OFFICE_WORKER_TIMEOUT"))?
                 .map_err(|s|(s,"OFFICE_WORKER_FAILED"))?;
             let markdown=receipt["markdown"].as_str().ok_or((StatusCode::BAD_GATEWAY,"OFFICE_WORKER_FAILED"))?;
-            Ok(json!({"markdown":markdown,"metadata":{"url":landed.as_str(),"sourceURL":target.as_str(),"statusCode":200},
+            Ok(json!({"markdown":markdown,"metadata":{"url":landed.as_str(),"sourceURL":target.as_str(),"statusCode":200,"proxyUsed":"basic"},
                 "source":"local","researchSourceVerified":false,"warning":"Office document parsed locally; layout, formulas and completeness are not independently verified.",
                 "researchDocument":{"parser":"upstream-anydoc","source_verified":false}}))
         }
@@ -206,7 +206,7 @@ pub(super) fn v2_document(target:&url::Url,landed:&url::Url,receipt:Value)->Resu
     };
     let warning=if total>pages.len() as u64{format!("{warning} Page limit applied: {} of {total} pages returned.",pages.len())}else{warning.to_string()};
     Ok(json!({"markdown":text,"metadata":{"url":landed.as_str(),"sourceURL":target.as_str(),
-        "statusCode":200,"contentType":"application/pdf","numPages":pages.len(),"totalPages":total},
+        "statusCode":200,"contentType":"application/pdf","numPages":pages.len(),"totalPages":total,"proxyUsed":"basic"},
         "source":"local","researchSourceVerified":false,"warning":warning,"researchPdf":receipt}))
 }
 
