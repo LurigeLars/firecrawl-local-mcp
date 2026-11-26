@@ -267,3 +267,6 @@ jobs:
       - name: Verify rollback reservation before builds
         shell: pwsh
         run: ./security/refresh-rollback.test.ps1
+      - name: Verify Camofox research refresh scope and readiness
+        shell: pwsh
+        run: ./security/refresh-camofox-research.test.ps1

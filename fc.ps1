@@ -1,6 +1,6 @@
 # Manage the local Firecrawl stack.  Usage: .\fc.ps1 up | redeploy | build-mcp | redeploy-mcp | sync-upstream | down | status | logs | test | url | recover | repair-postgres-auth | import-gemini
 # The public ChatGPT gateway (compose.public.yaml) is included when public/gateway.env exists; the shared tunnel is managed separately.
-param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'migrate-nuq-postgres', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini', 'rust-promote', 'rust-rollback', 'rust-deploy-document', 'rust-deploy-api')][string]$Action = 'status', [string]$Service = '', [string]$AcceptedRevision = '', [string]$ApiDigest = '', [string]$DocumentDigest = '', [string]$McpDigest = '')
+param([ValidateSet('refresh-redis', 'refresh-rabbitmq', 'refresh-searxng', 'refresh-search-proxy', 'refresh-gateway', 'refresh-playwright-router', 'refresh-llm-proxy', 'refresh-camofox-research', 'migrate-nuq-postgres', 'up', 'redeploy', 'build-mcp', 'redeploy-mcp', 'stage-api', 'deploy-api', 'maintain-stateless', 'stage-playwright', 'stage-browser', 'stage-proxy', 'deploy-playwright', 'deploy-browser', 'deploy-proxy', 'sync-upstream', 'down', 'status', 'logs', 'test', 'url', 'recover', 'repair-postgres-auth', 'import-gemini', 'rust-promote', 'rust-rollback', 'rust-deploy-document', 'rust-deploy-api')][string]$Action = 'status', [string]$Service = '', [string]$AcceptedRevision = '', [string]$ApiDigest = '', [string]$DocumentDigest = '', [string]$McpDigest = '', [string]$CamofoxDigest = '')
 
 $root = $PSScriptRoot
 # Stamped into image labels (compose x-image-revision) so Docker-MCP's audit can spot stale images.
@@ -14,6 +14,7 @@ $env:SOURCE_REVISION = if (-not (git -C $root status --porcelain 2>$null)) { git
 . (Join-Path $root "security\refresh-searxng.ps1")
 . (Join-Path $root "security\refresh-node-helpers.ps1")
 . (Join-Path $root "security\refresh-node-runtime.ps1")
+. (Join-Path $root "security\refresh-camofox-research.ps1")
 . (Join-Path $root "security\refresh-public-gateway.ps1")
 if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is required.' }
 
@@ -92,7 +93,7 @@ function Get-RustMaintenanceMode {
         throw 'Active Rust production identity unavailable; maintenance refused.'
     }
     $allowed = @('status','logs','url','recover','import-gemini','refresh-searxng','refresh-search-proxy',
-        'refresh-gateway','refresh-playwright-router','refresh-llm-proxy','build-mcp','redeploy-mcp',
+        'refresh-gateway','refresh-playwright-router','refresh-llm-proxy','refresh-camofox-research','build-mcp','redeploy-mcp',
         'stage-playwright','stage-browser','stage-proxy','deploy-playwright','deploy-browser','deploy-proxy','rust-deploy-document','rust-deploy-api')
     if ($ActionName -in $allowed) { return $true }
     if ($ActionName -eq 'maintain-stateless' -and $ServiceName -cin @('mcp','playwright-service','browser-session-service','playwright-public-proxy-service')) { return $true }
@@ -648,7 +649,7 @@ function Import-AvailableRuntimeSecrets {
     }
 }
 
-$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres", "rust-deploy-document", "rust-deploy-api")
+$composeActions = @("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "refresh-camofox-research", "up", "redeploy", "build-mcp", "redeploy-mcp", "stage-api", "deploy-api", "maintain-stateless", "stage-playwright", "stage-browser", "stage-proxy", "deploy-playwright", "deploy-browser", "deploy-proxy", "down", "status", "logs", "recover", "repair-postgres-auth", "import-gemini", "migrate-nuq-postgres", "rust-deploy-document", "rust-deploy-api")
 $postgresSecretWasSet = Test-Path Env:FIRECRAWL_POSTGRES_PASSWORD_SECRET
 $postgresSecretOriginal = if ($postgresSecretWasSet) { $env:FIRECRAWL_POSTGRES_PASSWORD_SECRET } else { $null }
 $searxngSecretWasSet = Test-Path Env:FIRECRAWL_SEARXNG_SECRET_SECRET
@@ -665,7 +666,7 @@ try {
     if ($TransitionAction -or $Action -in $composeActions) {
         # Only the public proxy deployment needs the existing DPAPI-backed
         # post_start hook; preserve all other reviewed secret boundaries.
-        if ($TransitionAction -or $Action -in @("deploy-proxy", "deploy-api", "refresh-searxng") -or $Action -eq "migrate-nuq-postgres" -or
+        if ($TransitionAction -or $Action -in @("deploy-proxy", "deploy-api", "refresh-searxng", "refresh-camofox-research") -or $Action -eq "migrate-nuq-postgres" -or
             ($Action -eq "maintain-stateless" -and $Service -in @("api", "playwright-public-proxy-service"))) {
             Set-RuntimeHookSecrets -UseRealSecrets $true
         } else {
@@ -744,6 +745,12 @@ switch ($Action) {
         Assert-UpstreamFirecrawlPin
         . (Join-Path $root 'research\rust-transition.ps1')
         Invoke-RustRuntimeUpdate -ComposeArguments $compose -ProjectRoot $root -Service api -Revision $AcceptedRevision -Digest $ApiDigest
+    }
+    'refresh-camofox-research' {
+        Assert-UpstreamFirecrawlPin
+        if (-not $PublicProxyConfigured) { throw 'Camofox public proxy profile is not enabled.' }
+        if (-not $env:SOURCE_REVISION -or $env:SOURCE_REVISION -cnotmatch '^[0-9a-f]{40}$') { throw 'A clean Firecrawl checkout is required.' }
+        Invoke-FirecrawlCamofoxRefresh -ComposeArguments $compose -ReviewedDigest $CamofoxDigest
     }
     'refresh-playwright-router' {
         Assert-UpstreamFirecrawlPin
