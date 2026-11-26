@@ -10,6 +10,8 @@ $script:Running = $Old
 $script:Busy = $false
 $script:Tag = ''
 $script:UpCount = 0
+$script:FailNextUp = $false
+$script:RollbackCount = 0
 $script:Calls = @()
 function docker {
     $global:LASTEXITCODE = 0
@@ -45,10 +47,20 @@ function docker {
         return @("firecrawl-api-1|$('3' * 64)", "firecrawl-camofox-research-1|$('1' * 64)", "firecrawl-camofox-research-proxy-1|$('2' * 64)")
     }
     if ($args[0] -eq 'compose') {
+        if ($args.Count -gt 3 -and $args[3] -eq '-f') {
+            if (($args[5..($args.Count-1)] -join ' ') -cne 'up -d --no-deps --no-build --pull never --force-recreate camofox-research camofox-research-proxy' -or
+                ((Get-Content -LiteralPath $args[4] -Raw) -notmatch [regex]::Escape($script:Tag))) {
+                throw 'Rollback scope or image mismatch.'
+            }
+            $script:RollbackCount++
+            $script:Running = $Old
+            return
+        }
         if (($args -join ' ') -cne 'compose -f fixture.yaml up -d --no-deps --no-build --pull never --force-recreate camofox-research camofox-research-proxy') {
             throw 'Unexpected Compose mutation scope.'
         }
         $script:UpCount++
+        if ($script:FailNextUp) { $script:FailNextUp=$false; $global:LASTEXITCODE=1; return }
         $script:Running = $Candidate
         return
     }
@@ -75,5 +87,25 @@ if ($script:UpCount -ne 1 -or $script:Running -cne $Candidate -or
 }
 if (@($script:Calls | Where-Object { $_ -match '^exec firecrawl-camofox-research-proxy-1 sh -ec .*proxy_username.*proxy_password' }).Count -lt 2) {
     throw 'Proxy secret readiness check was not exercised.'
+}
+# Exercise the exact rollback path in a synthetic local state directory.
+$Temp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+$OriginalLocalAppData = $env:LOCALAPPDATA
+$null = New-Item -ItemType Directory -Path (Join-Path $Temp 'FirecrawlLocal') -Force
+$env:LOCALAPPDATA = $Temp
+try {
+    $script:Running = $Old
+    $script:FailNextUp = $true
+    $script:RollbackCount = 0
+    $Rejected = $false
+    try { Invoke-FirecrawlCamofoxRefresh -ComposeArguments @('compose','-f','fixture.yaml') -ReviewedDigest $Candidate | Out-Null }
+    catch {
+        if ($_.Exception.Message -notlike '*baseline restored*') { throw }
+        $Rejected=$true
+    }
+    if (-not $Rejected -or $script:RollbackCount -ne 1 -or $script:Running -cne $Old) { throw 'Scoped rollback fixture failed.' }
+} finally {
+    $env:LOCALAPPDATA = $OriginalLocalAppData
+    Remove-Item -LiteralPath $Temp -Recurse -Force
 }
 Write-Output 'CAMOFOX_RESEARCH_REFRESH_FIXTURE_OK'
