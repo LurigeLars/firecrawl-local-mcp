@@ -364,7 +364,7 @@ test('Firecrawl cache refresh is scoped, while RabbitMQ 4.4 requires explicit st
 
 
 test('ephemeral service refresh receives only non-secret Compose parse placeholders', () => {
-  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "up", "redeploy"/);
+  assert.match(launcher, /\$composeActions = @\("refresh-redis", "refresh-rabbitmq", "refresh-searxng", "refresh-search-proxy", "refresh-gateway", "refresh-playwright-router", "refresh-llm-proxy", "refresh-camofox-research", "up", "redeploy"/);
   assert.match(launcher, /\$env:FIRECRAWL_POSTGRES_PASSWORD_SECRET = "compose-config-only"/);
   assert.match(launcher, /\$env:FIRECRAWL_SEARXNG_SECRET_SECRET = "compose-config-only"/);
   assert.match(launcher, /Set-RuntimeHookSecrets -UseRealSecrets \(\$Action -in @\("up", "redeploy"\)\)/);
@@ -374,7 +374,7 @@ test('ephemeral service refresh receives only non-secret Compose parse placehold
 test('SearXNG critical certifi remediation is one-service scoped and protected by runtime secrets', () => {
   const refresh = readFileSync(new URL('./refresh-searxng.ps1', import.meta.url), 'utf8');
   assert.match(launcher, /'refresh-searxng' \{\s*Assert-UpstreamFirecrawlPin\s*Invoke-FirecrawlSearchBackendRefresh/);
-  assert.match(launcher, /\$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng"\)/);
+  assert.match(launcher, /\$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng", "refresh-camofox-research"\)/);
   // The target is the exact versioned tag in Compose, pulled and then identified by image id.
   assert.match(refresh, /config --images \$Service/);
   assert.match(refresh, /Compose does not pin SearXNG to an exact versioned tag/);
@@ -445,5 +445,15 @@ test('last two stale Firecrawl Node 26.10 containers are upgraded individually',
 test('explicit Rust transitions use the existing real runtime secret hooks', () => {
   assert.match(launcher, /\$TransitionAction = \$Action -in @\('rust-promote','rust-rollback'\)/);
   assert.match(launcher, /if \(\$TransitionAction -or \$Action -in \$composeActions\)/);
-  assert.match(launcher, /if \(\$TransitionAction -or \$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng"\)/);
+  assert.match(launcher, /if \(\$TransitionAction -or \$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng", "refresh-camofox-research"\)/);
+});
+
+test('Camofox research refresh retains the real DPAPI hook and only recreates its two services', () => {
+  const refresh = readFileSync(new URL('./refresh-camofox-research.ps1', import.meta.url), 'utf8');
+  assert.match(launcher, /\$Action -in @\("deploy-proxy", "deploy-api", "refresh-searxng", "refresh-camofox-research"\)/);
+  assert.match(launcher, /'refresh-camofox-research' \{\s*Assert-UpstreamFirecrawlPin/);
+  assert.match(refresh, /\$Services = @\('camofox-research','camofox-research-proxy'\)/);
+  assert.match(refresh, /\$Up = @\('up','-d','--no-deps','--no-build','--pull','never','--force-recreate'\) \+ \$Services/);
+  assert.match(refresh, /proxy_username && test -s \/run\/firecrawl-proxy-secrets\/proxy_password/);
+  assert.doesNotMatch(refresh, /docker compose down|docker volume rm|--remove-orphans/);
 });
