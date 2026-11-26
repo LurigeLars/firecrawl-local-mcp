@@ -3,14 +3,6 @@ name: Rust research regression
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'research/**'
-      - 'playwright/public-proxy-router*'
-      - 'public/gateway/camofox-tools*'
-      - 'public/gateway/policy*'
-      - 'searxng/lang-proxy.mjs'
-      - 'llm/trim-proxy.mjs'
-      - '.github/workflows/rust-research-regression.yml'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +13,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # pull_request has no paths filter so that the required gate always reports; this job
+    # applies the same filter and the jobs below are skipped when nothing relevant changed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then echo run=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          # The PR merge commit: HEAD^1 is the base, so this diff is exactly the PR's changes.
+          if git diff --quiet HEAD^1 HEAD -- ':(glob)research/**' ':(glob)playwright/public-proxy-router*' ':(glob)public/gateway/camofox-tools*' ':(glob)public/gateway/policy*' ':(glob)searxng/lang-proxy.mjs' ':(glob)llm/trim-proxy.mjs' ':(glob).github/workflows/rust-research-regression.yml'; then
+            echo run=false >> "$GITHUB_OUTPUT"
+          else
+            echo run=true >> "$GITHUB_OUTPUT"
+          fi
+
   rust-table-fixture:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -289,6 +307,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   durable-job-store:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -301,3 +321,21 @@ jobs:
           rustc --version
           cargo test --locked --manifest-path research/job-store/Cargo.toml
           cargo tree --manifest-path research/job-store/Cargo.toml --locked
+
+  gate:
+    name: gate (rust-research-regression)
+    if: always()
+    needs: [changes, rust-table-fixture, durable-job-store]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed or be skipped by the path filter
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::A job in this workflow ended with: $result"; exit 1 ;;
+            esac
+          done
